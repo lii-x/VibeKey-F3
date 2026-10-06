@@ -1,0 +1,881 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>VibeKey-F3 — 语音输入 · 空中飞鼠 · 自定义快捷键 · Agent状态灯</title>
+<meta name="description" content="VibeKey-F3 顶三件随身 AI 效率小工具：自定义快捷键、语音输入、空中飞鼠、Agent 状态灯。双模蓝牙 5.3，三槽位独立配置，400mAh 长续航。">
+<meta name="keywords" content="VibeKey-F3,语音输入,空中飞鼠,自定义快捷键,AI键盘,蓝牙键盘,Agent状态灯,双模蓝牙">
+<meta property="og:title" content="VibeKey-F3 — AI时代新交互效率工具">
+<meta property="og:description" content="一颗顶三件。语音输入、空中飞鼠、自定义快捷键与 Agent 状态灯，全部装进 71.5×21×28mm 的机身。">
+<meta property="og:type" content="website">
+<meta property="og:image" content="web/assets/img/product.png">
+<link rel="icon" type="image/png" sizes="32x32" href="web/assets/img/favicon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="web/assets/img/favicon-16.png">
+<link rel="apple-touch-icon" href="web/assets/img/logo.png">
+<!-- 带 v= 版本号: GitHub Pages 对 CSS 设了 max-age=600(10 分钟缓存),
+     改动样式后若不加版本号, 浏览器会继续用旧缓存。改样式时同步递增此值即可立即生效。
+     v6: 修桌面端抽屉专用项漏显示(在线改键/GitHub 重复且被裁)。
+     v7: 修首屏动态背景"被拆一半"—— 底色渐变收到 hero 底边(原先62% 就变白,
+         浅蓝在中段就被齐齐切断, 像被切了一刀), 光斑层加纵向 mask 化掉裁切线,
+         三个光斑往画面内收, 紫色斑从 bottom:-210px 提到 -70px 完整露出。
+     v8: 「适用场景」改轮播(中间大图 + 两侧露边 + 圆点), 新增 4 张场景图。
+     v9: 收窄卡片组(原来 560+各露250 横铺近满屏 → 560+各露148),
+         侧卡只显示图片区(否则露出半截标题), 拖拽加限幅防"三卡散架"。
+     v10: 修侧卡"上方 2/3 空白乱套" —— 原来用 visibility:hidden 藏文字区,
+         它不占位, 媒体区被挤到第二行。改 display:none + grid-row:1。
+         手机端不做特殊版式, 删掉"文字在上图在下", 跟桌面端同结构等比缩小。
+     v11: 主卡人物显示不全 —— 图片区只占 44% 且 object-position 锚在 32%,
+         人的头被切在上边缘。改 52% 宽 + 锚点回落 50%(居中),
+         并把轮播框放宽到 1016px(主卡 620 + 两侧各露 ~150, 对标 Chatterfly 的
+         720 + 各露 170)。侧卡改为"完整一片图"(object-fit:cover 居中裁),
+         不再被压成窄条。
+     v12: 轮播三处修正 ——
+         ① 圆点: 选中项原来用 scaleX(3.25) 把 8px 圆横拉成椭圆, 改真改 width
+            (8→24px) + 负 margin 抵消重排, 得到"矩形条 + 正圆"。
+         ② 侧卡不露人: 图片区原来铺满整卡, cover 按整卡宽裁, 人物落在露边之外。
+            改为图片区宽度 = 露出宽(--vis)、并贴住露出端。
+         ③ 位移公式修正: translateX(-50%) 的百分比是相对**元素自身宽**,
+            历史值都多算了一个主卡半宽, 侧卡被推太远、露出宽高达 472px
+            (看着"太长")。统一按 T = --vis − W·sx/2 重算。
+            侧卡同时改成 scale(.76,.94), 横向多收纵向少收 → 竖着的图片块。
+     v13: 修侧卡"图片变形" —— v12 用 scale(.76, .94) 想把侧卡做成竖长块,
+         横向缩 76% / 纵向缩 94%, **两者不等**就把整张图硬压扁了
+         (人变宽、椅子变高)。改回**等比** scale(.85), 位移按 T = --vis − W·sx/2
+         重算; 侧卡媒体区宽度改 max(--vis / --sx × 1.04, 150px)
+         —— 必须反除缩放比, 且给下限保证窄屏档人物不被裁出容器。
+     v14: 导航栏改「顶部透明 / 滚动后毛玻璃」(对标 Chatterfly)——
+         .nav 由 sticky 改 fixed: sticky 始终占文档流里64px, 首屏顶部会留一条
+         空白带, 透明后反而像"上面缺了一块"。改 fixed 让导航真正浮在内容之上,
+         首屏动态背景能从 y=0 连续铺下来。
+         配套: ① 抽出 --nav-h 变量, .hero-in 的 padding-top 改成
+            calc(原间距 + var(--nav-h)) 补回导航让出的空间, 两处单列断点同步;
+         ② html 加 scroll-padding-top: var(--nav-h) —— fixed 之后锚点跳转
+            会被导航压住一截, 这一行让浏览器自动把目标算到导航下沿;
+         ③ .hero-aurora 顶部 mask 淡出点从 14% 收到 8%: 原来那段淡出区正好
+            盖住导航位置, 光斑透不到导航后面, 毛玻璃只能糊到纯色;
+         ④ 不支持 backdrop-filter 的老浏览器给一版更实的白底兜底;
+         ⑤ 手机端抽屉打开时(.nav:has(.nav-links.open))强制实底, 否则
+            透明导航 + 白色抽屉拼在一起会乱。
+     v15: 按需求删除「在线工具」区块(id=app: 在线配置 / 打开网页就能改键 /
+         三张 tool-card / 打开在线改键工具按钮 / 串口提示)——
+         ① HTML 整块移除, CSS 里随之失效的 .tool-card/.tool-ic/.tool-cta/
+            .tool-tip 四组样式(含 900px 断点里的 .tool-cta .btn)一并删掉,
+            不留死代码。
+         ② 手机端抽屉里的「在线改键」原来是 href="#app" 站内锚点(滚到该区块
+            再点按钮), 区块删除后成死链 → 改为 data-app-link 直达改键页,
+            与桌面端 .nav-app 行为统一。
+         ③ sec/sec-alt 交替底色不受影响: 删前是 modes(alt) + app(alt) 连续两块,
+            删后 modes(alt) → opensource(白), 交替反而更规整。
+     v16: 按需求删除「三大核心硬件 颗颗能打」区块(id=hardware: 小机身大能量 /
+         三张 hw 卡: 高灵敏麦克风 / 姿态传感器 / 3 色 LED 加 RGB)。
+         ① HTML 整块移除(含导航里「硬件」那个锚点, 否则成死链); CSS 里随之
+            失效的 .hw/.hw-ic/.hw h4/.hw p 与 .grd-3 一并删除 —— .grd-3 经
+            全仓库确认仅此区块在用(v15 注释说"Vibe Coding 在用"是误判,
+            Vibe Coding 实际用 .narrow + .feat-list)。
+         ② 「蓝牙多设备切换」(id=slots)三张槽位卡上的彩色灯点 .slot-lamp
+            (橙/蓝/青圆点)按需求移除, 保留「槽位 ①②③ / 工作机·笔记本·平板」
+            文字; HTML 三个 div + CSS 三组 .slot-lamp 规则一并删掉。
+         ③ 底色交替补正: 删掉灰底的 hardware 后 voice(白) 会和 slots(白) 贴一起,
+            只需把 slots 改成灰底 —— 让它接替原 hardware 的"灰色分隔"角色,
+            其余区块一档未改, 首屏底边纯白与 features 的无缝衔接不受影响。
+            (注: scenes 自带灰底渐变 + specs 灰底, 二者相邻双灰是 v8 起就有的
+             既有现象, 非本次引入。)
+     v17: 轮播分页圆点改成「进度填充条」—— 选中那根在自动播放时从左往右
+          慢慢填充成蓝色(时长 = 自动切换间隔 AUTO, 两处同源, 改一处必同步),
+          填满瞬间 setInterval 触发切下一张。
+          实现: 圆点内加 <i class="car-fill"> 子元素, CSS 用
+          transform:scaleX(0→1) + animation:carFill var(--car-dur) linear forwards;
+          底槽改回灰(#C3D2E2)让蓝填显形; 悬停/拖拽时 .car-dots.is-paused 冻结
+          填充, 松开由 restartFill()(摘 is-run→强制重排→加 is-run)从头重播, 与
+          定时器重新对齐; prefers-reduced-motion 下直接 scaleX(1) 不自动播。
+     v18: 分页圆点间隙修正 —— 去掉 v12 的 `margin: 0 -8px` 负边距补偿。
+          负边距本为"占位宽度锁死 8px、整排不重排", 但会把选中条两侧的视觉间隙
+          吃掉 8px(gap 9 − 8 = 1px, 用户截图"这里的间隙太近")。改回占满 24px 布局宽度
+          ⇒ 相邻间隙统一 = gap, 并把 gap 由 9px 提到 12px。
+     v19: 修「悬停在轮播上页面滚不动」—— 轮播根节点原来对 touchmove 无条件
+          preventDefault(只想去掉触屏横向返回/前进手势), 把纵向页面滚动也一起拦了。
+          改为只在"横向位移 > 纵向"时才拦, 并给 `.car` 加 `touch-action: pan-y`
+          作为 CSS 侧兜底。 -->
+<link rel="stylesheet" href="web/assets/style.css?v=19">
+</head>
+<body>
+
+<!-- 改键页地址: 相对路径指向同仓库的 vibekey-F3_web_config。
+     该页需要 Web Serial API, 必须经 http(s) 打开, 直接双击 file:// 会有兼容问题。
+     部署到 GitHub Pages 时此相对路径同样有效(与 site/ 同级目录)。
+
+     两类链接要区分开, 别都塞 data-app-link:
+       data-app-link  -> 直接跳改键页(按钮用)
+       无属性         -> 站内锚点
+     (早期「在线工具」区块还在时, 导航菜单用无属性锚点滚到该区块再由用户
+      点按钮; 该区块已删除, 现在所有改键入口统一用 data-app-link 直达。) -->
+<script>
+  window.VK_CONFIG = {
+    // 改键页(按键配置 + 固件升级)相对路径 —— 换部署位置时只改这一处
+    appUrl: 'web/vibekey-F3_web_config/index.html',
+  };
+  // 只给 [data-app-link] 绑定真实地址, 站内锚点链接保持原样
+  document.addEventListener('DOMContentLoaded', function () {
+    var url = window.VK_CONFIG.appUrl;
+    document.querySelectorAll('[data-app-link]').forEach(function (el) {
+      el.setAttribute('href', url);
+    });
+  });
+</script>
+
+<!-- ============ 导航 ============ -->
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="logo" href="#top">
+      <span class="logo-mark"><img src="web/assets/img/logo.png" alt="VibeKey-F3"></span>
+      <span>VibeKey-F3</span>
+    </a>
+    <nav class="nav-links" id="navLinks">
+      <!-- data-opt: 中等宽度(1080~1240)优先隐藏这些次要锚点, 避免导航挤成一团 -->
+      <a href="#features">核心功能</a>
+      <a href="#voice" data-opt>语音输入</a>
+      <a href="#slots" data-opt>多设备切换</a>
+      <a href="#modes" data-opt>按键模式</a>
+      <a href="#scenes" data-opt>适用场景</a>
+      <a href="#specs">规格参数</a>
+      <a href="#opensource" data-opt>开源</a>
+      <!-- 手机端抽屉里的「在线改键」: 原来是无属性的站内锚点, 滚到「在线工具」
+           区块再由用户点按钮。该区块已按需求删除, 锚点成了死链 ——
+           改为 data-app-link 直接跳改键页, 与桌面端 .nav-app 行为一致。 -->
+      <a class="nav-menu-app" data-app-link href="#app">⚙ 在线改键</a>
+      <a href="https://github.com/lii-x/VibeKey-F3" class="nav-menu-gh" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+        </svg>
+        GitHub 开源仓库
+      </a>
+    </nav>
+    <a class="nav-app" data-app-link href="#app" title="打开 VibeKey-F3 在线改键">⚙ 在线改键</a>
+    <a class="nav-gh" href="https://github.com/lii-x/VibeKey-F3" target="_blank" rel="noopener noreferrer"
+       title="在 GitHub 上查看 VibeKey-F3 开源仓库" aria-label="GitHub 开源仓库">
+      <svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor" aria-hidden="true">
+        <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+      </svg>
+      <span>GitHub</span>
+    </a>
+    <a class="nav-cta" href="#buy">立即购买</a>
+    <button class="nav-toggle" id="navToggle" aria-label="菜单" aria-expanded="false">
+      <svg class="ic-burger" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0B2A5B" stroke-width="2" stroke-linecap="round">
+        <path d="M3 6h18M3 12h18M3 18h18"/>
+      </svg>
+      <svg class="ic-close" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0B2A5B" stroke-width="2" stroke-linecap="round">
+        <path d="M5 5l14 14M19 5L5 19"/>
+      </svg>
+    </button>
+  </div>
+</header>
+
+<!-- ============ 首屏 ============ -->
+<section class="hero" id="top">
+  <div class="wrap hero-in">
+    <div class="hero-txt">
+      <span class="hero-badge">✦ AI 时代新交互效率工具</span>
+      <h1><span class="l1">VibeKey-F3</span><span class="l2">一颗顶三件 <em>随身</em>&nbsp;AI&nbsp;效率小工具</span></h1>
+      <p class="hero-sub">
+        自定义快捷键、语音输入、空中飞鼠、Agent 状态灯——四大核心功能集成在
+        71.5&times;21&times;28mm 的机身里。双模蓝牙 5.3 直连三台设备，
+        让大厂搜罗的「AI 潮涌入口」真正变成物理按键。
+      </p>
+      <div class="hero-tags">
+        <span>⌨ 自定义快捷键</span>
+        <span>🎙 语音输入</span>
+        <span>🕹 空中飞鼠</span>
+        <span>💡 Agent 状态灯</span>
+      </div>
+      <div class="hero-btns">
+        <a class="btn btn-p" data-app-link href="#app">⚙ 在线改键</a>
+        <a class="btn btn-s" href="#features">了解四大功能</a>
+        <a class="btn btn-s" href="#specs">查看规格参数</a>
+      </div>
+    </div>
+    <div class="hero-vis">
+      <span class="hero-ring" aria-hidden="true"></span>
+      <img src="web/assets/img/product.png" alt="VibeKey-F3 三键自定义键盘 俯视图" width="319" height="875">
+    </div>
+  </div>
+</section>
+
+<!-- ============ 四大核心功能 ============ -->
+<section class="sec" id="features">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag">四大核心功能</span>
+      <h2>一颗顶三件 随身 AI 效率小工具</h2>
+      <p>把键盘上「点一下」的动作，压缩成掌心大小的三个键。</p>
+    </div>
+    <div class="grd-4 rv">
+      <article class="crd">
+        <div class="crd-ic">⌨</div>
+        <h3>自定义快捷键</h3>
+        <p>全键自由映射，单击、双击、长按都能独立改成任意组合。</p>
+      </article>
+      <article class="crd">
+        <div class="crd-ic">🎙</div>
+        <h3>语音输入</h3>
+        <p>内置高灵敏麦克风，轻声说话实时转文字，免去打字。</p>
+      </article>
+      <article class="crd">
+        <div class="crd-ic">🕹</div>
+        <h3>空中飞鼠</h3>
+        <p>姿态传感器感应，手腕轻转即可移动指针、滚轮与左右键。</p>
+      </article>
+      <article class="crd">
+        <div class="crd-ic">💡</div>
+        <h3>Agent 状态灯</h3>
+        <p>3 色 LED 加 RGB，任务状态一眼掌握，AI 在忙什么你看得见。</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ Vibe Coding 理念 ============ -->
+<section class="sec sec-alt">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag o">Vibe Coding 工具</span>
+      <h2>“Vibe Coding”催生语言优先的输入新范式</h2>
+      <p>把大厂搜罗的「AI 潮涌入口」直接做成物理按键。</p>
+    </div>
+    <div class="narrow rv">
+      <p class="lead">
+        随着「Vibe Coding」（氛围编程）概念兴起，AI 语音输入正逐步成为开发趋势。
+        VibeKey-F3 作为一款软 Vibe Coding 小工具，集自定义快捷键、语音输入、空中飞鼠、
+        Agent 状态指示灯于一身，让语音驱动代码和创作变得触手可及。
+      </p>
+      <ul class="feat-list">
+        <li><span class="n">1</span><div><b>说即所得</b><span>按下语音键说完即上屏，不用看键盘</span></div></li>
+        <li><span class="n">2</span><div><b>免拆上下文</b><span>空中飞鼠让视线留在屏幕，手不用离开桌面</span></div></li>
+        <li><span class="n">3</span><div><b>状态可感知</b><span>RGB 灯提示 Agent 是否还在处理任务</span></div></li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 语音输入 ============ -->
+<section class="sec" id="voice">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag">语音输入 张口就来</span>
+      <h2>按下语音键 说话实时变文字</h2>
+      <p>内置高灵敏麦克风，轻声说话也能清晰拾取，说完即转文字。</p>
+    </div>
+
+    <div class="steps rv" style="margin-bottom:52px">
+      <div class="step">
+        <div class="step-n">1</div>
+        <h4>按下语音键</h4>
+        <p>一键启动收音</p>
+      </div>
+      <div class="step">
+        <div class="step-n">2</div>
+        <h4>对着麦克风说话</h4>
+        <p>轻声说话也能识别</p>
+      </div>
+      <div class="step">
+        <div class="step-n">3</div>
+        <h4>文字实时上屏</h4>
+        <p>说完即转文字</p>
+      </div>
+    </div>
+
+    <div class="rv" style="text-align:center;margin-bottom:26px">
+      <h3 style="font-size:clamp(20px,2.4vw,26px);font-weight:800;color:var(--navy)">广泛兼容主流语音输入工具</h3>
+      <p style="color:var(--ink-2);margin-top:10px">按下即可说，不挑输入法。</p>
+    </div>
+    <div class="compat rv">
+      <span class="compat-item">微信输入法</span>
+      <span class="compat-item">豆包输入法</span>
+      <span class="compat-item">千问输入法</span>
+      <span class="compat-item">闪电说</span>
+      <span class="compat-item">Typeless</span>
+      <span class="compat-item">Typeoff</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 多设备切换 ============ -->
+<section class="sec sec-alt" id="slots">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag">双模蓝牙 5.3</span>
+      <h2>蓝牙多设备切换</h2>
+      <p>三个槽位按键独立配置存储，一台设备连三台机器。长按电源键即可切换当前槽位，每台设备一套按键方案，互不干扰。</p>
+    </div>
+
+    <div class="rv">
+      <div class="slot-demo">
+        <div class="slot">
+          <b>槽位 ①</b>
+          <span>工作机</span>
+        </div>
+        <div class="slot">
+          <b>槽位 ②</b>
+          <span>笔记本</span>
+        </div>
+        <div class="slot">
+          <b>槽位 ③</b>
+          <span>平板</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="modes-note rv">
+      <div class="mode-row">
+        <span class="n" style="background:var(--blue)">蓝</span>
+        <div><b>连接模式</b><span>对应槽位蓝色闪烁</span></div>
+      </div>
+      <div class="mode-row">
+        <span class="n" style="background:var(--orange)">橙</span>
+        <div><b>配对模式</b><span>对应槽位黄色闪烁</span></div>
+      </div>
+      <div class="mode-row">
+        <span class="n" style="background:#22D3EE">青</span>
+        <div><b>HFP 模式</b><span>对应槽位青色闪烁</span></div>
+      </div>
+    </div>
+
+    <p class="note-line rv">首次无配对信息时默认开机为 ① 号槽（黄色闪烁），配对完成后默认为连接模式。</p>
+  </div>
+</section>
+
+<!-- ============ 按键模式 ============ -->
+<section class="sec sec-alt" id="modes">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag">多种模式可选</span>
+      <h2>单击 / 双击 / 长按 / 摇一摇</h2>
+      <p>常规与手势模式并存，同一个键按出四种动作。可直接蓝牙改键，无需再插 USB。</p>
+    </div>
+
+    <div class="grd-4 rv">
+      <div class="mode-card">
+        <div class="mode-ic">1</div>
+        <b>常规模式</b>
+        <span>单击一次即触发</span>
+      </div>
+      <div class="mode-card">
+        <div class="mode-ic">2</div>
+        <b>手势模式</b>
+        <span>单击 / 双击 / 长按各配一个动作</span>
+      </div>
+      <div class="mode-card">
+        <div class="mode-ic">3</div>
+        <b>EC 编码器</b>
+        <span>上滚 / 按压 / 下滚三段独立设置</span>
+      </div>
+      <div class="mode-card">
+        <div class="mode-ic">4</div>
+        <b>摇一摇</b>
+        <span>开启后灵敏度 LWin+1 切换</span>
+      </div>
+    </div>
+
+    <div class="rv" style="text-align:center;margin-top:40px">
+      <p style="margin-bottom:22px;color:var(--blue-d);font-weight:600;font-size:15.5px">
+        KEY L1–L3、KEY C1–C3 均支持上述映射，摇一摇灵敏度三档可调。
+      </p>
+      <div class="hero-btns" style="justify-content:center">
+        <a class="btn btn-p" data-app-link href="#app">⚙ 打开在线改键工具</a>
+      </div>
+    </div>
+
+    <div class="rv" style="text-align:center;margin-top:48px">
+      <h3 style="font-size:clamp(19px,2.2vw,24px);font-weight:800;color:var(--navy);margin-bottom:24px">适配多款软件与 Agent 工具</h3>
+      <div class="compat">
+        <span class="compat-item">Vibe Coding</span>
+        <span class="compat-item">办公输入</span>
+        <span class="compat-item">直播伴侣</span>
+        <span class="compat-item">语音输入工具</span>
+        <span class="compat-item">多设备管理</span>
+        <span class="compat-item">Agent 状态指示灯</span>
+        <span class="compat-item">AI 时代输出交互</span>
+      </div>
+      <p style="margin-top:20px;font-size:13.5px;color:var(--ink-3)">
+        * 无蓝牙功能的电脑需自备支持双模蓝牙且支持 HFP（语音通话协议）的接收器
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 开源项目 ============ -->
+<section class="sec" id="opensource">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag">开源项目</span>
+      <h2>代码完全开源 欢迎参与</h2>
+      <p>VibeKey-F3 的网页上位机与固件资料均已公开，欢迎提 Issue 与 PR。</p>
+    </div>
+
+    <div class="gh-card rv">
+      <div class="gh-head">
+        <img class="gh-logo" src="web/assets/img/logo.png" alt="VibeKey-F3">
+        <div>
+          <h3>lii-x / VibeKey-F3</h3>
+          <p class="gh-desc">VibeKey-F3 固件、网页上位机与相关工具</p>
+        </div>
+        <a class="btn btn-p gh-btn"
+           href="https://github.com/lii-x/VibeKey-F3" target="_blank" rel="noopener noreferrer">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+          前往 GitHub 仓库
+        </a>
+      </div>
+
+      <ul class="gh-guide">
+        <li>
+          <span class="gi">🐛</span>
+          <div>
+            <b>发现问题？</b>
+            <span>提 Issue 描述复现步骤、机型与固件版本，我们会尽快跟进。</span>
+          </div>
+        </li>
+        <li>
+          <span class="gi">🔧</span>
+          <div>
+            <b>想改功能？</b>
+            <span>Fork 后从 <code>master</code> 切分支开发，提交 PR 并写清改动动机。</span>
+          </div>
+        </li>
+        <li>
+          <span class="gi">🔌</span>
+          <div>
+            <b>自编译固件？</b>
+            <span><code>web/vibekey-F3_web_config</code> 是网页上位机源码，<code>tools/</code> 下含打包与发布脚本。</span>
+          </div>
+        </li>
+      </ul>
+
+      <p class="gh-note">
+        仓库遵循公开许可；如商用或二次分发，请先阅读仓库内的许可说明。
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 适用场景 ============ -->
+<!-- 10-06 改成轮播(对标 Chatterfly 的场景切换): 桌面端中间一张大卡、
+     左右各露半张可点可拖, 底部圆点指示当前位置。
+     结构上把 .car 放在 .wrap **外面** —— 卡片要宽出正文栏(侧卡要露边),
+     放在 wrap 内会被 max-width:1280 裁掉两侧。
+     4 个 .car-card 的 data-off 由 JS 计算(0=中间, ±1=侧边), CSS 只管按
+     data-off 呈现三种状态 —— 以后增删卡片不用改样式。 -->
+<section class="sec sec-car" id="scenes">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag">适用场景</span>
+      <h2>一天里，它都在帮你省事</h2>
+      <p>从通勤到深夜加班，为每种工作状态准备最顺手的输入。</p>
+    </div>
+  </div>
+
+  <div class="car" id="car">
+    <div class="car-stage">
+      <div class="car-track" id="carTrack">
+        <article class="car-card" data-c="c1">
+          <div class="car-body">
+            <span class="car-tag">Vibe Coding</span>
+            <h4>把 AI 编程串成一条线</h4>
+            <p>手不离键盘就能指挥 AI 写代码。语音输入加空中飞鼠，让「写需求—改代码—点运行」三个动作一气呵成。</p>
+            <span class="car-more">⌨ 自定义快捷键 · 🎙 语音输入</span>
+          </div>
+          <div class="car-media">
+            <img src="web/assets/img/scene-coding.jpg" alt="一位程序员在居家书房夜晚对着笔记本电脑写代码" width="640" height="760" loading="lazy">
+          </div>
+        </article>
+
+        <article class="car-card" data-c="c2">
+          <div class="car-body">
+            <span class="car-tag">会议与记录</span>
+            <h4>不打断思路的记录方式</h4>
+            <p>会议中想到什么就说什么，按一下语音键说完即上屏。空中飞鼠负责翻页，不必在键盘上盲找。</p>
+            <span class="car-more">🎙 语音输入 · 🕹 空中飞鼠</span>
+          </div>
+          <div class="car-media">
+            <img src="web/assets/img/scene-meeting.jpg" alt="一位职场人在现代会议室开线上会议并记录笔记" width="640" height="760" loading="lazy">
+          </div>
+        </article>
+
+        <article class="car-card" data-c="c3">
+          <div class="car-body">
+            <span class="car-tag">直播与创作</span>
+            <h4>三键管住一整场直播</h4>
+            <p>把常用指令映射到三个键上，配合空中飞鼠控制播放条，切场景、掐点、推流都跟得上手。</p>
+            <span class="car-more">⌨ 自定义快捷键 · 🕹 空中飞鼠</span>
+          </div>
+          <div class="car-media">
+            <img src="web/assets/img/scene-live.jpg" alt="一位内容创作者在家中直播工作台前戴着耳机创作" width="640" height="760" loading="lazy">
+          </div>
+        </article>
+
+        <article class="car-card" data-c="c4">
+          <div class="car-body">
+            <span class="car-tag">多设备办公</span>
+            <h4>三台机器，一套好手感</h4>
+            <p>长按电源键就能在三台设备间切换，每台各存一套按键方案。RGB 灯告诉你此刻连的是哪台。</p>
+            <span class="car-more">💡 Agent 状态灯 · ⌨ 三槽位配置</span>
+          </div>
+          <div class="car-media">
+            <img src="web/assets/img/scene-multi.jpg" alt="一位职场人在明亮办公桌前同时使用笔记本与平板" width="640" height="760" loading="lazy">
+          </div>
+        </article>
+      </div>
+
+      <!-- 圆点由 JS 生成(数量跟卡片数一致, 不手写死) -->
+      <div class="car-dots" id="carDots" role="tablist" aria-label="适用场景切换"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 规格参数 ============ -->
+<section class="sec sec-alt" id="specs">
+  <div class="wrap">
+    <div class="sec-head rv">
+      <span class="sec-tag">规格参数</span>
+      <h2>VibeKey-F3</h2>
+      <p>语音输入 · 空中鼠标 · 自定义快捷键 · Agent 状态灯</p>
+    </div>
+    <div class="rv" style="max-width:900px;margin:0 auto">
+      <dl class="spec">
+        <div class="spec-row"><dt>产品型号</dt><dd>VibeKey-F3</dd></div>
+        <div class="spec-row"><dt>连接方式</dt><dd>双模蓝牙 5.3</dd></div>
+        <div class="spec-row"><dt>麦克风</dt><dd>内置高灵敏麦克风</dd></div>
+        <div class="spec-row"><dt>电池容量</dt><dd>400mAh</dd></div>
+        <div class="spec-row"><dt>产品尺寸</dt><dd>71.5 × 21 × 28 mm</dd></div>
+        <div class="spec-row"><dt>充电接口</dt><dd>Type-C</dd></div>
+        <div class="spec-row" style="grid-column:1/-1;border-bottom:none">
+          <dt>续航时间</dt>
+          <dd>每天 4 小时持续语音输入，续航约 5 天左右。</dd>
+        </div>
+      </dl>
+      <p class="spec-note">* 部分数据以实物为准</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 购买 CTA ============ -->
+<section class="cta" id="buy">
+  <div class="wrap cta-in">
+    <h2>VibeKey-F3 让 AI 交互触手可及</h2>
+    <p>把「AI 潮涌入口」做成真正能按下的物理按键。</p>
+    <div class="cta-btns">
+      <a class="btn btn-p" data-app-link href="#app">⚙ 在线改键</a>
+      <a class="btn btn-gh" href="https://github.com/lii-x/VibeKey-F3" target="_blank" rel="noopener noreferrer">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+          <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+        </svg>
+        GitHub 开源
+      </a>
+      <a class="btn btn-s" href="#specs">对比规格</a>
+    </div>
+    <p style="margin-top:22px;color:rgba(255,255,255,.62);font-size:14px">
+      在线改键工具需通过 USB 或蓝牙连接设备；固件升级仅支持 USB 连接。
+    </p>
+  </div>
+</section>
+
+<!-- ============ 页脚 ============ -->
+<footer class="foot">
+  <div class="wrap foot-in">
+    <a class="logo" href="#top">
+      <span class="logo-mark"><img src="web/assets/img/logo.png" alt="VibeKey-F3"></span>
+      <span>VibeKey-F3</span>
+    </a>
+    <a class="foot-gh" href="https://github.com/lii-x/VibeKey-F3" target="_blank" rel="noopener noreferrer">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" aria-hidden="true">
+        <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+      </svg>
+      开源仓库
+    </a>
+    <small>© VibeKey-F3 · AI 时代新交互效率工具 · 规格参数以实物为准</small>
+  </div>
+</footer>
+
+<script>
+// ---------- 场景轮播(对标 Chatterfly) ----------
+// 交互: 自动往复播放(4.6s) + 拖拽甩动 + 点侧卡切换 + 点圆点跳转。
+// 实现要点:
+//   ① 所有卡片重叠在同一卡位, JS 只写 data-off(-2..2), 视觉全交给 CSS;
+//      环形数组用取模算"相对位移", 所以四张/五张/六张都能跑, 不用改逻辑。
+//   ② 只监听 pointer 事件 —— 统一覆盖鼠标/触摸/手写笔, 免得写两套逻辑。
+//   ③ 自动播放用 setInterval, 用户一碰(悬停/按下)就 clearInterval, 松开再重启,
+//      不会跟人抢操作。
+//   ④ prefers-reduced-motion 时不自动播, 但拖拽/点击照常(纯手动)。
+(function () {
+  var root = document.getElementById('car');
+  var track = document.getElementById('carTrack');
+  var dotBox = document.getElementById('carDots');
+  if (!root || !track || !dotBox) return;
+
+  var cards = Array.prototype.slice.call(track.querySelectorAll('.car-card'));
+  var n = cards.length;
+  if (!n) return;
+
+  var cur = 0;
+  var AUTO = 4600;
+  var timer = null;
+  var reduced = window.matchMedia
+    && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // ---- 圆点: 数量跟着卡片走, 不手写死 ----
+  var dots = cards.map(function (c, i) {
+    var b = document.createElement('button');
+    b.className = 'car-dot';
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-label', '第 ' + (i + 1) + ' 个场景');
+    // 进度填充条: 选中时从左往右填满, 填满即换下一张(时长 = 下面写的 --car-dur)
+    var f = document.createElement('i');
+    f.className = 'car-fill';
+    b.appendChild(f);
+    b.addEventListener('click', function () { go(i); startAuto(); });
+    dotBox.appendChild(b);
+    return b;
+  });
+  // 填充时长与自动切换间隔同源(AUTO) —— 免得以后改了一个忘了改另一个
+  dotBox.style.setProperty('--car-dur', AUTO + 'ms');
+
+  // 环形取模: 把真实下标换成 -2..2 的相对位移
+  function rel(i) {
+    var d = (i - cur) % n;
+    if (d > n / 2) d -= n;
+    if (d < -n / 2) d += n;
+    return d;
+  }
+
+  function render() {
+    cards.forEach(function (c, i) { c.setAttribute('data-off', rel(i)); });
+    dots.forEach(function (d, i) {
+      d.setAttribute('aria-selected', i === cur ? 'true' : 'false');
+    });
+    restartFill();                       // 换图 ⇒ 进度条从头开始填
+  }
+
+  // 让"当前圆点的进度填充条"从 0 重新播放。
+  // 同一条 CSS 动画必须先把 is-run 摘掉、强制一次重排、再挂回去才会从头播 ——
+  // 只改其它属性是不会重播的。换图 / 重启自动播放(悬停移开、拖拽松开)时调用。
+  function restartFill() {
+    dots.forEach(function (d) { d.classList.remove('is-run'); });
+    if (reduced || n < 2) return;        // 减动效 / 只有一张 ⇒ 不用进度条
+    var a = dots[cur];
+    if (!a) return;
+    void a.offsetWidth;                  // 强制重排
+    a.classList.add('is-run');
+  }
+
+  function go(i) {
+    cur = (i % n + n) % n;      // 双模取模: 拖过头也能回得来
+    render();
+  }
+  // 前进/后退 —— 到底就掉头, 和 Chatterfly 一样往复而不是死循环
+  function step(d) {
+    var next = cur + d;
+    if (next >= n) next = 0;
+    if (next < 0) next = n - 1;
+    go(next);
+  }
+
+  // ---- 自动播放 ----
+  function stopAuto() {
+    if (timer) { clearInterval(timer); timer = null; }
+    dotBox.classList.add('is-paused');          // 填充条一起冻住, 别偷偷跑完
+  }
+  function startAuto() {
+    stopAuto();
+    dotBox.classList.remove('is-paused');
+    if (reduced || n < 2) return;               // 减动效 / 只有一张 ⇒ 不播
+    timer = setInterval(function () { step(1); }, AUTO);
+    restartFill();                              // 新周期从 0 开始填, 与定时器对齐
+  }
+
+  // ---- 点侧卡: 不是当前那张就跳过去 ----
+  cards.forEach(function (c, i) {
+    c.addEventListener('click', function () {
+      if (i === cur) return;
+      go(i);
+      startAuto();
+    });
+  });
+
+  // ---- 拖拽 ----
+  var down = false, moved = false, sx = 0, sy = 0, dx = 0, pid = 0;
+
+  function start(e) {
+    if (n < 2) return;
+    down = true; moved = false;
+    pid = e.pointerId;
+    sx = e.clientX;
+    sy = e.clientY;             // 记纵向起点: 下面 touchmove 要靠它判定"是不是横向滑动"
+    dx = 0;
+    stopAuto();                 // 用户一碰就接管, 别跟人抢
+  }
+  function move(e) {
+    if (!down || e.pointerId !== pid) return;
+    dx = e.clientX - sx;
+    if (Math.abs(dx) > 4) { moved = true; root.classList.add('is-drag'); }
+    if (!moved) return;
+    // 跟手位移 + **限幅**:
+    //   阻尼 0.55 —— 1:1 跟手会让宽卡片显得"飘", 收一点更"重";
+    //   限幅 MAX=96 —— 整条 track 只能平移约半个侧卡的距离, 再往里就"拽不动"。
+    //     少了这一步, 中间卡会被拖出卡位, 三张卡同时完整露出, 观感上像散架
+    //     (用户截图)。96 是实测出来的: 位移量超过侧卡露出宽度(~148px)之后,
+    //     中间卡边缘就会越过 stage 边界, 两侧就变成"三张并排"而不是"中间大两边小"。
+    //   软限幅: 超过 MAX 后不是硬停, 而是每多拽 1px 只走 0.12px, 有橡皮筋感。
+    var raw = dx * 0.55;
+    var MAX = 96;
+    var v = Math.abs(raw) <= MAX ? raw
+          : Math.sign(raw) * (MAX + (Math.abs(raw) - MAX) * 0.12);
+    track.style.transform = 'translateX(' + v.toFixed(1) + 'px)';
+  }
+  function end(e) {
+    if (!down || (e && e.pointerId !== pid)) return;
+    down = false;
+    root.classList.remove('is-drag');
+    track.style.transform = '';              // 交还给 CSS 的 data-off 定位
+    var TH = 70;                             // 位移阈值(px)
+    if (moved && Math.abs(dx) > TH) step(dx < 0 ? 1 : -1);
+    // 没拖够: 什么都不做, CSS 已把卡带回 data-off 指定的位置(自然回弹)
+    startAuto();
+  }
+
+  root.addEventListener('pointerdown', start);
+  root.addEventListener('pointermove', move);
+  root.addEventListener('pointerup', end);
+  root.addEventListener('pointercancel', end);
+  // 鼠标拖到一半移出窗口 → pointerup 收不到, 必须兜住, 否则 is-drag 永远挂着
+  window.addEventListener('blur', function () { if (down) end(null); });
+  // 触屏上的横向手势(页面级返回/前进)要挡掉, 否则一甩就跳页。
+  // ★★ 但**绝不能无差别 `preventDefault`** ★★ ——
+  //   v17 之前这里是无条件 preventDefault, 会把**纵向页面滚动**也一起吃掉:
+  //   手指(或触屏上的任何滚动操作)落在轮播上时, 页面就滚不动了
+  //   (用户反馈"鼠标/手指停在这块, 滚动就不会再滚了")。
+  //   现在只在"横向位移大于纵向"时才拦 —— 纵向滑动原样交给浏览器滚页面。
+  //   同一件事在 CSS 侧还有 `.car { touch-action: pan-y }` 兜底, 见 style.css。
+  root.addEventListener('touchmove', function (e) {
+    if (n < 2 || !down) return;
+    var t = e.touches && e.touches[0];
+    if (!t) return;
+    var mx = Math.abs(t.clientX - sx), my = Math.abs(t.clientY - sy);
+    if (mx > my) e.preventDefault();        // 仅横向为主的滑动才拦
+  }, { passive: false });
+  // 鼠标悬停时暂停 —— 用户正在看的时候别自动换掉
+  root.addEventListener('mouseenter', stopAuto);
+  root.addEventListener('mouseleave', startAuto);
+
+  // 键盘: 左右方向键切换(无障碍)
+  root.setAttribute('tabindex', '0');
+  root.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft') { step(-1); startAuto(); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { step(1); startAuto(); e.preventDefault(); }
+  });
+
+  render();
+  startAuto();
+})();
+
+// ---------- 导航栏: 顶部透明 → 滚动后毛玻璃 ----------
+(function () {
+  var nav = document.querySelector('.nav');
+  if (!nav) return;
+
+  // 阈值取导航高度的一半(桌面 32px / 手机 30px): 滚过一丢就切换,
+  // 避免刚开始滚时"闪一下白"。用 nav.offsetHeight 读实际高度, 不写死 64,
+  // 以后改 --nav-h / 断点高度这里自动跟着走。
+  function threshold() { return Math.max(8, nav.offsetHeight / 2); }
+
+  function sync() {
+    nav.classList.toggle('is-solid', window.pageYOffset > threshold());
+  }
+
+  // passive: true —— scroll 事件无法 preventDefault, 声明后浏览器可跳过
+  // 滚动阻塞等待, 滚动更跟手(移动端尤其明显)。
+  window.addEventListener('scroll', sync, { passive: true });
+  window.addEventListener('resize', sync);
+  sync();   // 初始状态: 刷新时页面可能停在半路(锚点/浏览器恢复滚动位置)
+})();
+
+// ---------- 导航移动端(抽屉式) ----------
+(function () {
+  var btn = document.getElementById('navToggle');
+  var links = document.getElementById('navLinks');
+  if (!btn || !links) return;
+
+  function setOpen(open) {
+    links.classList.toggle('open', open);
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    // 抽屉铺满整屏, 打开时锁住背景滚动, 否则滑动菜单会带着页面一起动
+    document.body.style.overflow = open ? 'hidden' : '';
+    // 抽屉打开时给导航补实底。CSS 侧已用 .nav:has(.nav-links.open) 做过,
+    // 这里再加一个 .is-drawer 是**兜底**: :has() 在旧内核(Safari 15.3 以下、
+    // 一些安卓 WebView)不解析, 那条规则整条失效, 导航会保持透明,
+    // 背后滚动的内容直接透出来, 和白色抽屉拼在一起很乱。
+    // 两个选择器并存, 现代浏览器命中 CSS 的, 旧浏览器命中这个 class。
+    var nav = document.querySelector('.nav');
+    if (nav) nav.classList.toggle('is-drawer', open);
+  }
+  btn.addEventListener('click', function () {
+    setOpen(!links.classList.contains('open'));
+  });
+  // 点任意菜单项后关闭(含 GitHub 外链)
+  links.addEventListener('click', function (e) {
+    if (e.target.closest('a')) setOpen(false);
+  });
+  // Esc 关闭
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && links.classList.contains('open')) {
+      setOpen(false);
+      btn.focus();
+    }
+  });
+  // 从手机切回桌面宽度时, 复位抽屉状态(否则 body 仍锁着滚动)
+  var mq = window.matchMedia('(min-width: 901px)');
+  var onChange = function (e) { if (e.matches) setOpen(false); };
+  if (mq.addEventListener) mq.addEventListener('change', onChange);
+  else if (mq.addListener) mq.addListener(onChange);
+})();
+
+// ---------- 滚动入场动画 ----------
+(function () {
+  var els = document.querySelectorAll('.rv');
+  if (!('IntersectionObserver' in window)) {
+    els.forEach(function (e) { e.classList.add('in'); });
+    return;
+  }
+  var io = new IntersectionObserver(function (entries) {
+    entries.forEach(function (en) {
+      if (en.isIntersecting) {
+        en.target.classList.add('in');
+        io.unobserve(en.target);
+      }
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
+  els.forEach(function (e) { io.observe(e); });
+})();
+
+// ---------- 导航高亮 ----------
+(function () {
+  var secs = [].slice.call(document.querySelectorAll('section[id]'));
+  // 只取站内锚点链接; GitHub 外链与「在线改键」不参与高亮, 否则会被误判为当前区块
+  var navs = [].slice.call(document.querySelectorAll('.nav-links a[href^="#"]'));
+  if (!secs.length || !navs.length) return;
+  var tick = function () {
+    var y = window.scrollY + 130, cur = '';
+    secs.forEach(function (s) { if (s.offsetTop <= y) cur = s.id; });
+    navs.forEach(function (a) {
+      var on = a.getAttribute('href') === '#' + cur;
+      a.style.color = on ? 'var(--blue)' : '';
+      a.style.fontWeight = on ? '600' : '';
+    });
+  };
+  window.addEventListener('scroll', tick, { passive: true });
+  tick();
+})();
+</script>
+</body>
+</html>

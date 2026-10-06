@@ -1,0 +1,106 @@
+/* ===== 虚拟键盘 (仅网页端) =====
+   需求: 按键编辑弹窗打开时, 右下角多一个入口; 点开是屏幕键盘, 用鼠标点选组合键。
+   动机: 网页端靠「真实键盘 keydown」捕获组合键, 但 Ctrl+空格 / Win+空格 这类被
+   Windows 输入法或系统热键吃掉 —— 事件根本到不了网页, 用户怎么按都设不上。
+   屏幕键盘绕过系统热键, 是网页端独有的兜底手段(桌面端 QML 不需要)。
+   本文件只负责: 悬浮入口 + 面板骨架 + 键帽排版, 键值表与写入逻辑在 js/17-vkbd.js。 */
+
+/* 悬浮入口: 固定在视口右下角(与用户截图里红框位置一致)。
+   放在 #editorModal 之后, 于是能用 `#editorModal.show ~ .vkbd-fab` 让它
+   随弹窗一起显隐 —— 不必在 openEditor/closeEditor 里手动改样式, 也不会漏状态。 */
+.vkbd-fab {
+  position: fixed; right: 24px; bottom: 24px; z-index: 1300;
+  display: none; align-items: center; gap: 6px;
+  height: 34px; padding: 0 14px;
+  border: 1px solid var(--q-field-border); border-radius: 17px;
+  background: var(--bg-card); color: var(--q-title-2);
+  font-size: 13.3px; font-family: inherit; cursor: pointer;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.16);
+}
+#editorModal.show ~ .vkbd-fab { display: inline-flex; }
+.vkbd-fab:hover { background: var(--q-hover-bg); color: var(--q-title); }
+.vkbd-fab .vkbd-fab-ico { font-size: 15px; line-height: 1; }
+
+/* 面板: 锚在入口正上方, 靠右对齐。宽度固定 420px, 窄窗下收敛到视口内。 */
+.vkbd {
+  position: fixed; right: 24px; bottom: 66px; z-index: 1301;
+  display: none; flex-direction: column; gap: 8px;
+  width: min(420px, calc(100vw - 48px));
+  padding: 10px 12px 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--q-panel-border);
+  border-radius: 12px;
+  box-shadow: 0 6px 26px rgba(0, 0, 0, 0.22);
+}
+.vkbd.show { display: flex; }
+
+/* 头部: 标题 + 写入目标选择 + 关闭。目标选择是这套 UI 的关键 ——
+   弹窗里可能有多个快捷键框(手势模式 3~5 个), 不指明写哪一个就会静默写错。 */
+.vkbd-head { display: flex; align-items: center; gap: 8px; }
+.vkbd-title { font-size: 13.3px; font-weight: 700; color: var(--q-title); flex: 0 0 auto; }
+.vkbd-target {
+  flex: 1 1 auto; min-width: 0; height: 26px;
+  padding: 0 20px 0 7px; font-size: 12px; font-family: inherit;
+  color: var(--q-title-2);
+  background: var(--bg-card); border: 1px solid var(--q-field-border); border-radius: 6px;
+}/* 左右手切换: 顶部修饰键条按左手/右手两组切。选中态用绿色描边+浅绿底,
+   与修饰键帽的 .on 一致, 避免用户以为这是个普通动作按钮。 */
+.vkbd-hand {
+  flex: 0 0 auto; height: 26px; padding: 0 9px;
+  border: 1px solid var(--q-field-border); border-radius: 6px;
+  background: var(--bg-card); color: var(--q-title-2);
+  font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.vkbd-hand:hover { background: var(--q-hover-bg); }
+.vkbd-hand.right {
+  background: var(--q-sel-bg); border-color: var(--accent);
+  color: var(--accent-hover); font-weight: 700;
+}
+
+.vkbd-x {
+  flex: 0 0 auto; width: 24px; height: 24px;
+  border: none; border-radius: 12px;
+  background: var(--q-close-bg); color: var(--q-title-2);
+  font-size: 16px; line-height: 1; cursor: pointer;
+}
+.vkbd-x:hover { background: var(--q-seg-off); }
+
+/* 实时组合预览: 点修饰键后立刻显示「Ctrl+Shift+…」，让用户看得见当前状态 */
+.vkbd-prev {
+  padding: 5px 8px; border-radius: 6px;
+  background: var(--q-info-bg); color: var(--q-title-2);
+  font-size: 12px; line-height: 1.4;
+}
+
+/* 修饰键条 + 键帽: 统一 30px 高、radius 6、白底浅绿边(沿用弹窗内下拉/捕获框的观感) */
+.vkbd-mods { display: flex; gap: 6px; }
+.vkbd-keys { display: flex; flex-direction: column; gap: 5px; }
+.vkbd-row { display: flex; gap: 4px; }
+.vkbd-mod, .vkbd-key {
+  flex: 1 1 0; min-width: 0; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0 2px; overflow: hidden;
+  border: 1px solid var(--q-field-border); border-radius: 6px;
+  background: var(--bg-card); color: var(--q-title);
+  font-size: 12px; font-family: inherit; cursor: pointer; user-select: none;
+}
+.vkbd-mod { font-weight: 700; }   /* 不要改 flex: 键帽要靠上面的 flex:1 1 0 均分宽度。
+                                    曾写 flex:0 1 0(grow=0) -> 修饰键被压成 0 宽竖条,
+                                    顶部一排看起来是空的, 行内 Shift/Ctrl 变成绿细线。 */
+.vkbd-key:hover, .vkbd-mod:hover { background: var(--q-hover-bg); }
+.vkbd-mod.on {
+  background: var(--q-sel-bg); border-color: var(--accent);
+  color: var(--accent-hover); font-weight: 700;
+}
+.vkbd-key:active { background: var(--q-sel-bg); }
+
+/* 底部: 两个动作按钮 + 一句说明 */
+.vkbd-foot { display: flex; align-items: center; gap: 6px; }
+.vkbd-btn {
+  height: 26px; padding: 0 10px;
+  border: 1px solid var(--q-field-border); border-radius: 6px;
+  background: var(--bg-card); color: var(--q-title-2);
+  font-size: 12px; font-family: inherit; cursor: pointer;
+}
+.vkbd-btn:hover { background: var(--q-hover-bg); color: var(--q-title); }
+.vkbd-hint { margin-left: auto; font-size: 11px; color: var(--q-text-3); }

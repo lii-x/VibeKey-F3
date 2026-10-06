@@ -1,0 +1,88 @@
+/* ============================================================
+   09-led-rgb.css —— 灯效测试面板「C1/C2/C3 RGB」测试区 (10-06, 对齐上位机)
+   结构: 由 js/19-led-rgb.js 的 renderLedRgb() 动态生成, 这里只描述样式。
+   加载顺序在最后 ⇒ 层叠优先级最高 (见 01-base.css 顶部说明)。
+   ============================================================ */
+
+/* 面板内的通用行 (与 02-shell.css 的 .led-info 同款布局) */
+.led-test .led-row { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+
+/* 分组小标题: 「手动测试」/「LED1/LED2/LED3」/「C1/C2/C3 RGB」
+   对齐上位机: 三处同色 (#888 → --text-dim), 让它们看起来是同一层的标签 */
+.led-grp { font-size: 13px; color: var(--text-dim); }
+
+/* 两组 (状态灯组 / RGB 组) 之间的细分隔线 —— 对齐上位机的 1px #ececec */
+.led-test .led-sep { height: 1px; background: var(--border); margin: 2px 0 12px; }
+
+/* 「全部熄灭」小按钮 (对齐上位机那颗圆角浅灰按钮) */
+.led-alloff {
+  height: 26px; padding: 0 12px; border-radius: 13px;
+  border: 1px solid var(--border-strong);
+  background: var(--q-close-bg);
+  color: var(--q-title-2);
+  font-size: 12px; cursor: pointer; transition: all .15s;
+}
+.led-alloff:hover { border-color: var(--text-dim); color: var(--text); }
+
+/* ---- 三颗灯各一行: C名 + 8色块 + 色值 + 亮度条 + 百分比 ---- */
+.led-test .led-rgb-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.led-c { flex: 0 0 22px; font-size: 12px; font-weight: 700; color: var(--q-title-2); }
+.led-sws { display: flex; gap: 3px; flex: 0 0 auto; }
+
+/* 色块。
+   ⚠️ 下面 4 条规则的**书写顺序 = 层叠优先级** (前 3 条同为 2 个类选择器, 靠后者胜;
+   最后一条 3 个类选择器, 优先级最高)。与上位机 Main.qml 色块 delegate 的
+   isWhite / border 逻辑一一对应, 改动时请两边一起改:
+     未选中          → 浅灰细框
+     白块(0xFFFFFF)  → 永久保留一圈灰框 #bdbdbd (白底上没框=整个色块消失)
+     选中 且 亮      → 深色粗框
+     选中 但 灭      → 无框 (白块例外, 仍留灰框) */
+.led-sw {
+  width: 17px; height: 17px; border-radius: 3px; padding: 0; cursor: pointer;
+  box-sizing: border-box;
+  border: 1px solid var(--q-sw-border);
+  transition: border-color .1s;
+}
+.led-sw.w { border-color: #bdbdbd; }
+.led-sw.sel { border: 2px solid var(--text); }
+.led-sw.sel-off { border-color: transparent; }
+.led-sw.sel-off.w { border-color: #bdbdbd; }
+
+/* 色值 (等宽字体, 数值不跳动) */
+.led-hex {
+  flex: 0 0 62px; font-size: 11px; color: var(--text-dim);
+  font-family: ui-monospace, Consolas, "Courier New", monospace;
+}
+
+/* 亮度条: 弹走剩余宽度 (对齐上位机"亮度条撑满"), 外观也照上位机:
+   红色已填充段 + 白底红圈圆手柄。
+   ⚠️ 站点的全局样式 `input[type="range"]::-webkit-slider-thumb{background:var(--accent)}`
+      用了 `-webkit-appearance:none`, 所以 `accent-color` 在这条上**是无效的** ——
+      必须像下面这样自带 appearance/thumb 样式才能改观感 (原写的 accent-color 已删)。
+   ⚠️ --fill 由 js/19-led-rgb.js 按当前亮度写入; 拖动时**只改这个自定义属性**,
+      不重建 DOM(否则 innerHTML 一换, 正在拖的 range 会立刻失去焦点/中断拖动)。 */
+/* ⚠️ 必须写 `.led-test .led-rng` 两层 —— 站点全局的 `input[type="range"]`
+   (≈ 0,1,1) 比单个 `.led-rng` (0,1,0) **更具体**, 只写一层会被它压掉
+   (实测: 圆点仍是全局的绿色 var(--accent), 红色填充也不生效)。 */
+.led-test .led-rng {
+  flex: 1 1 auto; min-width: 120px; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+  height: 6px; border-radius: 3px; outline: none;
+  background: linear-gradient(to right,
+              var(--danger) 0, var(--danger) var(--fill, 0%),
+              var(--border-strong) var(--fill, 0%), var(--border-strong) 100%);
+}
+.led-test .led-rng::-webkit-slider-thumb {
+  -webkit-appearance: none; appearance: none;
+  width: 14px; height: 14px; border-radius: 50%;
+  background: #fff; border: 1.5px solid var(--danger);
+}
+.led-pct { flex: 0 0 40px; text-align: right; font-size: 12px; color: var(--text); }
+
+/* 底部说明条 (对齐上位机的浅灰信息块；行首的 ⓘ 图标已按用户要求去掉) */
+.led-rgb-note {
+  margin: 2px 0 12px; padding: 7px 10px; border-radius: 4px;
+  background: var(--q-info-bg);
+  border: 1px solid var(--border);
+  font-size: 12px; color: var(--text-dim);
+}

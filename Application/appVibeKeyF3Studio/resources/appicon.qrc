@@ -1,0 +1,23 @@
+<RCC>
+    <qresource prefix="/">
+        <file>appicon.png</file>
+        <file>VibeKey-F3.png</file>
+        <file>otabg.png</file>
+    </qresource>
+    <qresource prefix="/Sidebar">
+        <file alias="logo.png">Sidebar/logo.png</file>
+        <file alias="keyseticon.png">Sidebar/keyseticon.png</file>
+        <file alias="keyseticon_current.png">Sidebar/keyseticon_current.png</file>
+        <file alias="otaiconn.png">Sidebar/otaiconn.png</file>
+        <file alias="otaicon_current.png">Sidebar/otaicon_current.png</file>
+        <file alias="statusicon.png">Sidebar/statusicon.png</file>
+        <file alias="statusicon_current.png">Sidebar/statusicon_current.png</file>
+        <file alias="moreicon.png">Sidebar/moreicon.png</file>
+        <file alias="moreicon_current.png">Sidebar/moreicon_current.png</file>
+        <!-- 10-05: EC 摘要卡的行首图标(旋转 / 按压 / 按压旋转), 与网页端同一套形状。
+             颜色 #ccc 直接烙进 PNG(Qt 无 CSS mask, 且上位机没有深色主题, 无需动态着色)。 -->
+        <file alias="ec-rotate.png">Sidebar/ec-rotate.png</file>
+        <file alias="ec-press.png">Sidebar/ec-press.png</file>
+        <file alias="ec-press-rotate.png">Sidebar/ec-press-rotate.png</file>
+    </qresource>
+</RCC>

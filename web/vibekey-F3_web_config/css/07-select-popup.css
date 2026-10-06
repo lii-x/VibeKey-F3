@@ -1,0 +1,44 @@
+/* ===== 下拉弹层 (替代原生 <select> 的系统下拉) =====
+   规格逐条取自上位机 QML ComboBox 的 popup (Main.qml 3013-3044 / 3213-3244):
+     Popup { y: 控件高 + 4; width: 同控件; padding: 3;
+             background: radius 8 / 白底 / 边 #e0e0e0 }
+     delegate { 高 26(模式行) 或 30; radius 6; 文字左内边距 6; 10pt;
+                highlighted(当前项): 底 #e6f5ec 字 #07c160
+                hovered:              底 #f4f9f6 字 #333
+                其余:                 透明底 字 #333 }
+   行为差异(网页端必需, 桌面端不需要):
+     · 固定定位 + 视口边缘收敛 + 下方放不下时翻到上方 —— 桌面弹窗很高, 网页视口不一定
+     · 最大高 264 + 内部滚动 —— 动作类别等选项多时不能顶出屏幕
+   深色主题走同一套 CSS 变量, 与全站其它控件一致。 */
+.sel-pop {
+  position: fixed; z-index: 1400;      /* 高于弹窗 1200 / 虚拟键盘 1301 */
+  display: none; flex-direction: column;
+  padding: 3px;                        /* QML popup padding: 3 */
+  max-height: 264px; overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--q-panel-border);
+  border-radius: 8px;                  /* QML popup radius: 8 */
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.18);
+}
+.sel-pop.show { display: flex; }
+.sel-opt {
+  flex: 0 0 auto;
+  height: 26px; line-height: 26px;     /* QML delegate height 26 (模式行) */
+  padding: 0 6px;                      /* QML leftPadding: 6 */
+  border-radius: 6px;                  /* QML delegate radius: 6 */
+  color: var(--q-title); font-size: 13.3px;   /* 10pt #333 */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: pointer; user-select: none;
+}
+.sel-opt:hover { background: var(--q-hover-bg); color: var(--q-title); }   /* QML hovered */
+/* .hl = 当前项(键盘高亮位与鼠标悬停共用同一视觉, 与 QML 的 highlighted 一致) */
+.sel-opt.hl {
+  background: var(--q-sel-bg);         /* QML highlighted: #e6f5ec */
+  color: var(--accent-hover);          /*              字 #07c160 */
+}
+.sel-opt.dis { color: var(--q-text-3); cursor: default; }
+.sel-opt.dis:hover { background: transparent; }
+
+/* 30px 高的下拉(动作大类行的两个下拉, QML 3191-3195 用 30) —— 由 JS 按
+   控件实际高度打 data-tall, 让弹层行高与控件一致, 不混用两种尺寸。 */
+.sel-pop[data-tall="1"] .sel-opt { height: 30px; line-height: 30px; }

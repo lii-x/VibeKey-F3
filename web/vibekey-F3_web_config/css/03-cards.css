@@ -1,0 +1,242 @@
+/* ===== 按键配置页: 三列布局 / 设备图与键帽 / 摘要卡片 / 徽章 / 信息块 / 手势三格 / 虚线 =====
+   本文件由 build_index_template.html 的内联 <style> 拆出(2026-10-03)。
+   拆分原因: 单文件千行 CSS 曾因一次正则误删整段样式导致页面裸奔, 且脚本化改样式
+   极易锚点失配 -> 改为按关注点分文件, 改一处只动一个文件。
+   加载顺序即层叠顺序, 勿随意调整文件名序号。 */
+
+  /* ===== Studio 同款「按键配置」布局 ===== */
+  /* 操作条 (10-05 改版): 蓝牙槽位 + 休眠 在左, 读取/写入/恢复 在右, 单行排布。
+     原来这里是两行 —— 第一行放"连接状态 + 三个按钮"、第二行放"槽位 + 休眠"。
+     连接状态与标题栏重复(同一屏出现两次「已连接」), 已整块删掉, 连接状态只由标题栏负责;
+     剩下的操作合并成一行, 与用户给的参考图一致。 */
+  .status-card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 10px 18px;
+    margin-bottom: 16px;
+  }
+  /* gap 12: 槽位组与休眠下拉之间要有明显分组感(它们是两个独立控件组),
+     而三个胶囊按钮之间靠自身 padding 就够了 —— 但它们也在同一 flex 容器里,
+     统一 12 会让按钮之间略松, 故把按钮组单独收紧到 8。 */
+  .sc-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .sc-actions { display: flex; align-items: center; gap: 8px; }
+  .pill {
+    height: 32px; padding: 0 18px;
+    border-radius: 16px;
+    border: 1.5px solid transparent;
+    background: var(--bg-card);
+    font-size: 13px; font-weight: 600;
+    cursor: pointer;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: all 0.15s;
+  }
+  .pill:disabled { opacity: 0.4; cursor: not-allowed; }
+  .pill-green { border-color: var(--accent); color: var(--accent); }
+  .pill-green:hover:not(:disabled) { background: var(--tint); }
+  .pill-amber { border-color: var(--warning); color: var(--warning-text); }
+  .pill-amber:hover:not(:disabled) { background: rgba(250,173,20,0.1); }
+
+  /* 蓝牙槽位页签 (蓝牙1 选中为绿色胶囊) */
+  .slot-selector { display: flex; align-items: center; gap: 6px; border: none; background: transparent; padding: 0; }
+  .slot-label { display: none; }
+  .slot-btn {
+    padding: 5px 14px;
+    border: none; border-radius: 14px;
+    background: var(--bg);
+    color: var(--text-dim);
+    font-size: 12px; cursor: pointer;
+    transition: all 0.15s;
+  }
+  .slot-btn:hover:not(:disabled) { color: var(--text); }
+  .slot-btn.active { background: var(--accent); color: #fff; font-weight: 600; }
+  .slot-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* 设备居中 + 左右卡片环绕
+     横向: 三列按内容宽度并排后整体居中, 卡片紧贴设备 (QML 1753/1989/2185/2355 的 defX = deviceFrame.x ∓ 10/12)
+     纵向: 由 JS alignCardsToDevice() 按各按键在设备上的高度定位 (QML distributeCardGaps) */
+  .studio-layout {
+    position: relative;
+    display: grid;
+    /* minmax(0, auto): 允许列在极窄窗口下收缩到 0, 但**平时**不会被容器压扁。
+       单纯 auto 时 grid 会按内容定宽, 容器一旦比三列总宽还窄(如窗口缩到设计尺寸以下
+       且窗体下限被 flex 压掉), 列会被强行压缩 -> 卡片溢出压住设备图。
+       配合 .app 的 width 下限钳位(--design-w) + transform 缩放, 这层是兜底。 */
+    grid-template-columns: minmax(0, auto) minmax(0, auto) minmax(0, auto);
+    justify-content: center;
+    gap: 32px;                /* 设备与卡片两侧的呼吸区 */
+    align-items: stretch;
+    margin-bottom: 20px;
+  }
+  svg.connectors { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2; }
+  svg.connectors path { fill: none; stroke: var(--conn); stroke-width: 1.5; stroke-dasharray: 3 4; transition: stroke 0.15s; }
+  /* 卡片悬停/拖动/编辑中: 对应虚线跟着变绿 (对齐卡片选中态) */
+  svg.connectors path.hot { stroke: var(--accent); stroke-width: 2; }
+  /* align-self:center: 行被 #view-keys .studio-layout{flex:1 0 auto} 撑高后, 设备在行内居中,
+     卡片列必须同样居中, 否则整列会浮到设备上方 (JS alignCardsToDevice 只负责纵向锚点) */
+  .scol { display: flex; flex-direction: column; gap: 12px; min-width: 0; z-index: 1; align-self: center; }
+  /* 卡片限宽：左列靠左、右列靠右 (对齐 Studio)，中缝留给虚线 */
+  #sumLeft { align-items: flex-start; }
+  #sumRight { align-items: flex-end; }
+  .sum-card {
+    max-width: 400px; width: 100%;
+    position: relative;
+    touch-action: none;                 /* 允许指针拖动, 不触发页面滚动 */
+    user-select: none; -webkit-user-select: none;
+    cursor: grab;                       /* 提示可拖动 */
+  }
+  /* 拖动中 (Studio 同款: 抬起后若未移动则视为点击, 打开编辑弹窗) */
+  .sum-card.dragging {
+    cursor: grabbing;
+    border-color: var(--accent);
+    box-shadow: 0 10px 26px rgba(0,0,0,0.16);
+    z-index: 5;
+  }
+  /* 复位按钮：拖过之后才显示，紧跟徽章右侧 (badge 的 margin-left:auto 负责贴右) */
+  .sum-reset {
+    flex-shrink: 0;
+    width: 20px; height: 20px; padding: 0;
+    display: none; align-items: center; justify-content: center;
+    border: none; border-radius: 5px;
+    background: rgba(0,0,0,0.06); color: var(--text-2);
+    font-size: 13px; line-height: 1; cursor: pointer;
+  }
+  .sum-card.moved .sum-reset { display: flex; }
+  .sum-reset:hover { background: var(--accent); color: #fff; }
+  /* 摇一摇: QML 里是固定在页面左下角的独立卡片 (Main.qml 1913-1914 x:12 / y: height-h-12),
+     不可拖动、不参与 L 列的纵向均分 —— 这里脱离 flex 流, 直接钉在 .studio-layout 左下角 */
+  #view-keys.active { display: flex; flex-direction: column; min-height: 100%; }
+  #view-keys .studio-layout { flex: 1 0 auto; }
+  #sumLeft .sum-card[data-path="shake_key"] {
+    position: absolute; left: 12px; bottom: 12px; width: auto; z-index: 1;
+  }
+  /* 钉在角落后不需要抓手提示 */
+  #sumLeft .sum-card[data-path="shake_key"] { cursor: pointer; }
+  .device-col { display: flex; align-items: center; justify-content: center; }
+  .device-frame {
+    position: relative;
+    width: var(--dev-w, 92px);
+    aspect-ratio: 82 / 230;
+    flex-shrink: 0;
+  }
+  .device-img {
+    position: absolute; inset: 0;
+    width: 100%; height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+  }
+  /* 键帽颜色叠加层: 位置/颜色由 updateKeycaps() 按 Studio QML 叠加层换算 + config.rgb 设置;
+     mix-blend-mode:multiply 保留按键自身明暗 -> 透明玻璃感 (Studio: rgb_enabled ? rgba(rgb,0.35) : #15ffffff) */
+  .keycap {
+    position: absolute; display: none;
+    border-radius: 11px;
+    background: rgba(255,255,255,0.08);
+    mix-blend-mode: multiply;
+    cursor: pointer;
+    transition: box-shadow 0.15s;
+  }
+  .keycap:hover { box-shadow: 0 0 0 2px var(--accent); }
+  .keycap.sel { box-shadow: 0 0 0 3px var(--accent); }
+
+  /* Summary 卡片 (环绕设备, 数据派生自 config, 点击跳转完整编辑器)
+     规格逐条对齐 QML: 卡片 1768-1787 / L 标题 1804-1810 / 徽章 1811-1825 /
+     C 色块 2044-2056 / C 标题 2058-2064 / 常规信息块 2122-2135 */
+  .sum-card {
+    background: var(--bg-card);
+    border: 0.5px solid transparent;      /* QML 常态 border.width: 0 */
+    border-radius: 8px;                  /* QML 1768 radius: 8 */
+    padding: 6px 8px;                    /* QML 上下 6 (h = 内容 + 12) / 左右 8 (1797) */
+    box-shadow: var(--q-card-shadow);     /* QML 1774-1786 两层柔和投影 */
+    cursor: pointer;
+    transition: border-color 0.15s;
+  }
+  .sum-card:hover { border-color: var(--accent); }   /* QML 1770-1771 hovered: #07c160 / w 0.5 */
+  /* 卡片宽度: L 键固定 200 / C 键与 EC 固定 220 (QML 1766 / 2005 / 2369);
+     摇一摇按内容自适应 (QML 1920 width: shakeInfoCol.width + 16) */
+  /* 卡片宽度: QML 是 L 200 / C·EC 220, 网页端内容更长(徽章+状态文本)故各加宽一档,
+     摇一摇按内容自适应会显得又窄又短, 这里与 L 键对齐 */
+  #sumLeft .sum-card[data-path^="l_key"] { width: 232px; }
+  #sumRight .sum-card { width: 252px; }
+  #sumLeft .sum-card[data-path="shake_key"] { width: 232px; }
+  .sum-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+  /* RGB 底光指示色块: 16x16 radius 4 + 1px #ddd 边 (QML 2044-2056) */
+  .sum-ic {
+    width: 20px; height: 20px; border-radius: 4px;
+    border: 1px solid var(--q-sw-border);   /* QML 2045 16x16 (与 8pt 标题配套) */
+    background: var(--q-knob-off);
+    flex-shrink: 0;
+  }
+  /* 字号换算: QML font.pointSize 是磅, 1pt = 96/72 px = 4/3 px, 所以 10pt -> 13.3px。
+     之前直接照抄 pointSize 数值, 导致网页端字号只有 QML 的 3/4 (用户反馈"字小了") */
+  .sum-title { font-size: 13.3px; font-weight: 700; color: var(--q-title); }   /* QML 1806-1808 = 10pt */
+  /* EC 与摇一摇标题用次级灰 (QML 2412 / 1950) */
+  .sum-card[data-path="ec_press"] .sum-title,
+  .sum-card[data-path="shake_key"] .sum-title { color: var(--q-title-2); }
+  /* 徽章: 底色恒为 #07c160, 只有文字随模式变 (QML 1814 恒定 / 1820 文字切换) */
+  .sum-badge {
+    margin-left: auto;
+    height: 24px; line-height: 24px; padding: 0 10px;   /* QML 1812-1816 高 18 (与 8pt 字配套) */
+    border-radius: 4px;                                /* QML 1813 */
+    background: var(--accent); color: #fff;
+    font-size: 10.7px; font-weight: 700;               /* QML 1821-1823 = 8pt */
+    white-space: nowrap;
+  }
+  #sumRight .sum-badge { height: 26px; line-height: 26px; }   /* QML 2067-2071 高 20 */
+  .sum-badge.gesture { background: var(--accent); }
+  /* 常规模式信息块: radius 4 + #f5f5f5 + 9pt #333 (QML 2122-2135)
+     高度按 QML 原值 30/28: 4px 圆角配 38px 高的块会显得方, 回退后比例自然 */
+  .sum-body {
+    font-size: 12px; color: var(--q-title);
+    background: var(--q-info-bg);
+    border-radius: 4px;                                /* QML 2127 radius: 4 */
+    padding: 0 8px; min-height: 30px;                 /* QML 2125-2126 高 30 / leftMargin 8 */
+    display: flex; align-items: center;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #sumLeft .sum-body { min-height: 28px; padding: 0 6px; }   /* QML 1866-1872 高 28 / 左右 6 */
+  /* EC 卡主体: 透明容器, 行也不带底色 —— 图标直接落在卡片白底上 */
+  .sum-body.multi {
+    white-space: normal; display: block;
+    background: transparent; padding: 0; min-height: 0; line-height: 1.2;
+  }
+  /* EC 动作行: [图标] [数值灰条]
+     图标**不带底**(直接落卡片白底, 与「按」手势行一致), 但数值仍要一条灰色圆角矩形。 */
+  .ec-rows { display: flex; flex-direction: column; gap: 4px; }
+  .ec-row {
+    display: flex; align-items: center; gap: 4px;
+    padding: 0 6px;                                         /* QML 2471 leftMargin 6 */
+  }
+  /* 数值条: 底色/圆角/高度与「按」行的三格小卡(.sum-ges-cell)同款 ⇒ 整卡观感统一 */
+  .ec-txt {
+    flex: 1 1 auto; min-width: 0;
+    display: flex; align-items: center;
+    min-height: 22px; padding: 0 6px;                       /* QML 2471 高 22 */
+    background: var(--q-info-bg); border-radius: 4px;
+    font-size: 12px; color: var(--q-title);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* 「按」手势行: 右侧是三格小卡, 占满剩余宽度 */
+  .ec-row-ges .sum-ges { flex: 1 1 auto; min-width: 0; gap: 4px; }
+  .ec-row-ges .sum-ges-cell { height: 38px; padding: 2px; } /* QML 2547 preferredHeight 38 */
+  /* 手势模式: 容器透明, 底色交给三格小框 (QML 2083-2120) */
+  .sum-body.ges { background: transparent; padding: 0; min-height: 0; display: block; }
+  .sum-ges { display: flex; gap: 4px; }                 /* QML 2087 spacing: 4 */
+  .sum-ges-cell {
+    flex: 1; min-width: 0; height: 40px; padding: 3px;  /* QML 2093-2095 高 40 / margins 3 */
+    border-radius: 4px; background: var(--q-info-bg);
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 1px; overflow: hidden;
+  }
+  .g-name { font-size: 9.3px; line-height: 1.15; color: var(--q-text-3); }   /* QML 2104 = 7pt #999 */
+  .g-state { font-size: 10.7px; line-height: 1.2; color: var(--q-title); max-width: 100%;  /* QML 2110 = 8pt #333 */
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center; }
+  /* L 键版本: 固定 58 宽 / 高 38 / gap 3 / margins 2 (QML 1833-1836) */
+  #sumLeft .sum-ges { gap: 3px; }
+  #sumLeft .sum-ges-cell { flex: 0 0 58px; width: 58px; height: 38px; padding: 2px; }
+  /* 行底色已移到 .ec-row (10-05), 卡片主体保持透明 */
+  .sum-body .dim { color: var(--q-text-3); }
+
+  .key-group.flash, .key-card.flash {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(7,193,96,0.35);
+  }

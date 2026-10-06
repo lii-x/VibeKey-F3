@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VibeKey-F3</title>
+<!-- ===== 站点图标: 复用上位机桌面图标 appicon.png (data URI 内嵌, 保持单文件自包含) ===== -->
+  <link rel="icon" type="image/png" sizes="16x16" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACfUlEQVR42m3Tz2tcVRQH8M+986ZJZpIUkqokbW1IQbrQRiPIiCIiiAguVNyouJGu60qwf0ARFNOudCkoca0UXVRdudDqprTdlCLE/FqEZDTJJJlp3nvXxQ11490c7jnc7/ne7/ecAFNfp/kw5LLKvEpLkPzfSYLCboh+SwOX1t8Ld8PUYno6RNeLERPVPgIxUNWEQECdct5RjCNU+1YapZdi4Eo6ZqLbVaYkVRX/9AmJqqJ3/+hh/SCmuuew0XK6bvg4lsnceC29OatAaBW89ihlolXw7CMUIbOJgSIIMSjqvpToFA1CrxQ+fYYLvzA7zlszzIzy94AL5+h8x8QQVaJfcSzQagiJGJuRrT6f3ebD87xxhoU7TA5n1pPDfPE8M2PMTbLQ4cXpDBQRy5TRv7rH+Ync5cYGr5+hXbDS47Dm8+e42uF0mw8ep4hZkgIaMQu3cJu729mxQc2gYqpFSny/zNnxzOLbJco6Pw7Ti2knBGNVnRHbRS6ebLM1yB0TbnUZbTI7xvKutF0LzWS9uF9zapS3Zxlp8MMKP6+zOaAR+HMnf/GnV7nZZW2Pc8e5+DtVmR1yUPL+Y/y4xuoeVzrZgSrl++peBtk44NcNXjmZ2XQPiSnRbnJtmc0+H80xf4L9Ks/D7mHW4doyV+/wztlcq+rsQphaTNvNaKwIQp0YP5YtOtWm8xCf3MrdJ4fpDnL+oJQ2D2kmq0XgZjnkhUFPGaLG/n4WMSWWdnh4OE/hVp9m5K9dIuXQcc2y50aY/iY9Jboeh5xI/bwsIWSQII/vf8t4lBuh2rMUSy8HmP4yPanlckqeUGqQQchMHmwiYqFM0R/h0KW1d8O9fwFUMQYCxhzJOAAAAABJRU5ErkJggg==">
+  <link rel="icon" type="image/png" sizes="32x32" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAGmklEQVR42rWXe4xU9RXHP+d378zsLMvuAu4TELA8lEeFVMVdqKKt6B+NL6xSUGzU1ib9x/YPY9NUStImWltiq8aailhdWtPEJlUjPuKjtFqlwUeK6MpShH26sroz+5jZuXPv6R9nhhmYxYq2N/llfvfMvb9zzvd7zvd3fwLAZnVskQig9Y/arspGgSUos1WJixCpIpzEJYKq4iGMinCIiDfCiB0fbpK9CKAqICpF53O2a32Q4JcImyRBjBA05AtfAuABDjRgRJWt/evZYkGAsFldy0KmIzztTeXsKA0oIYJwkll/ShSKonh4rgbCFH/q38+3WIIIQEuH/t6rY1OUIocQ5/91KQrkXS0xHeG23o1ypzT9QS/0hBeICA2o/1HWJ74ifNCAdBSwwrmIayVe5APxHfiukkffgSeVdk8q7f/lcgTgktS7BFf7AucQgIALIjgyYTDUJ8yBAIHCUAZ8gWkFe6hmH8tZcDU+6MmQASrKSqdCnQDZCJZOg441cE87JD17KhfBnBrYfh789CuQCmBoAiZCaE3Cj5fDDQthPA9OPnNRCiGiSrNDUcWy6x6DVU1w4yJY0wKZvAVw/QJY/yXIhnD5qXD/Koh58OUZ8KPl0NYIeZ2cCic25ARa4Yp4JDzoGYM73rY/Ny2w39ZquOY0GMrCffvgO6fDdQvMngmNinRg8/E8hb6yXwHG8jAaQMTkCB0tt1ChLg5Pd8PhUUNifi20N8EpVfBoF3ychZ+9CbfvsWeqXKkIz6iHxfVGDUAuNPSW1MOZM+yZbFgZhH+0KhRiDvrG4eH9cPsK+N4ZpUU7uiyQW5ZBeyO80GcOAC6fC99eaPNtnXDrbpg1Be46B9bOMvtrg3Dz32Fg3PxUIAAQqVXz4wdhMAM3LIK2Jnj8A3h3GKp9C6g2DvmIo2V/IA03/Q0Ojlj9nNUAP1lhzm/dDRtegnMb4QfLYPS4YnXH90aVD11pcyoYr9s6Ie6Mx0y+pAEFAPjnR7Btj9EXKXy1Gc46xfg/vxnWzbN1pschJse2q6uQKbVMH+q0+10D8MYRs6nay2HZCqFaQV6xFK6aZ9ntHoSPsjDFN5qOZOCR/TY8d4IaKA8g6UFnCh47AM/2mpMiajUxKygnkCgU4aVzbOQjuHuv1YcCW8+FK+bae91j8ExPpVhJS4ceFp/Z5FEEcQWIivWQi2xIoY2WTYOkD28OQZVn1R8VVh2asFpJetaW0xP2vBN4PwUDBTVViCSG04BXKhAYDUwTnED/uDmLewZ/pPDqoP1O8Y3X53tL6HjOOE3l7P7DjLVrNrSgqn3wvEl0QAoZxx38ZS18vdXun7oY7lppzj2x6GtjMCNh+h9zNq+LGzUNVdBxAbx+Gbx1JfxqpSG06xtmO6/FWlomK0It7GxtjVCXgLvbYHUz/O494zYdwGC2UFTZgkyHpc2rmEhbo63z7rAp6/cXW4AJDx5YbYGGWlJM/3jd7h2H7y6CeVPhsufg7SGDbu1MaK6G53rgopnw7zSMhaZ0f/7Agkx6MBJYK7dW21oPdpqq3ny6BTSeN+R0si4QAVGYOcUeChWCCG5bDuvm2nzdXMvoSNYQaawy6pqS8FK/LZwN4eMJg7VnFE6bbyran6ncsI7pylBN5X7+FvxjEB4+H06dCt+cZ8X0wHvWnlv/BWta4eKZ8Jt34JLZNpK+BX7PXvjaE/DEYdhxodG3a8BQbKgy6mQyBIr7QT6C616Gd66C364yxzcuMr3f0QVPHrY9oytlPf9in7XdnBqjYWocapNQH7dxb7utf98+k/iEV06BIMUCnAjhop3WRhMhrH4SmpOwbxie7YFpcRMUgOGsBeMEGhIlui55Bj6ZsDZN5SyR+bXWVYdGyygoROCLkhJhlhZs+1PWYknfou0dsyI8mIYDmJNbllrP7+y2tsxFpYyK73ti/CY921sEEy41pFU8VAP6fBVeF58lBESAl/RLohP3DK5IIeGX9GJnt21WUYHDcnlNlu0ZRXu1X5L5so4VYI9TeERzhe800EhLLxYDOX5+cMQ2GF8qtb38/XJbmfOIGEQZhlV5zA1slL9qyHZXi0PJf5Zvyirv2F4+yYNJ6KpxTrhj4Fo55LNZXTzgh0Gaxa6WldFI2dHsU76pP8+pSDw8qSEWpnmofwO/IKaeoCqIaMO9WuPP4E5RbpIEcaLP6+kEJ1QHmucTQn7dt0G2gApHt/my43nzo3q2COtxnImSlC8YhirOOUaiiNckZEff9fK+JQ0g+h+yDsjPf0eS3QAAAABJRU5ErkJggg==">
+  <link rel="icon" type="image/png" sizes="48x48" href="data:image/png;base64,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">
+  <link rel="apple-touch-icon" href="data:image/png;base64,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">
+  <link rel="mask-icon" href="data:image/png;base64,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" color="#2196f3">
+<script>
+  // 渲染前设置主题, 避免闪烁 (深色/浅色/跟随系统)
+  try {
+    var __t = localStorage.getItem('vibekey-theme') || 'auto';
+    if (__t === 'auto') __t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', __t);
+  } catch(e) {}
+</script>
+<!-- ===== 样式: 按关注点拆成 5 个文件, 源在 .workbuddy/css/, 由 assemble_index.py 拷贝到 css/ =====
+     拆分的理由: 曾因一次正则误删整段内联 CSS 导致页面裸奔, 且千行单文件让脚本化改样式
+     极易锚点失配。加载顺序即层叠顺序, 勿调整序号。 -->
+  <link rel="stylesheet" href="css/01-base.css">
+<link rel="stylesheet" href="css/02-shell.css">
+<link rel="stylesheet" href="css/03-cards.css">
+<link rel="stylesheet" href="css/04-modal.css">
+  <link rel="stylesheet" href="css/05-responsive.css">
+<link rel="stylesheet" href="css/06-vkbd.css">
+<link rel="stylesheet" href="css/07-select-popup.css">
+<link rel="stylesheet" href="css/08-ec-icons.css">
+<link rel="stylesheet" href="css/09-led-rgb.css">
+</head>
+<body>
+<div class="app">
+
+  <!-- 装饰性窗口按钮 (同 QML 标题栏) -->
+  <div class="win-btns">
+    <div class="win-btn">&#x2014;</div>
+    <div class="win-btn">&#x25A1;</div>
+    <div class="win-btn close">&#x2715;</div>
+  </div>
+
+  <!-- ===== 左侧 60px 图标侧边栏 (图标取自 Studio 桌面端资源) ===== -->
+  <aside class="sidebar">
+    <!-- 10-06: logo 变成返回官网的入口（官网 = 仓库根的 index.html，GitHub Pages 上就是
+         https://lii-x.github.io/VibeKey-F3/ ）。
+         ★ 用户明确要求：**同一个标签页直接跳回去**，不要另开窗口
+           ⇒ 不加 target="_blank"（普通导航即可）。
+         ⚠️ 注意：这是真跳转，未保存的改动会丢 —— 用户已知悉并仍要这个行为。 -->
+    <a class="side-logo-link" href="https://lii-x.github.io/VibeKey-F3/"
+       title="返回 VibeKey-F3 官网">
+      <img class="side-logo" src="__LOGO__" alt="VibeKey-F3">
+    </a>
+    <nav class="side-nav">
+      <button class="nav-btn active" data-tab="keys" onclick="switchTab('keys')" title="按键配置">
+        <img class="ic ic-off" src="__KEYSET__" alt="">
+        <img class="ic ic-on" src="__KEYSET_ON__" alt="">
+      </button>
+      <button class="nav-btn" data-tab="status" onclick="switchTab('status')" title="运行状态">
+        <img class="ic ic-off" src="__STATUS__" alt="">
+        <img class="ic ic-on" src="__STATUS_ON__" alt="">
+      </button>
+      <button class="nav-btn" data-tab="ota" onclick="switchTab('ota')" title="固件升级">
+        <img class="ic ic-off" src="__OTA__" alt="">
+        <img class="ic ic-on" src="__OTA_ON__" alt="">
+      </button>
+    </nav>
+    <button class="nav-btn nav-more" data-tab="more" onclick="switchTab('more')" title="更多">
+      <img class="ic ic-off" src="__MORE__" alt="">
+      <img class="ic ic-on" src="__MORE_ON__" alt="">
+    </button>
+  </aside>
+
+  <!-- ===== 主内容区 ===== -->
+  <div class="main">
+
+    <!-- 标题栏：页签标题 + 全局连接状态 -->
+    <div class="titlebar">
+      <span class="tb-title" id="tbTitle">按键配置</span>
+      <span class="flex1"></span>
+      <div class="conn-bar">
+        <div class="status-dot" id="statusDot"></div>
+        <span class="status-text" id="statusText">未连接</span>
+        <span class="device-info" id="deviceInfo"></span>
+        <div class="conn-menu">
+          <button class="btn btn-primary" id="connectBtn" onclick="connectDevice()">连接设备</button>
+          <button class="btn btn-primary conn-caret" id="connMenuBtn" title="选择连接方式" aria-label="选择连接方式"
+                  onclick="toggleConnMenu(event)">▾</button>
+          <div class="conn-dropdown" id="connDropdown">
+            <button type="button" class="conn-item" onclick="pickConn('ble')">
+              <span class="ci-t">蓝牙</span><span class="ci-s">无线 · 手机可用</span></button>
+            <button type="button" class="conn-item" onclick="pickConn('usb')">
+              <span class="ci-t">USB 串口</span><span class="ci-s">有线 · 仅桌面浏览器</span></button>
+          </div>
+        </div>
+        <button class="btn btn-danger" id="disconnectBtn" onclick="disconnectDevice()" style="display:none;">断开</button>
+        <button class="btn btn-sm" id="themeBtn" onclick="cycleTheme()" title="切换主题：深色 / 浅色 / 跟随系统">🖥️ 跟随</button>
+      </div>
+    </div>
+
+    <div class="views">
+
+      <!-- ===== 页签：按键配置 ===== -->
+      <section class="view active" id="view-keys">
+
+        <!-- 操作条: 槽位 + 休眠 + 读取/写入/恢复 (10-05)
+             连接状态(绿点/已连接/设备名/断开)只在标题栏出现一次 —— 之前这里也放了一份,
+             导致「已连接」等字样在同一屏出现两遍。现在这一行只留操作, 状态看标题栏。 -->
+        <div class="status-card">
+          <div class="sc-row">
+            <div class="slot-selector">
+              <span class="slot-label">槽位</span>
+              <button class="slot-btn active" data-slot="0" onclick="setSlot(0)" disabled>蓝牙1</button>
+              <button class="slot-btn" data-slot="1" onclick="setSlot(1)" disabled>蓝牙2</button>
+              <button class="slot-btn" data-slot="2" onclick="setSlot(2)" disabled>蓝牙3</button>
+            </div>
+            <div class="sleep-select">
+              <label>休眠</label>
+              <select id="sleepMin" onchange="setSleepMin()" disabled>
+                <option value="45">45 分钟</option>
+                <option value="60">1 小时</option>
+                <option value="90">1.5 小时</option>
+                <option value="120">2 小时</option>
+                <option value="180">3 小时</option>
+                <option value="0">永不</option>
+              </select>
+            </div>
+            <span class="flex1"></span>
+            <div class="sc-actions">
+              <button class="pill pill-green" id="readBtn" onclick="readConfig()" disabled>读取</button>
+              <button class="pill pill-green" id="writeBtn" onclick="writeConfig()" disabled>写入</button>
+              <button class="pill pill-amber" id="resetBtn" onclick="resetConfig()" disabled>恢复</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 设备居中 + Summary 卡片环绕 (对齐 Studio; 点击卡片跳转完整编辑器) -->
+        <div class="studio-layout" id="studioLayout">
+          <svg class="connectors" aria-hidden="true"></svg>
+          <div class="scol" id="sumLeft"></div>
+          <div class="device-col">
+            <div class="device-frame">
+              <img class="device-img" src="__DEVICE__" alt="VibeKey-F3 设备">
+              <!-- 键帽颜色叠加层 (对齐 Studio keyHotspotRepeater): RGB 开启时 35% 透明度着色,
+                   关闭时白色 8% 微光; 位置由 updateKeycaps() 按 PNG 实测矩形设定 -->
+              <div class="keycap" data-path="keys.0" title="KEY C1"></div>
+              <div class="keycap" data-path="keys.1" title="KEY C2"></div>
+              <div class="keycap" data-path="keys.2" title="KEY C3"></div>
+            </div>
+          </div>
+          <div class="scol" id="sumRight"></div>
+        </div>
+
+        <!-- 按键编辑已改为「点击环绕设备的小卡片 → 弹窗编辑」(Studio 同款)，
+             不再在整页渲染冗长的完整编辑器；空中鼠标 / 摇一摇设置随对应分组弹窗一并呈现。 -->
+      </section>
+
+      <!-- ===== 页签：运行状态 ===== -->
+      <section class="view" id="view-status">
+        <!-- 灯效测试 -->
+        <div class="panel">
+          <!-- 10-06 用户要求:
+               ① 标题去掉「(手动测试 LED)」→ 只留「灯效测试」；
+               ② 原「手动测试 + 通道」那一整行删掉（「手动测试」标签不要）；
+               ③ 通道徽章/电量**上移**到标题行（.panel-title 本就是 flex+gap, 直接放进来即可）。
+               ⚠️ #ledChannel 必须留着 —— updateLedChannel() 要写它；
+                  #ledBattery 与它同源，一起上移。 -->
+          <div class="panel-title">灯效测试
+            <span class="channel-badge none" id="ledChannel">通道：无设备</span>
+            <span class="led-batt" id="ledBattery"></span>
+          </div>
+          <div class="led-test">
+            <!-- 蓝牙功能代码(toggleBleLed/connectBleLed/sendLedBle…)仍保留在 00-original.js 里
+                 供源码与协议参考, 只是页面上已无入口（按钮与说明均已按用户要求移除）。 -->
+            <!-- 状态灯分组标题 + 四个按钮 -->
+            <div class="led-row">
+              <span class="led-grp">LED1/LED2/LED3</span>
+              <span class="flex1"></span>
+              <div class="led-buttons">
+                <button class="led-btn led-yellow" onclick="sendLed(1)">黄灯</button>
+                <button class="led-btn led-green" onclick="sendLed(2)">绿灯</button>
+                <button class="led-btn led-red" onclick="sendLed(3)">红灯</button>
+                <button class="led-btn led-off" onclick="sendLed(0)">关灯</button>
+              </div>
+            </div>
+
+            <!-- 两组之间的细分隔线（对齐上位机） -->
+            <div class="led-sep"></div>
+
+            <!-- C1/C2/C3 RGB 测试区（10-06 新增, 对齐上位机: 8色快选 + 亮度条 + 亮灭）
+                 三行由 js/19-led-rgb.js 的 renderLedRgb() 动态生成 -->
+            <div class="led-row">
+              <span class="led-grp">C1/C2/C3 RGB</span>
+              <span class="flex1"></span>
+              <button class="led-alloff" id="ledAllOffBtn" onclick="ledTestAllOff()">全部熄灭</button>
+            </div>
+            <div class="led-rgb-rows" id="ledRgbRows"></div>
+            <div class="led-rgb-note" id="ledRgbNote"></div>
+
+            <!-- 10-06 用户要求: 原来的「网页版蓝牙通道实际不可用…」长段说明整块删除 -->
+          </div>
+        </div>
+
+        <!-- Log -->
+        <div class="panel">
+          <div class="panel-title">通信日志</div>
+          <div class="log-panel" id="logPanel"></div>
+        </div>
+      </section>
+
+      <!-- ===== 页签：固件升级 ===== -->
+      <section class="view" id="view-ota">
+        <div class="ota-scroll">
+
+          <!-- 发现新固件横幅 (对齐 QML 856-896: #fff8e6 底 + 橙字 + 「立即升级」按钮) -->
+          <div class="ota-notice" id="otaNotice" style="display:none;">
+            <span class="ota-notice-arrow">↑</span>
+            <div class="ota-notice-txt">
+              <div class="ota-notice-t" id="otaNoticeTitle">发现新固件</div>
+              <div class="ota-notice-s" id="otaNoticeSub"></div>
+            </div>
+            <button class="ota-notice-btn" id="otaNoticeBtn" onclick="otaUpgradeNow()">立即升级</button>
+          </div>
+
+          <!-- 设备 (对齐 QML 899-927: 高 56 白底 radius 10, 左侧「设备」+ 圆点 + 连接态, 右侧「刷新」) -->
+          <div class="ota-dev">
+            <span class="ota-dev-label">设备</span>
+            <span class="ota-dot" id="otaDevDot"></span>
+            <span class="ota-dev-txt" id="otaDevText">USB未连接（固件升级仅支持USB连接）</span>
+            <span class="ota-dev-fill"></span>
+            <span class="ota-refresh" id="otaRefresh" onclick="otaRefreshDevice()">刷新</span>
+          </div>
+
+          <!-- 固件来源 + 本地/网络分段 (对齐 QML 929-1076) -->
+          <div class="ota-src">
+            <div class="ota-src-head">
+              <span class="ota-src-title">固件来源</span>
+              <span class="ota-src-fill"></span>
+              <div class="seg ota-seg" id="otaSrcSeg">
+                <button class="seg-btn" id="otaSrcLocal" onclick="setOtaSrcMode(0)">本地文件</button>
+                <button class="seg-btn active" id="otaSrcNet" onclick="setOtaSrcMode(1)">网络获取</button>
+              </div>
+            </div>
+
+            <!-- 本地模式: 浏览 .bin (对齐 QML 958-981) -->
+            <div class="ota-local" id="otaLocalPane">
+              <div class="ota-file">
+                <span class="ota-file-box" id="otaFileName">选择固件文件 - 点击浏览选择 .bin 文件</span>
+                <span class="ota-browse" id="otaBrowseBtn" onclick="document.getElementById('otaFileInput').click()">浏览</span>
+                <input type="file" id="otaFileInput" accept=".bin,application/octet-stream" style="display:none" onchange="selectFirmwareFile(this)">
+              </div>
+            </div>
+
+            <!-- 网络模式: 在线版本列表 (对齐 QML 983-1071, 数据源同 net_worker.py: Gitee Releases) -->
+            <div class="ota-net" id="otaNetPane">
+              <div class="ota-net-head">
+                <span class="ota-net-title">在线版本（Gitee 发布）</span>
+                <span class="ota-net-cur" id="otaNetCur"></span>
+                <span class="ota-net-fill"></span>
+                <span class="ota-refresh" id="otaNetRefresh" onclick="otaRefreshReleases()">刷新</span>
+              </div>
+              <div class="ota-net-empty" id="otaNetEmpty" style="display:none;">暂无可用版本</div>
+              <div class="ota-net-list" id="otaNetList"></div>
+              <div class="ota-net-picked" id="otaNetPicked" style="display:none;"></div>
+            </div>
+          </div>
+
+          <div class="ota-meta" id="otaMeta"></div>
+          <div class="ota-progress" id="otaProgressWrap" style="display:none;">
+            <div class="ota-progress-bar" id="otaProgressBar"></div>
+          </div>
+          <div class="ota-status" id="otaStatus"></div>
+          <div class="ota-actions">
+            <button class="btn btn-success" id="otaBtn" onclick="startOta()" disabled>开始升级</button>
+          </div>
+          <div class="hint">通过 USB 串口升级固件（协议与上位机 ota_worker.py 一致）。升级过程中请勿拔出设备；发送完成后设备会重启并自动验证版本。仅支持 .bin 固件。</div>
+
+        </div>
+      </section>
+
+      <!-- ===== 页签：更多 ===== -->
+      <section class="view" id="view-more">
+        <div class="panel">
+          <div class="panel-title">关于 VibeKey-F3 Web</div>
+          <div class="about-text">
+            基于 <b>Web Serial API</b> 的网页版配置工具，无需安装驱动，浏览器直接配置设备。<br>
+            <span class="dim">本页 UI 对齐 VibeKey-F3 Studio 桌面端工作台（侧边导航 + 微信绿主题）。</span>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">网页端 vs 桌面端 (VibeKey-F3 Studio)</div>
+          <div class="about-text">
+            • <b>桌面端 Studio</b>（Qt）：按键配置、运行状态监控、OTA 固件升级、灯效、系统托盘、固件更新提醒等完整功能。<br>
+            • <b>网页端</b>：免安装，插上 USB 即可读取/写入配置、升级固件，适合临时改动与分享给朋友使用。
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-title">使用说明</div>
+          <div class="about-text">
+            1. 使用 <b>Chrome / Edge</b> 打开本页（Web Serial 仅支持 Chromium 内核浏览器）<br>
+            2. 设备通过 <b>USB</b> 连接电脑<br>
+            3. 点击右上角"连接设备"，在弹出的串口列表中选择设备<br>
+            4. 读取配置 → 修改 → 写入配置
+          </div>
+          <div class="hint">提示：右上角按钮可切换 深 / 浅 / 跟随系统 三种主题。<br>
+            按键配置页：<b>单击卡片</b>打开编辑弹窗；<b>按住拖动卡片</b>可调整位置，拖过之后卡片右上角会出现 <b>&#8635;</b> 按钮，点它恢复默认位置。</div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- Studio 同款：按键编辑弹窗 (点击环绕设备的小卡片打开) -->
+<div class="modal" id="editorModal">
+  <div class="modal-backdrop" onclick="closeEditor()"></div>
+  <div class="modal-card">
+    <div class="modal-head">
+      <span class="modal-title" id="modalTitle">编辑键位</span>
+      <button class="modal-close" onclick="closeEditor()" title="关闭">×</button>
+    </div>
+    <div class="modal-body"><div class="modal-groups" id="editorModalBody"></div></div>
+    <div class="modal-foot">
+      <button class="modal-clear" onclick="clearShakeKey()">清除</button>
+      <button class="modal-done" onclick="closeEditor()">完成</button>
+    </div>
+    <p class="modal-note" id="shakeNote"></p>
+  </div>
+</div>
+
+<!-- ===== 虚拟键盘 (仅网页端): 弹窗打开时右下角出现入口 =====
+     屏幕键盘用鼠标点选组合键, 绕开 Windows 输入法/系统热键(最典型: Ctrl+空格
+     切中英) —— 这类组合键的真实 keydown 根本到不了网页, 网页端只能靠这个兜底。
+     入口与面板的显隐由 CSS 兄弟选择器(#editorModal.show ~ .vkbd-fab)控制。 -->
+<button type="button" class="vkbd-fab" onclick="toggleVkbd()" title="打开虚拟键盘：用鼠标点选组合键（可绕开 Ctrl+空格 等被系统吃掉的组合键）">
+  <span class="vkbd-fab-ico">&#9000;</span><span>虚拟键盘</span>
+</button>
+<div class="vkbd" id="vkbd">
+  <div class="vkbd-head">
+    <span class="vkbd-title">虚拟键盘</span>
+    <select class="vkbd-target" id="vkbdTarget" title="写入哪个快捷键框"></select>
+    <button type="button" class="vkbd-hand" id="vkbdHand" onclick="toggleVkbdHand()" title="切换顶部修饰键条：左手 LCtrl/LShift/LAlt/LWin ↔ 右手 RCtrl/RShift/RAlt/RWin">左手</button>
+    <button type="button" class="vkbd-x" onclick="toggleVkbd()" title="关闭">&#215;</button>
+  </div>
+  <p class="vkbd-prev" id="vkbdPrev"></p>
+  <div class="vkbd-mods" id="vkbdMods"></div>
+  <div class="vkbd-keys" id="vkbdKeys"></div>
+  <div class="vkbd-foot">
+    <button type="button" class="vkbd-btn" id="vkbdModsOnly" title="只保存修饰键（如仅 Ctrl 或 Ctrl+Alt），不设主键">仅修饰键</button>
+    <button type="button" class="vkbd-btn" id="vkbdClear" title="清除该框的快捷键">清除</button>
+    <span class="vkbd-hint">点主键即写入并留在面板，可继续设下一个</span>
+  </div>
+</div>
+
+<script>

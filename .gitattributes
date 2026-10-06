@@ -1,0 +1,9 @@
+# 统一行尾：入库统一为 LF，检出时按平台自动转换（Windows->CRLF）
+* text=auto eol=crlf
+
+# 明确不转换的二进制文件（若将来加入）
+*.png binary
+*.jpg binary
+*.ico binary
+*.exe binary
+*.bin binary

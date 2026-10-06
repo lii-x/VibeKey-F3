@@ -1,0 +1,949 @@
+/* ==========================================================================
+   VibeKey-F3 产品官网 — 样式表
+   命名: .sec-* 为区块, .grd 为栅格, .crd 为卡片。字号用 clamp() 流体缩放。
+   颜色取自产品图: 主蓝 #0A84E0 / 橙 #F97316 / 深蓝 #0B2A5B
+   ========================================================================== */
+
+:root {
+  --blue: #0A84E0;
+  --blue-d: #0668B8;
+  --blue-l: #E8F3FD;
+  --orange: #F97316;
+  --orange-l: #FFF1E6;
+  --navy: #0B2A5B;
+  --ink: #16202E;
+  --ink-2: #465568;
+  --ink-3: #7C8B9C;
+  --line: #E4EAF0;
+  --bg: #FFFFFF;
+  --bg-2: #F6F9FC;
+  --r: 16px;
+  --r-s: 10px;
+  --sh: 0 4px 24px rgba(11, 42, 91, .08);
+  --sh-l: 0 12px 48px rgba(11, 42, 91, .14);
+  --max: 1280px;
+  /* 导航高度: 桌面 64 / 手机 60, 改高度时只改这一个值。
+     .nav-in 用它定高, .hero 用它补顶部留白(导航已 fixed 脱离文档流),
+     html 用它做 scroll-padding-top(锚点跳转不被导航盖住) —— 三处联动。 */
+  --nav-h: 64px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: var(--nav-h); }
+
+body {
+  font-family: "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", system-ui, -apple-system, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+img { display: block; max-width: 100%; }
+a { color: inherit; text-decoration: none; }
+
+/* ---------- 容器 ---------- */
+.wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
+
+/* ---------- 导航 ----------
+   布局要点(踩过坑): 导航项 8 个 + logo + 2 个按钮, 若只靠 margin-left:auto 硬挤,
+   容器宽度不够时子项(都带 nowrap)会溢出并**互相叠在一起**(用户截图)。
+   对策: ① nav-in 显式 min-width:0, 让 flex 子项能真正收缩;
+        ② overflow:hidden 兜底, 极端情况只裁不叠;
+        ③ 分档降级 —— 中等宽度隐藏纯锚点项只留核心几项, 窄屏全收进汉堡菜单。
+
+   ★★ 透明 → 毛玻璃(对标 Chatterfly):
+     常态(nav 不带 .is-solid)完全透明, 直接浮在首屏动态背景上;
+     页面滚动超过 --nav-h 的一半后, JS 给 .nav 加 .is-solid,
+     背景变成半透明白 + backdrop-filter 模糊, 与背景里的内容分层。
+   ★ 为什么用 fixed 而不是 sticky:
+     sticky 时导航始终占着文档流里的 64px, 首屏顶部会留出一条空白带,
+     透明了反而像"上面缺了一块"(用户截图里首屏标题整体下移且导航悬空)。
+     fixed 让导航真正浮在内容之上, 首屏背景能从 y=0 连续铺下来。
+     代价: 导航不再给页面"顶开"空间, 必须由 .hero 的 padding-top 补上(见下)。 */
+.nav {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+  background: transparent;
+  border-bottom: 1px solid transparent;
+  transition: background .32s ease, border-color .32s ease,
+              box-shadow .32s ease, backdrop-filter .32s ease;
+}
+/* 滚动后的毛玻璃态。半透明白 + 模糊, 背景里的光斑/极光会透出模糊的色块,
+   这是毛玻璃效果的关键 —— 只加白底不 blur 就是"变白"而不是"毛玻璃"。 */
+.nav.is-solid {
+  background: rgba(255, 255, 255, .72);
+  -webkit-backdrop-filter: saturate(180%) blur(18px);
+          backdrop-filter: saturate(180%) blur(18px);
+  border-bottom-color: var(--line);
+  box-shadow: 0 2px 16px rgba(11, 42, 91, .06);
+}
+/* 兜底: 极老的浏览器不支持 backdrop-filter 时, 半透明白会显得"灰蒙"、
+   文字对比度不够。此时给一版更实的白底, 保证可读性。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .nav.is-solid { background: rgba(255, 255, 255, .96); }
+}
+.nav-in { display: flex; align-items: center; gap: 16px; height: var(--nav-h); min-width: 0; }
+.logo { display: flex; align-items: center; gap: 9px; font-size: 19px; font-weight: 800; color: var(--navy); white-space: nowrap; flex-shrink: 0; }
+/* 品牌标识: 直接用改键页那张官方图标(VibeKey-F3 蓝底白字),
+   不再自绘蓝色方块, 保证官网上机与配置工具是同一个 logo。 */
+.logo-mark {
+  width: 30px; height: 30px; border-radius: 7px; overflow: hidden;
+  display: grid; place-items: center; flex-shrink: 0;
+  box-shadow: 0 1px 3px rgba(11, 42, 91, .18);
+}
+.logo-mark img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.nav-links { display: flex; gap: 20px; margin-left: auto; min-width: 0; overflow: hidden; }
+.nav-links a {
+  font-size: 14px; color: var(--ink-2); font-weight: 500;
+  transition: color .18s; white-space: nowrap; flex-shrink: 0;
+}
+/* 抽屉专用项(在线改键 / GitHub): **桌面端必须隐藏**。
+   这两项的样式只写在 @media (max-width:900px) 里, 桌面端若不显式隐藏,
+   它们会作为普通导航项挤进 .nav-links, 再被 overflow:hidden 裁掉 ->
+   出现「GitHub 开源仓库」被切一半的现象(用户截图)。
+   桌面端另有 .nav-app / .nav-gh 两个独立按钮承担这两件事。 */
+.nav-links a.nav-menu-app,
+.nav-links a.nav-menu-gh { display: none; }
+.nav-links a:hover { color: var(--blue); }
+.nav-cta {
+  flex-shrink: 0;
+  padding: 8px 17px; border-radius: 999px; background: var(--blue); color: #fff;
+  font-size: 14px; font-weight: 600; white-space: nowrap;
+  transition: background .18s, transform .18s;
+}
+.nav-cta:hover { background: var(--blue-d); transform: translateY(-1px); }
+/* 导航「在线改键」入口: 描边样式, 与主 CTA 区分但同样醒目 */
+.nav-app {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  padding: 8px 14px; border-radius: 999px;
+  border: 1.5px solid rgba(10,132,224,.42); color: var(--blue);
+  font-size: 13.5px; font-weight: 600; white-space: nowrap;
+  transition: background .18s, border-color .18s, transform .18s;
+}
+.nav-app:hover { background: var(--blue-l); border-color: var(--blue); transform: translateY(-1px); }
+/* GitHub 开源入口: 纯图标按钮(桌面), 与其它胶囊区隔, 用中性色避免抢主色 */
+.nav-gh {
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
+  padding: 9px 12px; border-radius: 10px;
+  color: var(--ink-2); transition: color .18s, background .18s;
+}
+.nav-gh:hover { color: var(--navy); background: var(--nav); }
+.nav-gh span { font-size: 13.5px; font-weight: 600; }
+/* 汉堡按钮: 手机端主入口, 做成带描边的方形按钮, 比裸图标更易点。
+   用 grid 让「汉堡/关闭」两个图标叠在同一格, 切换只靠 display。 */
+.nav-toggle {
+  flex-shrink: 0;
+  width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 10px;
+  background: #fff; cursor: pointer; margin-left: auto; padding: 0;
+  display: none; grid-template: 1fr / 1fr; place-items: center;
+  transition: border-color .18s, background .18s;
+}
+.nav-toggle:hover { border-color: var(--blue); background: var(--blue-l); }
+/* 汉堡 <-> 关闭 图标切换 */
+.nav-toggle svg { grid-area: 1 / 1; }
+.nav-toggle .ic-close { display: none; }
+.nav-toggle[aria-expanded="true"] .ic-burger { display: none; }
+.nav-toggle[aria-expanded="true"] .ic-close { display: block; }
+.nav-toggle[aria-expanded="true"] { border-color: var(--blue); background: var(--blue-l); }
+
+/* ---------- 首屏 ---------- */
+/* 背景渐变必须**收在 100%**(hero 底部)而不是中段就变白 ——
+   否则浅蓝会在 hero 中间就淡成白色, 与 hero 底边之间留一段"白",
+   视觉上就是整层底色被齐刷刷切一刀, 像被拆成两半(用户截图)。
+   现在过渡一路铺到 hero 底边, 底边刚好是纯白, 与下方 .sec 的白底无缝衔接。 */
+.hero {
+  position: relative; overflow: hidden;
+  background: linear-gradient(176deg, #E9F4FF 0%, #F3F9FF 44%, #FAFCFF 76%, #fff 100%);
+}
+
+/* 10-06 动态背景(对标 chatterfly 的"会动的底")—— 纯 CSS, 无 JS / 无依赖, 三层:
+   ① 右上光晕改成缓慢"呼吸"(缩放 + 淡入淡出)
+   ② 3 个大号柔光斑各自独立漂移, 周期 30/38/34s 互质 ⇒ 长时间也不重复
+   ③ 极淡点阵纹理横向滚动, 补一层细颗粒感, 用 mask 让四周淡出避免硬边
+   三层一律 z-index:0, 内容 .hero-in 是 z-index:1 ⇒ 动画永远在文字/按钮之下, 不影响可读性与点击。 */
+.hero::before {
+  content: ''; position: absolute; z-index: 0;
+  width: 620px; height: 620px;
+  right: -140px; top: -180px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(10,132,224,.16), transparent 68%);
+  animation: heroGlow 18s ease-in-out infinite alternate;
+}
+@keyframes heroGlow {
+  from { transform: scale(1);    opacity: .8; }
+  to   { transform: scale(1.16); opacity: 1;  }
+}
+
+/* 光斑层自带上下淡出 mask: 光斑本身是"越靠边越淡"的柔光, 若只靠
+   overflow:hidden 硬裁, 边缘会出现一条明显的直边(像背景被切了一刀)。
+   这里在容器上再叠一层纵向 mask, 让光斑在碰到 hero 上下边之前就自己
+   化掉, 裁切线永远看不见。
+   ★ 顶部淡出起点从 14% 收到 8%: 导航改成 fixed 后 hero 顶边就是视口顶边,
+     原来 14% 的淡出区正好盖住导航那一条, 光斑透不到导航后面, 毛玻璃就
+     只能糊到纯色 —— 看着像"导航下面垫了块白板", 不是玻璃。收到 8% 让
+     光斑能铺到导航区域, 滚动后才有真实的模糊色块透出来。 */
+.hero-aurora {
+  position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 8%, #000 62%, transparent 96%);
+          mask-image: linear-gradient(to bottom, transparent 0, #000 8%, #000 62%, transparent 96%);
+}
+.aurora-blob { position: absolute; border-radius: 50%; will-change: transform; }
+/* 三个光斑都往画面内侧收, 别把大半身子甩到 hero 外面去 ——
+   被裁掉的部分等于白做, 看着就像"缺了一块"。 */
+.aurora-b1 {
+  width: 560px; height: 560px; left: -120px; top: -110px;
+  background: radial-gradient(circle, rgba(10,132,224,.20), transparent 70%);
+  animation: aurora1 30s ease-in-out infinite alternate;
+}
+.aurora-b2 {
+  width: 480px; height: 480px; right: -90px; top: 150px;
+  background: radial-gradient(circle, rgba(0,180,224,.15), transparent 70%);
+  animation: aurora2 38s ease-in-out infinite alternate;
+}
+/* 紫色原来在 bottom:-210px, 只剩一条很薄的边露在首屏底部, 基本看不见;
+   提到 bottom:-70px 让它完整参与构图, 再靠上面的 mask 自然收尾。 */
+.aurora-b3 {
+  width: 460px; height: 460px; left: 32%; bottom: -70px;
+  background: radial-gradient(circle, rgba(122,110,255,.13), transparent 70%);
+  animation: aurora3 34s ease-in-out infinite alternate;
+}
+@keyframes aurora1 { from { transform: translate3d(0,0,0) scale(1); }    to { transform: translate3d(100px,64px,0) scale(1.12); } }
+@keyframes aurora2 { from { transform: translate3d(0,0,0) scale(1.07); } to { transform: translate3d(-86px,54px,0) scale(.94); } }
+@keyframes aurora3 { from { transform: translate3d(0,0,0) scale(.95); }   to { transform: translate3d(66px,-76px,0) scale(1.14); } }
+
+/* 点阵纹理: 横向缓慢滚动补颗粒感。mask 用纵向渐隐(而非原来的径向) ——
+   径向会在左右两侧也淡出, 靠边处出现半截点阵; 纵向只管上下, 左右保持满密度,
+   底边也不会跟 hero 底边撞出一条横线。 */
+.hero::after {
+  content: ''; position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  background-image: radial-gradient(circle, rgba(11,42,91,.10) 1px, transparent 1.1px);
+  background-size: 26px 26px;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16%, #000 58%, transparent 94%);
+          mask-image: linear-gradient(to bottom, transparent 0, #000 16%, #000 58%, transparent 94%);
+  animation: dotDrift 26s linear infinite;
+}
+@keyframes dotDrift { from { background-position: 0 0; } to { background-position: 260px 0; } }
+
+.hero-in {
+  position: relative; z-index: 1;                 /* 动态背景都在这一层之下 */
+  display: grid; grid-template-columns: 1fr 380px;
+  gap: 48px; align-items: center;
+  /* 顶部留白 = 原有间距 + 导航高度: 导航已 fixed 脱离文档流, 不再"顶开"页面,
+     不补这一段的话首屏标题会钻到导航底下。这一条是 fixed 改造的必要补丁。 */
+  padding: calc(76px + var(--nav-h)) 24px 84px;
+}
+
+/* 无障碍: 系统开了"减少动态效果"(prefers-reduced-motion)就把首屏动画全停 ——
+   仍保留静态光斑, 页面不会变成白板。顺带把原本就在动的 .hero-ring 也一并停掉。 */
+@media (prefers-reduced-motion: reduce) {
+  .hero::before, .hero::after, .aurora-blob, .hero-ring { animation: none !important; }
+}
+/* 手机端: 光斑等比缩小并往内收, 免得糊满整屏或被裁成半块 */
+@media (max-width: 900px) {
+  .hero::before { width: 420px; height: 420px; right: -90px; top: -150px; }
+  .aurora-b1 { width: 360px; height: 360px; left: -100px; top: -90px; }
+  .aurora-b2 { width: 320px; height: 320px; right: -80px; top: 120px; }
+  .aurora-b3 { width: 300px; height: 300px; left: 26%; bottom: -60px; }
+}
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 7px 16px; border-radius: 999px; background: #fff;
+  border: 1px solid rgba(10,132,224,.28); color: var(--blue);
+  font-size: 13.5px; font-weight: 600; margin-bottom: 22px;
+  box-shadow: 0 2px 10px rgba(10,132,224,.1);
+}
+.hero h1 {
+  font-size: clamp(34px, 4.4vw, 50px); line-height: 1.2;
+  font-weight: 800; color: var(--navy); letter-spacing: -.5px;
+}
+/* 两行各自成块: 第二行按词组换行, 避免出现孤字 */
+.hero h1 .l1, .hero h1 .l2 { display: block; }
+.hero h1 em { font-style: normal; color: var(--blue); }
+.hero-sub { margin-top: 20px; font-size: clamp(16px, 1.6vw, 19px); color: var(--ink-2); max-width: 540px; }
+.hero-tags { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+.hero-tags span {
+  padding: 8px 16px; border-radius: 999px; background: #fff;
+  border: 1px solid var(--line); font-size: 14px; font-weight: 500; color: var(--ink-2);
+  box-shadow: 0 1px 6px rgba(11,42,91,.05);
+}
+.hero-btns { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 34px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 14px 30px; border-radius: 999px; font-size: 15.5px; font-weight: 600;
+  transition: transform .18s, box-shadow .18s, background .18s;
+}
+.btn-p { background: var(--blue); color: #fff; box-shadow: 0 6px 20px rgba(10,132,224,.28); }
+.btn-p:hover { background: var(--blue-d); transform: translateY(-2px); box-shadow: 0 10px 28px rgba(10,132,224,.34); }
+.btn-s { background: #fff; color: var(--navy); border: 1.5px solid var(--line); }
+.btn-s:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-2px); }
+.hero-vis { position: relative; display: grid; place-items: center; min-height: 460px; }
+.hero-vis img {
+  width: auto; max-width: 260px; max-height: 440px;
+  filter: drop-shadow(0 24px 44px rgba(11,42,91,.22));
+}
+.hero-ring {
+  position: absolute; width: 300px; height: 300px; border-radius: 50%;
+  background: radial-gradient(circle, rgba(10,132,224,.2), transparent 70%);
+  animation: pulse 4.5s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { transform: scale(1); opacity: .85; } 50% { transform: scale(1.09); opacity: .5; } }
+
+/* ---------- 通用区块 ---------- */
+.sec { padding: 92px 0; }
+.sec-alt { background: var(--bg-2); }
+.sec-head { text-align: center; max-width: 720px; margin: 0 auto 56px; }
+.sec-tag {
+  display: inline-block; padding: 6px 15px; border-radius: 999px;
+  background: var(--blue-l); color: var(--blue);
+  font-size: 13px; font-weight: 700; letter-spacing: .4px; margin-bottom: 16px;
+}
+.sec-tag.o { background: var(--orange-l); color: var(--orange); }
+.sec-head h2 { font-size: clamp(27px, 3.6vw, 40px); line-height: 1.25; font-weight: 800; color: var(--navy); }
+.sec-head p { margin-top: 16px; font-size: clamp(15px, 1.5vw, 17.5px); color: var(--ink-2); }
+
+/* ---------- 四大功能 ---------- */
+.grd-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; }
+.crd {
+  padding: 32px 26px; border-radius: var(--r); background: #fff;
+  border: 1px solid var(--line); transition: transform .22s, box-shadow .22s, border-color .22s;
+}
+.crd:hover { transform: translateY(-6px); box-shadow: var(--sh-l); border-color: rgba(10,132,224,.3); }
+.crd-ic {
+  width: 54px; height: 54px; border-radius: 14px;
+  display: grid; place-items: center; font-size: 25px; margin-bottom: 20px;
+  background: var(--blue-l);
+}
+.crd:nth-child(2) .crd-ic { background: var(--orange-l); }
+.crd:nth-child(3) .crd-ic { background: #E8F8F0; }
+.crd:nth-child(4) .crd-ic { background: #F1ECFE; }
+.crd h3 { font-size: 18.5px; font-weight: 700; color: var(--navy); margin-bottom: 10px; }
+.crd p { font-size: 14.8px; color: var(--ink-2); }
+
+/* 官方功能总览图(卡片下方大图) */
+.feat-shot { margin-top: 44px; display: grid; place-items: center; }
+.feat-shot img { max-height: 620px; width: auto; border-radius: var(--r); box-shadow: var(--sh-l); }
+
+/* ---------- 图文交替 ---------- */
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center; }
+.split-rev .split-vis { order: -1; }
+.split-vis { display: grid; place-items: center; }
+.split-vis img { max-height: 560px; width: 100%; border-radius: var(--r); box-shadow: var(--sh-l); }
+.split-txt h3 { font-size: clamp(24px, 3vw, 33px); font-weight: 800; color: var(--navy); line-height: 1.3; }
+.split-txt > p { margin-top: 18px; font-size: clamp(15px, 1.5vw, 17px); color: var(--ink-2); }
+.feat-list { list-style: none; margin-top: 28px; display: flex; flex-direction: column; gap: 16px; }
+.feat-list li { display: flex; gap: 14px; align-items: flex-start; }
+.feat-list .n {
+  flex-shrink: 0; width: 28px; height: 28px; border-radius: 50%;
+  background: var(--blue); color: #fff; display: grid; place-items: center;
+  font-size: 13.5px; font-weight: 700; margin-top: 2px;
+}
+.feat-list b { display: block; color: var(--navy); font-size: 16px; font-weight: 700; }
+.feat-list span { font-size: 14.5px; color: var(--ink-2); }
+
+/* ---------- 语音输入 步骤 ---------- */
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+.step {
+  position: relative; padding: 34px 28px; border-radius: var(--r);
+  background: #fff; border: 1px solid var(--line); text-align: center;
+}
+.step::after {
+  content: '→'; position: absolute; right: -20px; top: 50%; transform: translateY(-50%);
+  font-size: 24px; color: var(--blue); font-weight: 700; z-index: 2;
+}
+.step:last-child::after { display: none; }
+.step-n {
+  width: 44px; height: 44px; margin: 0 auto 18px; border-radius: 50%;
+  background: var(--blue); color: #fff; display: grid; place-items: center;
+  font-size: 19px; font-weight: 800;
+}
+.step h4 { font-size: 17.5px; font-weight: 700; color: var(--navy); margin-bottom: 8px; }
+.step p { font-size: 14.5px; color: var(--ink-2); }
+
+/* ---------- 兼容软件 ---------- */
+.compat { display: flex; flex-wrap: wrap; gap: 14px; justify-content: center; }
+.compat-item {
+  padding: 15px 28px; border-radius: 12px; background: #fff;
+  border: 1px solid var(--line); font-size: 15.5px; font-weight: 600; color: var(--ink-2);
+  box-shadow: 0 2px 10px rgba(11,42,91,.05);
+}
+
+/* ---------- 槽位/模式 ---------- */
+.slot-demo { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 8px; }
+.slot {
+  padding: 26px 22px; border-radius: var(--r-s); background: #fff;
+  border: 1px solid var(--line); text-align: center;
+}
+.slot b { display: block; color: var(--navy); font-size: 16.5px; margin-bottom: 6px; }
+.slot span { font-size: 13.8px; color: var(--ink-2); }
+
+/* ---------- 窄栏文字(无配图时用) ---------- */
+.narrow { max-width: 760px; margin: 0 auto; }
+.narrow .lead { font-size: clamp(15.5px, 1.6vw, 17.5px); color: var(--ink-2); margin-bottom: 30px; }
+
+/* ---------- 模式说明(蓝牙区) ---------- */
+.modes-note {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;
+  max-width: 860px; margin: 32px auto 0;
+}
+.mode-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 16px 20px; border-radius: var(--r-s);
+  background: #fff; border: 1px solid var(--line);
+}
+.mode-row .n {
+  flex-shrink: 0; width: 30px; height: 30px; border-radius: 50%;
+  color: #fff; display: grid; place-items: center;
+  font-size: 13.5px; font-weight: 700;
+}
+.mode-row b { display: block; color: var(--navy); font-size: 15.5px; }
+.mode-row span { font-size: 13.5px; color: var(--ink-2); }
+.note-line { margin-top: 22px; text-align: center; font-size: 13.8px; color: var(--ink-3); }
+
+/* ---------- 模式卡片(按键模式区) ---------- */
+.mode-card {
+  padding: 30px 24px; border-radius: var(--r); background: #fff;
+  border: 1px solid var(--line); text-align: center;
+  transition: transform .2s, box-shadow .2s, border-color .2s;
+}
+.mode-card:hover { transform: translateY(-4px); box-shadow: var(--sh); border-color: rgba(10,132,224,.3); }
+.mode-ic {
+  width: 44px; height: 44px; margin: 0 auto 16px; border-radius: 50%;
+  background: var(--blue); color: #fff; display: grid; place-items: center;
+  font-size: 18px; font-weight: 800;
+}
+.mode-card:nth-child(2) .mode-ic { background: var(--orange); }
+.mode-card:nth-child(3) .mode-ic { background: #22C55E; }
+.mode-card:nth-child(4) .mode-ic { background: #A855F7; }
+.mode-card b { display: block; color: var(--navy); font-size: 17.5px; margin-bottom: 7px; }
+.mode-card span { font-size: 14.2px; color: var(--ink-2); }
+
+/* ---------- 开源项目区块 ---------- */
+.gh-card {
+  max-width: 860px; margin: 0 auto; padding: 34px 38px;
+  background: #fff; border: 1px solid var(--line); border-radius: var(--r);
+  box-shadow: var(--sh);
+}
+.gh-head { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.gh-logo {
+  width: 52px; height: 52px; border-radius: 11px; overflow: hidden; flex-shrink: 0;
+  box-shadow: 0 2px 6px rgba(11, 42, 91, .18);
+}
+.gh-head > div { flex: 1; min-width: 180px; }
+.gh-head h3 { font-size: 19px; font-weight: 800; color: var(--navy); }
+.gh-desc { font-size: 14px; color: var(--ink-2); margin-top: 2px; }
+.gh-btn { flex-shrink: 0; }
+.gh-btn svg { flex-shrink: 0; }
+/* 参与指引: 三条 */
+.gh-guide {
+  list-style: none; margin-top: 26px; padding-top: 24px; border-top: 1px solid var(--line);
+  display: flex; flex-direction: column; gap: 18px;
+}
+.gh-guide li { display: flex; gap: 14px; align-items: flex-start; }
+.gh-guide .gi { font-size: 20px; line-height: 1.3; flex-shrink: 0; }
+.gh-guide b { display: block; color: var(--navy); font-size: 15.5px; margin-bottom: 3px; }
+.gh-guide span { font-size: 14.2px; color: var(--ink-2); }
+.gh-guide code {
+  font-family: "Cascadia Code", Consolas, monospace; font-size: 13px;
+  background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
+  padding: 1px 6px; color: var(--blue-d);
+}
+.gh-note {
+  margin-top: 22px; padding-top: 18px; border-top: 1px dashed var(--line);
+  font-size: 13.2px; color: var(--ink-3); text-align: center;
+}
+
+/* ---------- 场景轮播(对标 Chatterfly) ----------
+   做法: 所有卡片**绝对定位重叠**在同一张卡位上, 靠 JS 给每张卡写
+   data-off(-1 / 0 / 1), CSS 按 data-off 决定它缩多少、偏多少、亮不亮。
+   为什么不用 flex 轨道 + translateX:那样侧卡会被父容器 overflow 裁掉,
+   而且"中间大两边小"的比例要靠固定宽度硬凑,换个数就得重算。
+   绝对定位 + data-off 让"几张卡都能用", 增删卡片只改 HTML。 */
+.sec-car {
+  overflow: hidden;                      /* 侧卡甩出边界的部分直接裁掉 */
+  /* 标题到卡片只留 34px(默认 .sec-head 是 56px): 轮播卡片本身有 336px 高,
+     再加 56px 空白会把底部圆点顶出首屏, 观感上像"下面还有东西没加载出来"。 */
+  padding-bottom: 74px;
+  background:
+    radial-gradient(58% 74% at 14% 6%, rgba(10,132,224,.10), transparent 62%),
+    radial-gradient(52% 68% at 88% 92%, rgba(122,110,255,.10), transparent 62%),
+    var(--bg-2);
+}
+.sec-car .sec-head { margin-bottom: 34px; }
+/* .car: 轮播交互根节点。
+   ★ touch-action: pan-y —— 触屏上允许**纵向滚动页面**, 但横向手势由脚本接管。
+     这解决了"手指/指针落在轮播上就滚不动页面"的问题:
+     只写 touch-action:pan-y 就等于告诉浏览器"纵向你自己滚, 横向别管(交给自己)"。
+     它和 JS 里那条"仅横向才 preventDefault"的 touchmove 是同一目的的两道保险
+     (老内核不认识 touch-action 时靠 JS 兜底, 反之亦然)。
+     注意: 横向交给脚本正是拖拽轮播需要的, 所以这里**不能**写 none。
+     (早期 JS 里是无条件 preventDefault, 把纵向滚动也拦了 —— 那才是那个 bug。) */
+.car { position: relative; touch-action: pan-y; }
+/* 卡位: 高=中间卡高度。宽度按 Chatterfly 的比例定 ——
+   它是 中间卡 ~370px + 两侧各露 ~110px ≈ 590px 一组, 在 1080 宽屏里占约 55%。
+   我先前做成 中间卡 680 + 两侧各露 250 = 1160px 一组, 整排横铺到接近满屏,
+   用户反馈"这么长、变形了"。现在收成 中间卡 560 + 各露 112 ≈ 784px, 居中一小簇。 */
+.car-stage {
+  position: relative;
+  height: 322px;
+  margin: 4px auto 0;
+  /* 主卡 620 + 两侧各露 ~198 ≈ 1016。上轮收到 744(主卡 560)其实收过头了:
+     主卡变窄后图片区跟着窄, 主要人物被压成窄条、脸只剩一半(用户截图)。
+     Chatterfly 是 中间卡 ~720 + 两侧各露 ~170 ≈ 1060, 这里取 1016 与其对齐,
+     既让主卡人物完整, 又没回到更早那版 1160"横铺近满屏"的毛病。 */
+  max-width: 1016px;
+  /* ★ 侧卡露出宽度(也是侧卡图片区的宽度)—— 一处定义, 全站复用。
+     改这个值时必须同步改侧卡位移, 公式见下面 data-off 那一段注释:
+       T = --vis − W·sx/2 */
+  --vis: 162px;
+  --sx: .85;          /* 侧卡等比缩放, 媒体区宽度要用它反算 */
+  /* ★ 这里**不要**加 overflow:hidden ——
+     试过把裁切下沉到卡位, 结果侧卡超出卡位的部分被切掉, 连**圆角**一起变成直角,
+     侧卡看起来像"被刀削过的方块", 反而更难看。
+     横向溢出由 .sec-car { overflow:hidden } 兜(它是 section 级, 只裁绘制不裁圆角),
+     再由 body{overflow-x:hidden} 挡住滚动条, 两层足够。 */
+}
+/* 拖拽时整条 track 平移, 提前提升合成层, 避免拖动掉帧 */
+.car-track { position: relative; height: 100%; will-change: transform; }
+/* ★ 拖拽限幅: JS 写 --drag 位移, 这里只接收。
+   没有限幅时, 整条 track 会连中间卡一起被拖出卡位, 三张卡就同时完整露出来,
+   看着像"散架/变形"(用户截图)。限制在一个侧卡的偏移量内, 视觉上始终是
+   "中间卡 + 两侧露边"这个结构, 只是整体在轻微偏移。 */
+.car.is-drag .car-track { transition: none; }
+/* 卡位注释更新 */
+.car-card {
+  position: absolute; inset: 0; margin: auto;
+  width: 620px; height: 322px;
+  /* ★ 图片区占 52%(上轮 44%): 44% 时 620×.44 = 273px 宽, 而图是 640×760 的竖版,
+     cover 到 273×322 只能保留中间一条竖切片, 人物被压很窄。
+     52% = 322px 宽, 更接近 Chatterfly 的"图片区约一半卡宽"。 */
+  display: grid; grid-template-columns: 1fr 52%;
+  border-radius: 20px; overflow: hidden;
+  background: #fff; border: 1px solid rgba(11,42,91,.07);
+  box-shadow: 0 16px 42px rgba(11,42,91,.11);
+  cursor: pointer;
+  /* ★ 只过渡 transform/opacity/filter/shadow, **不要把 width 也写进 transition** ——
+     卡片尺寸变化必须瞬时完成, 否则拖拽时会看到侧卡"慢慢长大", 手套发黏。 */
+  transition: transform .62s cubic-bezier(.22,.68,.24,1),
+              opacity .5s ease, box-shadow .5s ease, filter .5s ease;
+  will-change: transform;
+}
+/* --- 三种状态: 中间 / 左侧 / 右侧 ---
+   620×.88 = 546, 半宽 273; 位移 198 → 侧卡内缘落在 198-273 = -75,
+   即中间卡左右各露 310-75 = 235px 中的一部分, 实测露边 ≈ 198+273-310 = 161px,
+   与 Chatterfly 的 ~170px 基本一致。 */
+/* --- 三种状态: 中间 / 左侧 / 右侧 ---
+   ★★★ 位移的**唯一正确公式**(前几轮一直在凑数字, 现在推导清楚并实测验证过) ★★★
+   变换语义: `transform: translateX(A) scale(sx)` —— 先 scale(关于自身中心, 中心不动),
+             再整体平移 A。所以以主卡中心为原点:
+               侧卡中心 = A,  侧卡半宽 = h = W·sx/2
+               侧卡范围 = [A − h, A + h]
+               被主卡(左缘 −W/2)挡住后, 屏幕露出区 = [A − h, −W/2]
+               ⇒ 露出宽 vis = (−W/2) − (A − h) = h − W/2 − A
+               ⇒ A = h − W/2 − vis
+   而 CSS 里写的 `translateX(calc(-50% - T))` 中, **−50% 是相对元素自身宽度 W 的**
+   (不是相对卡位! 这点极易搞错) ⇒ A = −W/2 − T
+               ⇒ T = −W/2 − A = vis − h = vis − W·sx/2
+   ⚠ 历史坑: v9~v11 一直用 T = vis + h − W/2 之类的式子, 全都多算了一个主卡半宽,
+     导致侧卡被推出老远 —— 实测 translateX(calc(-50% - 236px)) 下侧卡中心
+     离主卡中心 546px(= 310 + 236), 露出宽高达 472px 而不是预期 162px,
+     屏幕上传卡几乎整张露出来(用户截图"这个东西太长了")。
+   ★ 本例 T = 162 − 620×.76/2 = −74 ⇒ 写成 `calc(-50% + 74px)`。 */
+.car-card[data-off="0"] { transform: translateX(0) scale(1); z-index: 3; }
+/* 侧卡横向多收、纵向少收 → "竖着的图片块"而不是扁长条(用户:"这个东西太长了") */
+/* ★★ 必须用**等比** scale(单参数), 绝不能写成 scale(x, y) ★★
+   v12 用了 scale(.76, .94) 想把侧卡做成"竖着的图片块", 结果**图片被拉变形了**
+   (用户反馈"两边的图片都变形了感觉") —— 横向缩 76%、纵向缩 94%,
+   两者不等就把整张图硬压扁: 人变宽、椅子变高, 看着像胖了一圈。
+   等比 scale(.85) 才是正确做法: 侧卡整体小一圈, 宽高比不变。
+   ★ "侧卡看起来竖一点"这个需求, 靠**位移**控制露出宽度就够了,
+     不需要靠拉扁缩放去伪造比例。 */
+.car-card[data-off="-1"] { transform: translateX(calc(-50% + 102px)) scale(.85);
+                           z-index: 2; filter: saturate(.74); }
+.car-card[data-off="1"]  { transform: translateX(calc(50% - 102px))  scale(.85);
+                           z-index: 2; filter: saturate(.74); }
+/* 再往里一张: 完全隐藏, 只作拖动时的缓冲, 静止时不可见也不可点。
+   T2 = vis2 − h, 这里取 vis2 = −36(负值 = 藏到主卡后面被完全挡住)。 */
+.car-card[data-off="-2"] { transform: translateX(calc(-50% + 330px)) scale(.78);
+                           z-index: 1; opacity: 0; pointer-events: none; }
+.car-card[data-off="2"]  { transform: translateX(calc(50% - 330px))  scale(.78);
+                           z-index: 1; opacity: 0; pointer-events: none; }
+/* ★ 侧卡只露图片, 文字区收起 ——
+   卡片是"左文字 + 右图片"结构, 侧卡往旁边偏出去后, 露出来的那条带
+   正好落在文字区里, 于是屏幕上出现"套好手感""思路的记录方式"这种
+   **半截标题**(用户截图, 读起来莫名其妙)。
+   几何上无解: 偏出去的部分永远是卡片的左端, 而图片在右端。
+   所以干脆让侧卡**只显示图片**: 文字区 display:none 让它**彻底脱离网格**,
+   图片区再接管整个卡面。
+
+   ★ 必须是 display:none, **不能用 visibility:hidden** ——
+     visibility 只隐藏绘制, **元素仍占据布局空间**, 于是 .car-body 还在第一行,
+     而 .car-media 的 grid-column:1/-1 被挤到第二行,
+     结果侧卡上方 2/3 是空白色块、只有下方一条有图(用户截图"乱套了")。 */
+.car-card:not([data-off="0"]) .car-body { display: none; }
+/* ★★ 关键: 侧卡的图片区要**贴住被露出的那一条**, 而不是铺满整卡 ★★
+   铺满整卡 + object-fit:cover 时, 图片是按整个卡宽去裁的:
+   人物坐在画面中央, 于是**露出来的那一小条里全是背景**(书架/墙面),
+   人脸恰好落在露边之外 —— 用户截图:"这里人物都看不到啦"。
+
+   ★★★ 露出端在左右两侧是**相反**的(实测标定, 别再靠推理搞反) ★★★
+     实测(视口 1256, 主卡 [318,938], 侧卡宽 472):
+       · 左侧卡 C[156, 628] → 屏幕可见 [156, 318]
+         → 卡内 x ∈ [0, 162] = **最左 162px** → 媒体区要**贴左**(margin-right:auto)
+       · 右侧卡 C[628, 1100] → 屏幕可见 [938, 1100]
+         → 卡内 x ∈ [310, 472] = **最右 162px** → 媒体区要**贴右**(margin-left:auto)
+     ⚠ 直觉上容易想反(觉得"左边的卡露出右端"), 别再改了 ——
+       写反的症状是: 侧卡露出的那一条是**纯白底色**, 完全看不到图。
+
+   ★★ 宽度必须**反除以侧卡缩放比**: width: max(var(--vis) / var(--sx) * 1.04, 150px)
+     ① --vis 是**屏幕视觉宽度**, 而 .car-media 的 CSS 宽度还要被 scale(sx) 再缩一次。
+        直接写 `--vis` 会偏小 —— 例如桌面 vis 162、sx .85 时, 媒体区视觉只有
+        138px < 162px, 露出的右侧会露出一条白边。必须 vis / sx。
+        (CSS 里没法直接用侧卡的缩放值, 所以 --sx 跟 --vis 一起在各断点声明。)
+     ② max(..., 150px) 是**下限**: 窄屏档 --vis 只有 45px, 若严格按比例给,
+        媒体区太窄, cover 渲染出的图里人物的脸会落在容器可视范围之外
+        (只剩一段背景)。给 150px 下限保证人物完整入框,
+        多出来的部分被 .car-card{overflow:hidden} 裁掉 —— 那正是"只露一条"的效果。 */
+.car-card:not([data-off="0"]) .car-media {
+  grid-column: 1 / -1; grid-row: 1;
+  width: max(calc(var(--vis, 162px) / var(--sx, .85) * 1.04), 150px);
+  background: none;
+}
+/* 左侧卡(含更外层): 露出的是左端 → 媒体区贴左 */
+.car-card[data-off="-1"] .car-media,
+.car-card[data-off="-2"] .car-media { margin-right: auto; }
+/* 右侧卡(含更外层): 露出的是右端 → 媒体区贴右 */
+.car-card[data-off="1"] .car-media,
+.car-card[data-off="2"] .car-media { margin-left: auto; }
+/* 图片在这一小块里 cover 铺满。
+   ★ 横向锚点两侧统一用 **left**, 不要按"朝卡片外侧"去设 right ——
+     实测这几张竖图 cover 到 172×303 时渲染成 255 宽, 人物落在渲染图 x 68~179;
+     若用 right(显示渲染图 x∈[83,255]), 露出的右端正好是画面右侧的**空背景**
+     (落地灯/墙面), 人又看不见了(用户截图就是这样)。
+     left 显示 x∈[0,172], 完整覆盖人物区间, 左右两侧都成立。
+   纵向 42%: 这几张 AI 场景照构图偏上(人物头在上 1/3), 略往上抬才对得齐。 */
+.car-card:not([data-off="0"]) .car-media img {
+  transform: none;
+  object-position: left 42%;
+}.car-card[data-off="0"]:hover { box-shadow: 0 26px 60px rgba(11,42,91,.16); }
+.car-card:not([data-off="0"]) { cursor: pointer; }
+.car-card:not([data-off="0"]):hover { filter: saturate(.95); }
+
+.car-body { padding: 26px 14px 22px 30px; display: flex; flex-direction: column; min-width: 0; }
+.car-tag {
+  align-self: flex-start;
+  padding: 5px 12px; border-radius: 999px;
+  background: var(--blue-l); color: var(--blue);
+  font-size: 12px; font-weight: 700; letter-spacing: .3px;
+}
+/* 四张卡各给一个主色, 和整站调性(蓝/橙/紫/青)一致, 也让切换时"色"跟着换 */
+.car-card[data-c="c2"] .car-tag { background: #E6FAF7; color: #0C8F86; }
+.car-card[data-c="c3"] .car-tag { background: var(--orange-l); color: #C2540B; }
+.car-card[data-c="c4"] .car-tag { background: #F1ECFE; color: #5B49C9; }
+
+.car-body h4 { font-size: 20px; font-weight: 800; color: var(--navy); margin: 12px 0 8px; line-height: 1.34; }
+.car-body p { font-size: 13.8px; color: var(--ink-2); line-height: 1.7; }
+.car-more {
+  margin-top: auto; align-self: flex-start;
+  font-size: 13px; font-weight: 600; color: var(--ink-3);
+}
+/* 右半张图: 现在是 640×760 的真实场景照(竖版), 直接**铺满**媒体区。
+   ★ object-position 用 center 50%(居中), **不要再用 32%** ——
+     32% 是早期"图片区只有 273px 宽"时为了保住头顶定的锚点,
+     结果画面整体上移, 人物额头/头顶被切在上边缘(用户截图"人显示不全")。
+     现在图片区有 322px 宽, 居中裁切, 人物从头到胸口完整落在框里。
+   pointer-events:none 让点图等于点卡, 不让 img 吃掉 click。 */
+.car-media {
+  position: relative; overflow: hidden;
+  display: grid; place-items: center;
+  background: linear-gradient(155deg, #EEF6FF 0%, #F8FBFF 100%);
+}
+.car-card[data-c="c2"] .car-media { background: linear-gradient(155deg, #E9F9F6 0%, #F7FDFC 100%); }
+.car-card[data-c="c3"] .car-media { background: linear-gradient(155deg, #FFF2E8 0%, #FFFBF7 100%); }
+.car-card[data-c="c4"] .car-media { background: linear-gradient(155deg, #F2EEFE 0%, #FBFAFF 100%); }
+.car-media img {
+  width: 100%; height: 100%;
+  object-fit: cover; object-position: center 50%;
+  transition: transform .62s cubic-bezier(.22,.68,.24,1);
+  pointer-events: none;
+}
+.car-card[data-off="0"] .car-media img { transform: scale(1.05); }
+
+/* --- 底部圆点: 未选中 = 正圆, 选中 = 一根矩形条(和 Chatterfly 一致) ---
+   ★ 上一版用 `transform: scaleX(3.25)` 把 8px 的圆横向拉长,
+     结果圆角被一起拉成**椭圆**, 用户反馈"这里为啥是椭圆的? 要起码是矩形"。
+     scaleX 是几何变换, 圆角半径也跟着 X 方向放大, 必然出椭圆 ——
+     要矩形就只能**真的改宽度**。
+   ★ v12 曾用负 margin 抵消宽度增量:
+     选中时 width 8→24(+16px), 左右各 margin:-8px 让**占位宽度锁死在 8px**,
+     整排点不重排、只有这根条自己向两侧长出去。
+   ★ v18 去掉这个负边距 —— 它有个致命副作用: 选中条两侧的视觉间隙被吃掉 8px
+     (gap 9 − 8 = **1px**), 用户反馈"这里的间隙太近"(截图箭头正指蓝条与下一个点之间)。
+     现在直接让选中条占满 24px 布局宽度 ⇒ **所有相邻间隙统一 = gap**, 不再有"贴住"感。
+     代价: 选中项变化时整排会随宽度过渡平滑重排(端点最多位移 8px) ——
+     但位移由 width 的 transition 逐帧驱动 flex 重排, 是连续滑动而非跳变, 观感可接受。
+     gap 同时由 9px 提到 12px, 留出更舒展的呼吸感。 */
+.car-dots { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 30px; }
+.car-dot {
+  flex: 0 0 auto;
+  position: relative;                  /* 给里面的进度填充条定位 */
+  width: 8px; height: 8px;
+  border-radius: 999px; border: 0; padding: 0;
+  background: #C3D2E2; cursor: pointer;
+  overflow: hidden;                    /* 让填充条被圆角裁成胶囊 */
+  transition: width .32s cubic-bezier(.22,.68,.24,1),
+              background .3s;
+}
+.car-dot[aria-selected="true"] {
+  width: 24px;
+  background: #C3D2E2;          /* 底槽与普通圆点同色, 填进去的蓝才显得出来 */
+}
+/* 选中圆点 = 进度条: 里面这条 .car-fill 从左往右填满, 填满的瞬间换下一张图。
+   时长由 JS 写成 --car-dur(值 = 自动切换间隔 AUTO), 两处同源, 不会走偏。 */
+.car-fill {
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  background: var(--blue);
+  transform: scaleX(0); transform-origin: left center;
+  opacity: 0; pointer-events: none;
+}
+.car-dot[aria-selected="true"] .car-fill { opacity: 1; }
+.car-dot.is-run .car-fill { animation: carFill var(--car-dur, 4.6s) linear forwards; }
+/* 悬停/拖拽暂停自动播放时, 填充条一起冻住; 松开后由 JS 从头重播, 与定时器重新对齐 */
+.car-dots.is-paused .car-dot.is-run .car-fill { animation-play-state: paused; }
+@keyframes carFill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.car-dot:hover { background: #8FB4D8; }
+.car-dot[aria-selected="true"]:hover .car-fill { background: var(--blue-d); }
+/* 键盘可达: 圆点是真正的 button, focus 环用 :focus-visible, 不影响鼠标点击观感 */
+.car-dot:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+
+/* 拖拽时禁止选中文字/图片, 否则一甩鼠标满屏都是选中高亮 */
+.car.is-drag, .car.is-drag * { user-select: none; cursor: grabbing; }
+
+/* 无障碍: 开了"减少动态效果"就停掉自动轮播, 但拖拽/点击/圆点仍可手动切 */
+@media (prefers-reduced-motion: reduce) {
+  .car-card, .car-media img, .car-dot { transition: none !important; }
+  /* 减动效下不自动播(见 JS) ⇒ 进度条不会跑, 直接显示成"填满"的选中态 */
+  .car-dot[aria-selected="true"] .car-fill { animation: none; transform: scaleX(1); }
+}
+/* 中屏: 卡片与位移按同比例收一档, 侧卡同样保持"瘦长"的比例
+   540×.74=400 宽(半宽 200), 位移 = 露出 158 + 200 = 358 → 取 358 */
+@media (max-width: 1140px) {
+  .car-stage { max-width: 880px; height: 300px; --vis: 140px; --sx: .85; }
+  .car-card { width: 540px; height: 300px; grid-template-columns: 1fr 50%; }
+  /* T = vis − W·sx/2 = 140 − 540×.85/2 = −90 ⇒ calc(-50% + 90px), 等比缩放 */
+  .car-card[data-off="-1"] { transform: translateX(calc(-50% + 90px)) scale(.85); }
+  .car-card[data-off="1"]  { transform: translateX(calc(50% - 90px))  scale(.85); }
+  .car-card[data-off="-2"] { transform: translateX(calc(-50% + 290px)) scale(.78); }
+  .car-card[data-off="2"]  { transform: translateX(calc(50% - 290px))  scale(.78); }
+  .car-body { padding: 23px 12px 19px 26px; }
+  .car-body h4 { font-size: 18px; }
+  .car-body p { font-size: 13px; }
+  .car-tag { padding: 5px 11px; font-size: 11.5px; }
+  .car-more { font-size: 12px; }
+}
+/* 窄屏: **不为手机端单独设计版式**, 只是把桌面版整体等比缩小。
+   用户要求"手机端跟电脑端显示效果差不多就行", 所以这里刻意保持
+   "左文字 + 右图片 + 两侧露边" 的同一套结构, 只改尺寸/字号/位移。
+
+   ★ 宽度用百分比(86%), **不能用 100vw** ——
+     body 上有 overflow-x:hidden, 而 100vw 算的是"含滚动条宽度",
+     窄屏下会比 .car-stage 的实际宽度大 15~17px,
+     于是 inset:0 + margin:auto 的居中基准被撑歪, 整张卡偏右、一边露边一边被切。 */
+@media (max-width: 900px) {
+  .car-stage { max-width: 88%; height: 250px; --vis: 109px; --sx: .82; }
+  .car-card { width: 86%; height: 250px; grid-template-columns: 1fr 46%; }
+  .car-body { padding: 20px 10px 16px 22px; }
+  .car-body h4 { font-size: 16px; margin: 10px 0 7px; }
+  .car-body p { font-size: 12px; line-height: 1.62; }
+  .car-tag { padding: 4px 10px; font-size: 11px; }
+  .car-more { font-size: 11px; }
+  /* 侧卡同样保持"横向多收、纵向少收"的瘦长比例。
+     ★ 位移公式(全站统一, 不要凭感觉写数字):
+         露出宽 = 位移 + (W·sx − W)/2     ← W=卡宽, sx=侧卡横向缩放
+         ⇒ 位移 = 目标露出 + (W − W·sx)/2 = 109 + (681 − 681×.70)/2 ≈ 211
+       ★ 同时受视口约束: 组宽 = W + 2·露出 必须 ≤ 视口, 否则侧卡被切在屏幕外。
+         900 档: 681 + 2×109 = 899 ≤ 900 ✓ (已经是上限, 不能再多露)
+       之前写 347 是直接把"位移"当成"露出"了, 会让组宽冲到 1153 > 视口 900。 */
+  /* T = vis − W·sx/2 = 109 − 681×.82/2 ≈ −170 ⇒ calc(-50% + 170px), 等比缩放 */
+  .car-card[data-off="-1"] { transform: translateX(calc(-50% + 170px)) scale(.82); }
+  .car-card[data-off="1"]  { transform: translateX(calc(50% - 170px))  scale(.82); }
+  .car-card[data-off="-2"] { transform: translateX(calc(-50% + 400px)) scale(.74); }
+  .car-card[data-off="2"]  { transform: translateX(calc(50% - 400px))  scale(.74); }
+}
+@media (max-width: 480px) {
+  .car-stage { max-width: 92%; height: 228px; --vis: 45px;  --sx: .8; }
+  .car-card { width: 88%; height: 228px; grid-template-columns: 1fr 44%; }
+  .car-body { padding: 18px 8px 14px 20px; }
+  .car-body h4 { font-size: 15px; }
+  .car-body p { font-size: 11.5px; line-height: 1.58; }
+  /* 480 档: 卡 389 / 视口 480, 单侧余量仅 (480−389)/2 ≈ 45px。
+     位移 = 45 + (389 − 389×.68)/2 ≈ 107。
+     再想多露只能让主卡更窄, 但那会挤掉文字 —— 所以窄屏就露这么点。 */
+  /* T = vis − W·sx/2 = 45 − 389×.80/2 ≈ −111 ⇒ calc(-50% + 111px), 等比缩放 */
+  .car-card[data-off="-1"] { transform: translateX(calc(-50% + 111px)) scale(.8); }
+  .car-card[data-off="1"]  { transform: translateX(calc(50% - 111px))  scale(.8); }
+  .car-card[data-off="-2"] { transform: translateX(calc(-50% + 260px)) scale(.72); }
+  .car-card[data-off="2"]  { transform: translateX(calc(50% - 260px))  scale(.72); }
+}
+
+/* ---------- 规格 ---------- */
+.spec {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0 56px;
+  background: #fff; border: 1px solid var(--line); border-radius: var(--r); padding: 12px 40px;
+}
+.spec-row {
+  display: flex; align-items: baseline; gap: 16px;
+  padding: 20px 0; border-bottom: 1px dashed var(--line);
+}
+.spec-row dt { flex-shrink: 0; width: 132px; color: var(--ink-3); font-size: 14.5px; }
+.spec-row dd { color: var(--navy); font-weight: 600; font-size: 15.5px; }
+.spec-note { margin-top: 22px; font-size: 13.5px; color: var(--ink-3); text-align: center; }
+
+/* ---------- CTA ---------- */
+.cta {
+  padding: 80px 0;
+  background: linear-gradient(135deg, var(--navy) 0%, #10457F 100%);
+}
+.cta-in { text-align: center; }
+.cta h2 { font-size: clamp(26px, 3.4vw, 38px); font-weight: 800; color: #fff; }
+.cta p { margin-top: 16px; color: rgba(255,255,255,.8); font-size: 16.5px; }
+.cta-btns { display: flex; gap: 14px; justify-content: center; margin-top: 34px; flex-wrap: wrap; }
+.cta .btn-p { background: #fff; color: var(--navy); box-shadow: 0 6px 20px rgba(0,0,0,.2); }
+.cta .btn-p:hover { background: #F0F7FF; }
+.cta .btn-s { background: transparent; color: #fff; border-color: rgba(255,255,255,.4); }
+.cta .btn-s:hover { border-color: #fff; color: #fff; }
+/* GitHub 按钮(CTA 区): 与主 CTA 并列, 用半透明底区分 */
+.btn-gh { background: rgba(255,255,255,.12); color: #fff; border: 1.5px solid rgba(255,255,255,.35); }
+.btn-gh:hover { background: rgba(255,255,255,.22); border-color: #fff; transform: translateY(-2px); }
+.btn-gh svg { flex-shrink: 0; }
+
+/* ---------- 页脚 ---------- */
+.foot { padding: 44px 0; border-top: 1px solid var(--line); background: var(--bg-2); }
+.foot-in { display: flex; flex-wrap: wrap; gap: 16px 20px; justify-content: space-between; align-items: center; }
+.foot small { color: var(--ink-3); font-size: 13.5px; }
+.foot-gh {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13.5px; color: var(--ink-3); transition: color .18s;
+}
+.foot-gh:hover { color: var(--blue); }
+
+/* ---------- 入场动画 ---------- */
+.rv { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }
+.rv.in { opacity: 1; transform: none; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 1240px) {
+  /* 中等宽度: 隐藏信息价值低的纯锚点项, 只留核心几项。
+     8 项 + logo + 2 按钮在 1280 容器下会溢出叠字(用户截图), 这一档专门兜住。 */
+  .nav-links a[data-opt] { display: none; }
+  .nav-links { gap: 18px; }
+}
+@media (max-width: 1080px) {
+  /* 1280 容器再收一档: 桌面端「在线改键」与 GitHub 图标都让位, 只留主 CTA。
+     锚点项在窄屏全部收进汉堡菜单, 这里只影响 1080~1240 的平板/小窗。
+     首屏同时改单列居中: 容器变窄时双列会把标题挤到折行出现孤字。 */
+  .nav-app, .nav-gh { display: none; }
+  .nav-links a[data-opt] { display: inline; }
+  .hero-in { grid-template-columns: 1fr; text-align: center; padding: calc(60px + var(--nav-h)) 24px 68px; }
+  .hero-sub { margin-left: auto; margin-right: auto; }
+  .hero-tags, .hero-btns { justify-content: center; }
+  .hero-vis { order: -1; }
+  .hero-vis img { max-width: 220px; max-height: 320px; }
+  .hero-ring { width: 260px; height: 260px; }
+}
+@media (max-width: 1024px) {
+  .hero-in { grid-template-columns: 1fr 340px; gap: 36px; }
+  .grd-4 { grid-template-columns: repeat(2, 1fr); }
+  .split { gap: 40px; }
+}
+@media (max-width: 900px) {
+  /* 手机端: 导航收进抽屉。做成整屏卡片式菜单, 比窄条下拉好用得多。
+     ★ 透明→毛玻璃的逻辑与桌面端一致, 这里只覆盖两点:
+       ① 导航高度收到 60px(同时更新 --nav-h, hero 留白/scroll-padding 跟着变);
+       ② 抽屉是 fixed 导航的子元素, 抽屉本身不透明, 所以**抽屉打开时导航必须
+          换成实底** —— 否则导航条是透明的, 背后滚动的内容会直接透出来,
+          和下面白色抽屉拼在一起非常乱。 */
+  :root { --nav-h: 60px; }
+  .nav-in { height: var(--nav-h); gap: 12px; }
+  .logo { font-size: 18px; }
+  .nav-toggle { display: grid; }
+  /* 抽屉: 挂在 .nav(fixed)下用 absolute 定位。
+     不用 fixed —— 祖先 .wrap 有 max-width, fixed 会以 wrap 为包含块,
+     在窄屏下算出的 left/right 会偏, 导致抽屉被裁掉一半。 */
+  /* 抽屉打开态: 给导航补一层实底 + 分隔线。
+     两个选择器并存 —— `.nav:has(.nav-links.open)` 是纯 CSS 方案,
+     `.nav.is-drawer` 是 JS 兜底(见 index.html 的 setOpen):
+     :has() 在 Safari 15.3 以下 / 一些安卓 WebView 里整条规则不解析,
+     那时导航会保持透明, 背后滚动的内容直接透出来, 和白色抽屉拼在一起很乱。 */
+  .nav:has(.nav-links.open),
+  .nav.is-drawer {
+    background: rgba(255, 255, 255, .97);
+    -webkit-backdrop-filter: saturate(180%) blur(18px);
+            backdrop-filter: saturate(180%) blur(18px);
+    border-bottom-color: var(--line);
+  }
+  .nav-links {
+    position: absolute; top: 100%; left: 0; right: 0;
+    min-height: calc(100vh - 60px); max-height: calc(100vh - 60px);
+    flex-direction: column; gap: 0; margin: 0;
+    background: #fff; overflow-y: auto; padding: 12px 20px 32px;
+    transform: translateX(100%); opacity: 0; pointer-events: none;
+    transition: transform .28s ease, opacity .28s ease;
+    box-shadow: 0 20px 40px rgba(11, 42, 91, .12);
+  }
+  .nav-links.open { transform: translateX(0); opacity: 1; pointer-events: auto; }
+  .nav-links a,
+  .nav-links a[data-opt] {
+    display: block; flex-shrink: 1;
+    padding: 15px 18px; border-radius: 12px;
+    font-size: 16px; font-weight: 600; color: var(--navy);
+    border-bottom: 1px solid var(--line); border-radius: 0;
+  }
+  .nav-links a:active { background: var(--blue-l); }
+  /* 「在线改键」在抽屉里做成醒目的主按钮 */
+  .nav-links a.nav-menu-app {
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    margin-top: 18px; padding: 15px 18px;
+    border: none; border-radius: 12px; text-align: center;
+    background: var(--blue); color: #fff; font-weight: 700;
+  }
+  .nav-links a.nav-menu-app:active { background: var(--blue-d); }
+  /* GitHub 项: 描边样式, 放在主按钮下方作为次级动作 */
+  .nav-links a.nav-menu-gh {
+    display: flex; align-items: center; justify-content: center; gap: 8px;
+    margin-top: 10px; padding: 14px 18px;
+    border: 1.5px solid var(--border-strong); border-radius: 12px;
+    text-align: center; color: var(--ink-2); font-weight: 600;
+  }
+  .nav-links a.nav-menu-gh:active { background: var(--nav-hover); color: var(--navy); }
+  /* 抽屉底部补一个购买入口, 让手机端也能转化 */
+  .nav-links::after {
+    content: '立即购买'; display: block; margin-top: 12px;
+    padding: 15px 18px; border-radius: 12px; text-align: center;
+    background: var(--orange); color: #fff; font-size: 16px; font-weight: 700;
+  }
+  .nav-cta, .nav-app, .nav-gh { display: none; }
+}
+@media (max-width: 860px) {
+  .hero-in { grid-template-columns: 1fr; text-align: center; padding: calc(56px + var(--nav-h)) 24px 64px; }
+  .hero-sub { margin-left: auto; margin-right: auto; }
+  .hero-tags, .hero-btns { justify-content: center; }
+  .hero-vis { order: -1; }
+  .hero-vis img { max-width: 260px; }
+  .hero-ring { width: 280px; height: 280px; }
+  .split { grid-template-columns: 1fr; }
+  .split-rev .split-vis { order: 0; }
+  .grd-4, .steps, .slot-demo { grid-template-columns: 1fr; }
+  .modes-note { grid-template-columns: 1fr; }
+  .step::after { display: none; }
+  .spec { grid-template-columns: 1fr; padding: 8px 24px; }
+  .sec { padding: 64px 0; }
+  .gh-card { padding: 28px 22px; }
+  .gh-btn { width: 100%; justify-content: center; }
+}
+@media (max-width: 480px) {
+  .grd-4 { grid-template-columns: 1fr; }
+  .spec-row { flex-direction: column; gap: 4px; }
+  .spec-row dt { width: auto; }
+}

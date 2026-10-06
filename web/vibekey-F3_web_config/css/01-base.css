@@ -1,0 +1,156 @@
+/* ===== 基础层: 重置 / 深浅色主题变量(含 QML 对齐取色层) =====
+   本文件由 build_index_template.html 的内联 <style> 拆出(2026-10-03)。
+   拆分原因: 单文件千行 CSS 曾因一次正则误删整段样式导致页面裸奔, 且脚本化改样式
+   极易锚点失配 -> 改为按关注点分文件, 改一处只动一个文件。
+   加载顺序即层叠顺序, 勿随意调整文件名序号。 */
+
+  /* ============================================================
+   *  VibeKey-F3 Studio 同款设计语言
+   *  主色 #07c160 (微信绿) / 浅绿选中 #e6f5ec / 窗体灰框 #e8e8e8
+   *  60px 图标侧边栏 + 白色圆角内容区 + 56px 标题栏
+   * ============================================================ */
+  :root {
+    color-scheme: light;
+    --page: #d7dbd9;             /* 桌面背景 */
+    --frame: #e8e8e8;            /* 窗体灰框 (同 QML 外框) */
+    --bg: #f2f3f5;               /* 输入框/内嵌底色 */
+    --bg-card: #ffffff;
+    --bg-card-hover: #f7f9f8;
+    --border: #ececec;
+    --border-strong: #e0e0e0;
+    --conn: #b3b9bf;   /* 连线专用灰: 需在设备壳 (浅灰) 上也可见, 比 border-strong 深 */
+    --text: #333333;
+    --text-dim: #999999;
+    --accent: #07c160;
+    --accent-hover: #06ad56;
+    --success: #07c160;
+    --warning: #faad14;
+    --warning-text: #d48806;
+    --danger: #f56c6c;
+    --purple: #9254de;
+    --btn-text: #ffffff;
+    --tint: #e6f5ec;             /* 浅绿选中背景 */
+    --log-time: #bbbbbb;
+    --nav-hover: rgba(0,0,0,0.06);
+    --scrollbar-thumb: rgba(0,0,0,0.18);
+    --scrollbar-thumb-hover: rgba(0,0,0,0.30);
+    /* ===== 与上位机 QML 对齐的取色层 =====
+       数值全部逐字取自 appVibeKeyF3Studio/qml/Main.qml (括号内为 QML 行号), 改动前先回查 QML */
+    --q-panel-border: #e8e8e8;      /* 弹窗边框 (2670) */
+    --q-field-border: #d0e0d8;      /* 输入框/下拉未聚焦边框 (2906, 全站 21 处) */
+    --q-sel-bg: #e6f5ec;            /* 选中态浅绿底 (3815, 4331) */
+    --q-hover-bg: #f4f9f6;          /* 下拉项 hover 底 (2955) */
+    --q-seg-off: #f2f3f5;           /* 分段按钮未选中底 (4331) */
+    --q-info-bg: #f5f5f5;           /* 卡片内信息块底 (2127) */
+    --q-info-bg-ec: #f5f7f6;        /* EC 卡内动作行底 (2438) */
+    --q-knob-off: #cccccc;          /* 未启用色块 (2052) / 开关关 (4219) */
+    --q-title: #333333;             /* 卡片标题字 (1807) */
+    --q-title-2: #666666;           /* EC (2412) / 摇一摇 (1950) 标题字 */
+    --q-text-3: #999999;            /* 弱化说明文字 (1875 附近 / 4416) */
+    --q-label: #555555;             /* 弹窗「模式」label (2863) */
+    --q-close-bg: #f0f0f0;          /* 弹窗关闭按钮底 (2847) */
+    --q-modal-title: #222222;       /* 弹窗标题字 (2844) */
+    --q-sw-border: #dddddd;         /* C 卡 RGB 色块边框 (2054) */
+    --q-group-border: #e3eae5;     /* 弹窗内分组块边框 (4653) */
+    /* 卡片阴影: QML 用两层矩形模拟 (1774-1786), 这里等价成两层投影 */
+    /* 卡片光晕: 全部**零偏移**, 四边对称。向下偏移的投影上边紧下边松, 看着不平衡。
+       1px 细圈勾轮廓 + 两层不同半径的柔光, 越远越淡 */
+    --q-card-shadow:
+      0 0 0 1px rgba(0,0,0,0.05),
+      0 0 7px rgba(0,0,0,0.05),
+      0 0 18px rgba(0,0,0,0.045);
+    --q-scrim: rgba(0,0,0,0.5);     /* 弹窗遮罩 #80000000 (2671) */
+  }
+  [data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0b0e11;
+    --frame: #22272d;
+    --bg: #14181c;
+    --bg-card: #1b2026;
+    --bg-card-hover: #22282f;
+    --border: #2c333a;
+    --border-strong: #3a4046;
+    --conn: #565f68;   /* 连线专用灰 (暗色主题) */
+    --text: #e6edf3;
+    --text-dim: #8b949e;
+    --accent: #07c160;
+    --accent-hover: #0ac875;
+    --success: #07c160;
+    --warning: #faad14;
+    --warning-text: #e6b34d;
+    --danger: #f56c6c;
+    --purple: #b37feb;
+    --btn-text: #ffffff;
+    --tint: rgba(7,193,96,0.16);
+    --log-time: #555c63;
+    --nav-hover: rgba(255,255,255,0.08);
+    --scrollbar-thumb: rgba(255,255,255,0.14);
+    --scrollbar-thumb-hover: rgba(255,255,255,0.28);
+    /* QML 无暗色主题, 这里按同一套语义推导等价值 (对比度已按暗底调整) */
+    --q-panel-border: #3a4046;
+    --q-field-border: #3d4a44;
+    --q-sel-bg: rgba(7,193,96,0.18);
+    --q-hover-bg: rgba(255,255,255,0.06);
+    --q-seg-off: #22282f;
+    --q-info-bg: #22282f;
+    --q-info-bg-ec: #212a26;
+    --q-knob-off: #3a4046;
+    --q-title: #e6edf3;
+    --q-title-2: #b6bfc9;
+    --q-text-3: #8b949e;
+    --q-label: #a8b2bd;
+    --q-close-bg: #262c33;
+    --q-modal-title: #e6edf3;
+    --q-sw-border: #454d56;
+    --q-group-border: #333c41;
+    --q-card-shadow:
+      0 0 0 1px rgba(255,255,255,0.07),
+      0 0 9px rgba(0,0,0,0.45),
+      0 0 22px rgba(0,0,0,0.3);
+    --q-scrim: rgba(0,0,0,0.6);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--page);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 24px;
+    /* 固定布局下 .app 的布局盒恒为 --design-w 宽, transform 只是视觉缩放、不减少占位,
+       窄窗时会被撑出横向滚动条 -> 一律隐藏(纵向滚动不受影响) */
+    overflow-x: hidden;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+  }
+  .flex1 { flex: 1; }
+
+/* ===== 下拉箭头: 对齐 QML 绿色实心三角 (Main.qml 2919-2927) =====
+     Canvas 尺寸 9x5, 位于 ComboBox 右边 8px, fillStyle 恒为 #07c160 (不随 hover 变) */
+  select {
+    appearance: none; -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='5'%3E%3Cpath d='M0 0h9L4.5 5z' fill='%2307c160'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 26px;
+  }
+  select:focus { outline: none; }
+
+  /* ===== 主题细滚动条 ===== */
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--scrollbar-thumb-hover);
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-corner { background: transparent; }
+  html, body, .log-panel { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) transparent; }
+
+  /* ===== 窄屏：侧边栏变顶栏 ===== */
+  

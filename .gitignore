@@ -1,0 +1,109 @@
+# ============================================================================
+#  VibeKey-F3 — Git 忽略规则
+#  原则：源码/脚本/配置入库；构建产物、成品包、缓存、本地私有数据不入库。
+#  注：固件与上位机的**真机产物**（.bin）走 Gitee Release 附件分发，不入库。
+# ============================================================================
+
+# ---- 固件源码：整体不入库（2026-10-03 起）----
+# 仓库已转公开，固件源码（含引脚表、SDK 授权点等内部信息）不宜公开。
+# 用 `git rm -r --cached Firmware` 只从索引移除，**本地文件全部保留**，
+# 继续在本地正常改固件；GitHub 上只留 Firmware/.gitkeep 占位保住目录结构。
+Firmware/**
+!Firmware/.gitkeep
+
+# ---- 内部工具/工作目录：整体不入库（2026-10-03 起）----
+# tools/ —— Gitee Release 打包脚本，属内部发布链，不随公开仓库分发
+# .workbuddy/ —— 本地工作目录（构建模板、原始 JS 缓存、记忆笔记、临时脚本）
+tools/**
+!tools/.gitkeep
+.workbuddy/
+
+# ---- 构建输出目录（占仓库体积的大头）----
+# 上位机：Qt Creator Debug / Release 构建树
+Application/*/build/
+# 固件：scons 输出（build_sf32lb52-vibekey_hcpu 等，含 .o/.elf/.hex/.map/.asm）
+Firmware/project/build_*/
+Firmware/project/build_green/
+# 打包脚本的临时暂存目录（绿色版，打包后自动删；异常中断可能残留）
+Application/*/deploy/VibeKey-F3-Studio_Green/
+
+# ---- 成品安装包（39MB+，走 Gitee Release 附件分发）----
+Application/*/deploy/*.exe
+# 固件 OTA 固件包
+*.bin
+
+# ---- 例外: releases/firmware/ 下**已发布**的正式版固件必须入库 ----
+# 原因(2026-10-04 实测): Gitee 固件下载是两跳 302 且首跳不带 CORS 头,
+#   浏览器跨域重定向后被拦 -> 网页端无法从 Gitee 直接下载 .bin;
+#   而 jsDelivr 只代理 GitHub 仓库、**不代理 Gitee**(实测 Gitee 源 404),
+#   所以 GitHub 仓库里**必须**有这些 .bin, 网页端才能经 jsDelivr 跨域下载。
+# 注意: 目录名不是 firmware/ —— 那个是固件**源码**目录(Firmware/** 已忽略),
+#   放在那里会把发布产物混进源码树。
+# 这里只放**已发布**的正式版(由 tools/sync_firmware.py 从 Gitee 拉取校验后同步),
+# 不放本地未发布的构建产物。
+!releases/
+!releases/firmware/
+!releases/firmware/*.bin
+
+# ---- scons / CMake 中间产物 ----
+# scons 依赖数据库（8MB+，纯缓存）
+.sconsign.dblite
+# scons 双链缓存
+.sconf_temp/
+config.log
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.o
+*.obj
+*.a
+*.lib
+
+# ---- 打包日志（可复现，不入库）----
+Application/*/deploy/*.log
+Application/*/deploy/makensis_build.log*
+
+# ---- Python 缓存 ----
+__pycache__/
+*.py[cod]
+*$py.class
+
+# ---- Qt / IDE ----
+*.user
+*.autosave
+.vs/
+.vscode/
+*.pro.user
+.qmake.stash
+*.qmlc
+qrc_*.cpp
+
+# ---- 本地私有数据与凭据（**绝不入库**）----
+# Gitee token、发布脚本配置
+.env
+.env.*
+*.token
+*_token.txt
+# 运行时状态/数据库
+*.db
+*.sqlite
+*.sqlite3
+# 串口/设备抓包
+*.log
+logs/
+
+# ---- 操作系统 ----
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# ---- 临时/备份文件 ----
+*.bak
+*.bak_*
+*.orig
+*.rej
+*~
+*.tmp
+*.swp
+*.swo
