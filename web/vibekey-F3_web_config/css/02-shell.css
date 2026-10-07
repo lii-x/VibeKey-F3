@@ -346,10 +346,15 @@
   .channel-badge.usb { color: var(--success); border-color: var(--success); background: rgba(7,193,96,0.08); }
   .channel-badge.none { color: var(--text-dim); }
   .led-batt { font-size: 12px; color: var(--text-dim); }
-  .led-buttons { display: flex; gap: 10px; flex-wrap: wrap; }
+  /* ★ 10-07: 用户要求"圆角跟客户端要一样" ⇒ 完全对齐上位机 Main.qml:5708-5721 的规格:
+     QML Rectangle{ width:50; height:28; radius:14 } —— radius 恰为高度一半 ⇒ **胶囊形**。
+     原来网页端是 76×40 + radius:8px(小圆角), 尺寸和圆角都对不上。
+     同级 RowLayout spacing:8 ⇒ gap 也由 10px 收成 8px。
+     ⚠️ radius 写成 14px 而非 50%: 与 QML 数值逐字对应, 日后改尺寸时能一眼看出是否还是半高。 */
+  .led-buttons { display: flex; gap: 8px; flex-wrap: wrap; }
   .led-btn {
-    width: 76px; height: 40px;
-    border-radius: 8px;
+    width: 50px; height: 28px;
+    border-radius: 14px;
     border: 1px solid var(--border-strong);
     background: var(--bg-card);
     color: var(--text);

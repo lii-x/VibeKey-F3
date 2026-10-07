@@ -975,11 +975,16 @@ a { color: inherit; text-decoration: none; }
 .foot { padding: 44px 0; border-top: 1px solid var(--line); background: var(--bg-2); }
 .foot-in { display: flex; flex-wrap: wrap; gap: 16px 20px; justify-content: space-between; align-items: center; }
 .foot small { color: var(--ink-3); font-size: 13.5px; }
-.foot-gh {
+/* 页脚链接组: 把「开源仓库 / 使用说明」收成一组, 让 .foot-in 保持三段布局
+   (左 logo | 中链接组 | 右版权)。直接加第 4 个子项会被 space-between 均匀摊开。 */
+.foot-links { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; }
+.foot-gh,
+.foot-doc {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 13.5px; color: var(--ink-3); transition: color .18s;
 }
-.foot-gh:hover { color: var(--blue); }
+.foot-gh:hover,
+.foot-doc:hover { color: var(--blue); }
 
 /* ---------- 入场动画 ---------- */
 .rv { opacity: 0; transform: translateY(24px); transition: opacity .6s ease, transform .6s ease; }

@@ -255,7 +255,9 @@
             <!-- 网络模式: 在线版本列表 (对齐 QML 983-1071, 数据源同 net_worker.py: Gitee Releases) -->
             <div class="ota-net" id="otaNetPane">
               <div class="ota-net-head">
-                <span class="ota-net-title">在线版本（Gitee 发布）</span>
+                <!-- ★ 10-07: 用户要求去掉括号里的发布源说明, 只留「在线版本」。
+                     功能(网络获取 + 在线版本列表)保持不变, 数据源仍是 Gitee。 -->
+                <span class="ota-net-title">在线版本</span>
                 <span class="ota-net-cur" id="otaNetCur"></span>
                 <span class="ota-net-fill"></span>
                 <span class="ota-refresh" id="otaNetRefresh" onclick="otaRefreshReleases()">刷新</span>
@@ -274,7 +276,8 @@
           <div class="ota-actions">
             <button class="btn btn-success" id="otaBtn" onclick="startOta()" disabled>开始升级</button>
           </div>
-          <div class="hint">通过 USB 串口升级固件（协议与上位机 ota_worker.py 一致）。升级过程中请勿拔出设备；发送完成后设备会重启并自动验证版本。仅支持 .bin 固件。</div>
+          <!-- ★ 10-07: 删掉「（协议与上位机 ota_worker.py 一致）」—— 面向用户的提示不需要暴露实现细节。 -->
+          <div class="hint">通过 USB 串口升级固件。升级过程中请勿拔出设备；发送完成后设备会重启并自动验证版本。仅支持 .bin 固件。</div>
 
         </div>
       </section>
@@ -284,15 +287,14 @@
         <div class="panel">
           <div class="panel-title">关于 VibeKey-F3 Web</div>
           <div class="about-text">
-            基于 <b>Web Serial API</b> 的网页版配置工具，无需安装驱动，浏览器直接配置设备。<br>
-            <span class="dim">本页 UI 对齐 VibeKey-F3 Studio 桌面端工作台（侧边导航 + 微信绿主题）。</span>
+            基于 <b>Web Serial API</b> 的网页版配置工具，无需安装驱动，浏览器直接配置设备。
           </div>
         </div>
         <div class="panel">
           <div class="panel-title">网页端 vs 桌面端 (VibeKey-F3 Studio)</div>
           <div class="about-text">
             • <b>桌面端 Studio</b>（Qt）：按键配置、运行状态监控、OTA 固件升级、灯效、系统托盘、固件更新提醒等完整功能。<br>
-            • <b>网页端</b>：免安装，插上 USB 即可读取/写入配置、升级固件，适合临时改动与分享给朋友使用。
+            • <b>网页端</b>：免安装，插上 USB 即可读取/写入配置、升级固件。
           </div>
         </div>
         <div class="panel">
