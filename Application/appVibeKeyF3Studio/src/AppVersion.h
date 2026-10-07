@@ -10,4 +10,4 @@
  * deploy/build_green.ps1 / build_all.ps1 / installer.nsi 由打包脚本
  * 读取本文件生成版本串, 不再各自硬编码。
  * ============================================================ */
-#define VIBEKEY_STUDIO_VERSION "1.1.5"
+#define VIBEKEY_STUDIO_VERSION "1.1.6"

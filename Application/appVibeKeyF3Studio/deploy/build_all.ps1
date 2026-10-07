@@ -20,8 +20,12 @@
 #
 #   流程：
 #     [1] 确保 Release exe 存在且比源码新
-#           -Rebuild : 强制原地重编 build\release（CMakeCache 自愈 + 时间戳校验）
-#           否则      : 先找现成的；找不到则自动用 cmake 构建到 build_green\
+#           -Rebuild     : 强制原地重编 build\release（CMakeCache 自愈 + 时间戳校验）
+#           -AutoRebuild : 【默认】先用下方两道校验判断(① exe 比任何源文件旧
+#                           ② exe 内嵌版本号与 AppVersion.h 不符), 任一不通过就自动
+#                           触发重编 —— 双击 build.bat 即可一路跑通, 无需手动加参数。
+#           -PackageOnly : 强制只打包, 即使 exe 检查不通过(供有意复用旧 exe 的场景)
+#           否则         : 先找现成的；找不到则自动用 cmake 构建到 build_green\
 #     [2] 组装暂存目录 deploy\VibeKey-F3-Studio_Green\
 #           exe + windeployqt 部署的 Qt 库 + 改名 + Python(含 winrt/pyserial)
 #           + 6 个 worker 脚本 + VC++ 2022 x64 CRT
@@ -31,7 +35,13 @@
 #   日志：deploy\build_all_<时间戳>.log（-Rebuild 时前缀 rebuild_all_）
 
 param(
-    [switch]$Rebuild
+    [switch]$Rebuild,
+    # ★ 2026-10-07: 默认模式。双击 build.bat 会传它进来。
+    #   脚本先跑两道新鲜度校验(时间戳 + exe 内嵌版本号), 不通过就自动重编,
+    #   避免"磁盘上留着旧 exe -> 打包失败"或"打成新名的旧内容"。
+    [switch]$AutoRebuild,
+    # 有意复用旧 exe 时用: 跳过自动重编(但两道校验仍然报错拦住, 除非都通过)
+    [switch]$PackageOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -41,6 +51,10 @@ Push-Location $root
 $logPrefix = if ($Rebuild) { "rebuild_all_" } else { "build_all_" }
 $log = Join-Path $root ("deploy\" + $logPrefix + (Get-Date -Format yyyyMMdd_HHmmss) + ".log")
 function Log($m) { Add-Content -Path $log -Value $m; Write-Output $m }
+# 只写文件、不写控制台, 且**不产生任何返回值**。
+# 给"返回值有语义"的函数(如 Test-ExeFresh)用: 里面调Log 会把日志行写进返回管道,
+# 让调用方把"日志"误当成"不通过的原因"。实测踩过这个坑(重编成功却被判失败)。
+function Log-NoEcho($m) { Add-Content -Path $log -Value $m }
 
 $outDir  = Join-Path $root "deploy\VibeKey-F3-Studio_Green"
 $exeName = "appVibeKeyF3Studio.exe"
@@ -175,12 +189,104 @@ try {
     if (-not $ExePath -or -not (Test-Path $ExePath)) {
         throw "Release exe not found. Build it in Qt Creator, then re-run."
     }
-    # 时间戳校验：exe 不能比源码旧，否则"以为重编了其实没编"
-    $srcT  = (Get-Item (Join-Path $root "src\WorkBuddyMonitor.cpp")).LastWriteTime
-    $exeT  = (Get-Item $ExePath).LastWriteTime
+    # ============ 新鲜度校验(两道, 缺一不可)============
+    # 做成函数: -AutoRebuild 需要"先试校验 → 不过就重编 → 再校验", 会调用两次。
+    # 返回 $null = 通过; 返回字符串 = 不通过的原因。
+    function Test-ExeFresh {
+        param([string]$Exe, [string]$WantVer)
+
+        # ① 时间戳: exe 不能比【任何源文件】旧。
+        #    ★ 历史 bug(10-07踩到): 原实现只取 src\WorkBuddyMonitor.cpp 一个文件
+        #      的 mtime 当"源码时间"。改版本号动的是 src\AppVersion.h, 而该文件根本没被
+        #      纳入比较 ⇒ 旧 exe(10-03)顺利通过校验被打进"v1.1.6"安装包,
+        #      装完程序自报 1.1.5(文件名/版本号与实际内容不一致)。
+        #    ⇒ 改为取 src/ 与 qml/ 下所有文件里【最新的】mtime。
+        $srcRoots = @((Join-Path $root "src"), (Join-Path $root "qml"))
+        $srcFiles = Get-ChildItem -Path $srcRoots -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Extension -in ".cpp", ".h", ".qml", ".rc", ".ui" }
+        $srcNewest = ($srcFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        if (-not $srcNewest) { return "No source files found under src/ or qml/." }
+        $srcT = $srcNewest.LastWriteTime
+        $exeT = (Get-Item $Exe).LastWriteTime
+        # ⚠️ 这里必须用 Log-NoEcho 而不是 Log: Log 内部是 Write-Output,
+        #    输出会进入函数返回管道, 把这行日志混进 return 值 =>
+        #    Test-ExeFresh 永远返回非空(被调用方当成"不通过")。
+        #    实测踩过: 重编成功(exe 已含新版本)却被判失败。
+        Log-NoEcho "      exe built at $exeT / newest source $($srcNewest.Name) at $srcT"
+        if ($exeT -lt $srcT) {
+            return "exe ($exeT) is OLDER than newest source ($($srcNewest.Name), $srcT)"
+        }
+
+        # ② 内容校验(真正的兜底): exe 里内嵌的 VIBEKEY_STUDIO_VERSION 必须与目标版本
+        #    一致。托盘菜单/更新提示都读这个宏(SystemTray.cpp / AppUpdater.cpp),
+        #    不一致就会装出一个"自称旧版"的程序。
+        #    为什么不能只靠时间戳: exe 可能被增量构建/缓存命中, 或手工拷贝过,
+        #    时间戳"看起来新"但内容是旧的; 读内容是唯一可靠判据。
+        if (-not $WantVer) { return $null }
+        $bytes = [System.IO.File]::ReadAllBytes($Exe)
+        # 宏值在 .rdata 里是紧邻的定长 ASCII 串, 直接按字节搜索
+        $needle = [System.Text.Encoding]::ASCII.GetBytes($WantVer)
+        $found = $false
+        for ($i = 0; $i -le ($bytes.Length - $needle.Length); $i++) {
+            $hit = $true
+            for ($j = 0; $j -lt $needle.Length; $j++) {
+                if ($bytes[$i + $j] -ne $needle[$j]) { $hit = $false; break }
+            }
+            if ($hit) { $found = $true; break }
+        }
+        if ($found) { return $null }
+        # 顺带把 exe 里最可能的旧版本号打出来, 省得再手工 grep
+        $guess = (Select-String -Path $Exe -Pattern '(\d+\.\d+\.\d+)' -Encoding ascii -AllMatches |
+                  ForEach-Object { $_.Matches } | ForEach-Object { $_.Value } |
+                  Sort-Object -Unique) -join ", "
+        return "exe does NOT contain version string '$WantVer' (AppVersion.h defines it). Versions seen in exe: $guess"
+    }
+
+    # 目标版本: 从 AppVersion.h 单源读取(与第 3 步 makensis /DVERSION 同源,
+    # 不新增第二个来源, 避免两处版本号走偏)。
+    $verM = Select-String -Path (Join-Path $root "src\AppVersion.h") `
+                       -Pattern '#define VIBEKEY_STUDIO_VERSION "([^"]+)"'
+    if (-not $verM -or -not $verM.Matches[0].Groups[1]) {
+        throw "AppVersion.h 里找不到 VIBEKEY_STUDIO_VERSION"
+    }
+    $ver = $verM.Matches[0].Groups[1].Value
+
     Log "    exe: $ExePath"
-    Log "    exe built at $exeT / source edited at $srcT"
-    if ($exeT -lt $srcT) { throw "Release exe is OLDER than source; rebuild did not pick up changes (use -Rebuild)" }
+    Log "    target version (from src\AppVersion.h): $ver"
+
+    $why = Test-ExeFresh -Exe $ExePath -WantVer $ver
+    #防御: 强制把返回值规整成"字符串(不通过) / 空串(通过)"。
+    # 万一将来有人在函数里加了会写输出的语句, 也不会再被误判成"不通过"。
+    $why = if ($why -is [string]) { $why } else { "" }
+    if ($why) {
+        if ($AutoRebuild -and -not $PackageOnly) {
+            # === 自动重编(双击 build.bat 的默认路径) ===
+            Log "    [auto] freshness check FAILED -> recompiling: $why"
+            $relDir2 = Join-Path $root "build\release"
+            # CMakeCache 自愈: 缓存损坏/路径失效时先清干净重新 configure,
+            # 否则 cmake --build 会直接失败(与 -Rebuild 分支同样的处理)。
+            if (-not (Test-Path (Join-Path $relDir2 "CMakeCache.txt"))) {
+                if (Test-Path $relDir2) { Remove-Item -LiteralPath $relDir2 -Recurse -Force -ErrorAction SilentlyContinue }
+                Invoke-WithMSVC $vcvars $sdkBin "cmake -S `"$root`" -B `"$relDir2`" -G `"NMake Makefiles`" -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=`"D:/Qt/6.11.1/msvc2022_64`"" *>> $log
+            }
+            Invoke-WithMSVC $vcvars $sdkBin "cmake --build `"$relDir2`"" *>> $log
+            # 重编后 exe 路径可能变(多配置生成器会放到子目录), 重新定位一次
+            $refound = Get-ChildItem -Path (Join-Path $relDir2 "*\$exeName") -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($refound) { $ExePath = $refound.FullName; Log "    [auto] rebuilt exe: $ExePath" }
+            $why2 = Test-ExeFresh -Exe $ExePath -WantVer $ver
+            $why2 = if ($why2 -is [string]) { $why2 } else { "" }
+            if ($why2) {
+                throw ("Recompile did not fix it: $why2`n" +
+                       "If this persists, build manually in Qt Creator (Release mode), then re-run.")
+            }
+            Log "    [auto] recompiled OK"
+        } else {
+            throw ("$why`n" +
+                   "Run with -Rebuild (or just double-click build.bat, which auto-rebuilds) to refresh it.")
+        }
+    } else {
+        Log "    [fresh] exe is up to date and embeds version $ver"
+    }
 
     # ===================== [2] 组装暂存目录 =====================
     $step = 2
@@ -226,6 +332,30 @@ try {
     if ($wdq.Exit -ne 0) {
         Log "      (windeployqt exit=$($wdq.Exit) - verifying below)"
     }
+    # ------------------------------------------------------------------
+    # ★ 带退避的重试(2026-10-07 加)
+    # 背景: windeployqt 启动 qtpaths 子进程时会用匿名管道捕获输出, 偶发被系统
+    #   以 ERROR_NO_SYSTEM_RESOURCES(1450, "所有的管道范例都在使用中") 拒绝。
+    #   实测同一台机器上 qtpaths.exe 单独跑正常 => Qt 安装是好的, 纯粹是宿主
+    #   瞬时资源紧张(句柄/非分页池被别的进程占满, 常由杀软扫描/大量程序引起)。
+    #   这类抖动重跑一次通常就好, 所以在"大声失败"之前先退避重试若干次,
+    #   免得用户点一次构建就因为瞬时抖动白等几分钟。
+    #   注意: 只对"管道/QProcess 类"错误重试, 真正的配置错误仍会立刻失败。
+    # ------------------------------------------------------------------
+    $wdTries = 0
+    $wdMax   = 4
+    while ($wdq.Exit -ne 0 -and
+           ($wdq.Text -match "qtpaths|QProcess|CreateFile") -and
+           $wdTries -lt $wdMax) {
+        $wdTries++
+        $waitSec = 3 * $wdTries
+        Log ("      windeployqt hit a transient pipe/QProcess error; retry {0}/{1} in {2}s ..." -f $wdTries, $wdMax, $waitSec)
+        Start-Sleep -Seconds $waitSec
+        $wdq = Invoke-Windeploy
+        if ($wdq.Exit -eq 0) { Log "      [ok] windeployqt succeeded on retry $wdTries" }
+    }
+    if ($wdTries -gt 0) { Log "      (windeployqt final exit=$($wdq.Exit) after $wdTries retries)" }
+
     # 关键校验：没有 platforms\qwindows.dll，应用会以
     # "This application failed to start because no Qt platform plugin could be
     # initialized" 启动即崩。windeployqt 在某些环境会静默跳过插件部署，
@@ -403,9 +533,8 @@ try {
     # 杀残留 makensis（用原生 cmdlet，避免 taskkill 找不到进程时 stderr+非零退出码
     # 在 EAP=Stop 下被转成终止错误）
     Get-Process -Name makensis -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    $verLine = Select-String -Path (Join-Path $root "src\AppVersion.h") -Pattern '#define VIBEKEY_STUDIO_VERSION "([^"]+)"'
-    if (-not $verLine -or -not $verLine.Matches[0].Groups[1]) { throw "AppVersion.h 里找不到 VIBEKEY_STUDIO_VERSION" }
-    $ver = $verLine.Matches[0].Groups[1].Value
+    # 版本号沿用第 1 步② 已从 AppVersion.h 读出的 $ver(单源, 勿在此重复读一次)
+    if (-not $ver) { throw "内部错误: \$ver 未在步骤[1] 赋值" }
     $out = Join-Path $root "deploy\VibeKey-F3_Studio_Setup_v$ver.exe"
     # installer.nsi 放在 deploy\ （与本脚本同目录）。
     #

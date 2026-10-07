@@ -2,11 +2,25 @@
 rem ============================================================================
 rem  build.bat - VibeKey-F3 Studio packaging entry point (double-click)
 rem
-rem    build.bat            -> package only (use an existing Release build)
-rem    build.bat rebuild    -> recompile Release first, then package
+rem    build.bat            -> recompile Release if needed, then package  (DEFAULT)
+rem    build.bat rebuild    -> always force a full recompile first
+rem    build.bat package    -> package only (use an existing Release build as-is)
 rem
 rem  All real work lives in build_all.ps1 (same directory). This file only
 rem  picks a PowerShell host, forwards the switch, and keeps the window open.
+rem
+rem  2026-10-07: default mode changed from "package only" to "rebuild if needed"
+rem  (forwards -AutoRebuild). Reason: build_all.ps1 now verifies that the exe
+rem  embeds the VIBEKEY_STUDIO_VERSION from AppVersion.h (so an installer can
+rem  never be named v1.1.6 while the payload still self-reports 1.1.5).
+rem  A stale exe usually sits in build\release, so a plain double-click would
+rem  just fail => "button does nothing" for the user. Now the script decides and
+rem  recompiles on its own.
+rem
+rem  NOTE: comments here MUST stay ASCII. This file is UTF-8, but cmd.exe reads
+rem  .bat using the ANSI code page (GBK on this machine) -> non-ASCII comment text
+rem  turns into mojibake and some byte sequences get parsed as commands, which
+rem  produced bogus "'xxx' is not recognized" errors. Keep this file ASCII-only.
 rem
 rem  NOTE: this file MUST stay CRLF. cmd.exe mis-parses LF-only line endings
 rem  inside multi-line ( ... ) blocks, which silently swallows the code after
@@ -21,11 +35,15 @@ set "PSEXE="
 set "PSARGS="
 set "RC=0"
 set "NEWEST="
+set "MODE=auto"
 
 if /i "%~1"=="rebuild" set "PSARGS=-Rebuild"
-if "%~1"=="" goto :have_args
-if /i "%~1"=="rebuild" goto :have_args
-echo [WARN] unknown argument "%~1" - ignored. Usage: build.bat [rebuild]
+if /i "%~1"=="rebuild" set "MODE=rebuild"
+if /i "%~1"=="package" set "PSARGS=-PackageOnly"
+if /i "%~1"=="package" set "MODE=package-only"
+if not "%~1"=="" goto :have_args
+rem no argument: default to -AutoRebuild (script recompiles only if needed)
+set "PSARGS=-AutoRebuild"
 :have_args
 
 rem Prefer PowerShell 7 (pwsh): build_all.ps1 sets ErrorActionPreference=Stop, and
@@ -46,7 +64,7 @@ goto :fail
 echo ============================================================
 echo  VibeKey-F3 Studio  -  build_all.ps1
 echo  host      : !PSEXE!
-echo  mode      : !PSARGS!
+echo  mode      : !MODE!  (!PSARGS!)
 echo  started   : %DATE% %TIME%
 echo ============================================================
 echo.

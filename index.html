@@ -96,8 +96,41 @@
      v19: 修「悬停在轮播上页面滚不动」—— 轮播根节点原来对 touchmove 无条件
           preventDefault(只想去掉触屏横向返回/前进手势), 把纵向页面滚动也一起拦了。
           改为只在"横向位移 > 纵向"时才拦, 并给 `.car` 加 `touch-action: pan-y`
-          作为 CSS 侧兜底。 -->
-<link rel="stylesheet" href="web/assets/style.css?v=19">
+          作为 CSS 侧兜底。
+     v20: 官网加「下载 Windows 版」入口(CTA 区) —— 安装包已上 GitHub Releases。
+          新增 .btn-dl(亮蓝实心+大阴影, 全站唯一转化入口) / .cta-note / .cta-link;
+          ⚠️ 下载必须用普通 a 标签跳转: Releases 资产直链不带 CORS 头,
+             JS fetch/XHR 会被浏览器拦(与 Gitee 两跳 302 同类问题)。
+     v21: 首屏改「天空感」+ 标题第二行轮换 + 去掉功能区图标。
+          ① .hero 背景由极淡蓝白换成天空渐变(上端明确天空蓝→底边纯白, 与下方区块无缝);
+             新增纯 CSS 云层 .hero-clouds/.cloud(3 瓣白径向渐变 + 大模糊, 各自缓慢飘);
+          ② h1 第二行拆成 5 句 .rot-i, 由 JS 定时交叉淡入淡出(品牌行 .l1 不动);
+             容器高度由 JS 量最高一句写死, 防切换时把下方按钮顶得上下抖;
+          ③ 四大功能卡的 .crd-ic 图标块(及 3 条 :nth-child 配色规则)删除。
+          ⚠️ 云/极光/点阵都在 z-index:0, .hero-in 是 z-index:1, 动画永远在文字之下。
+     v22: ① 云层重做 —— v21 的"椭圆 + 大模糊"观感是"糊毛的椭圆"(用户: "白云感觉有点奇怪"),
+             改成"多个圆盘并集"(每朵 6 个 .cf-p), 底排贴底 ⇒ 平底 + 蓬松顶;
+          ② 首屏按钮组调整: 新增「下载 Windows 版」(复用底部自动取版本逻辑) 与
+             「macOS 版 敬请期待」占位; 删掉「查看规格参数」;
+          ③ 下载逻辑改为 .btn-dl[data-gitee-repo] 全量同步, 首屏/底部两个入口版本号一致;
+             顺手修掉 apply() 重建 dlNote 后 #dlGhLink 引用失效导致备用源链接丢失的问题。
+     v23: ① 首屏 4 朵云**整体删除**(用户: "那4朵云不要了") —— 云层试过两版
+             (椭圆+大模糊 / 圆盘并集)观感都不如"干净的天空渐变 + 极光光斑"利落;
+             .hero-clouds / .cloud / .cf-p / cloudDrift 及窄屏覆盖块一并删净;
+          ② 四大功能标签的 emoji(⌨🎙🕹💡)换成内联 SVG 线性图标 ——
+             用户: "这图标不好看, 一眼就是 AI 的感觉"(emoji 跨平台渲染不一致、配色杂);
+             现统一 1.6 描边 + currentColor(单给 --blue), 与导航图标同一套语言;
+             ⚠️ 图标 aria-hidden, 避免屏幕阅读器把装饰图标当内容重念一遍。
+     v24: ① 首屏「在线改键」的齿轮 emoji(⚙) 换成**【横着的向右箭头】**
+             —— 仅此一处, 导航栏与底部 CTA 的「在线改键」仍是齿轮(用户明确要求);
+             箭头语义更贴: 该按钮是"跳转/进入"改键工具(箭头=去那边, 齿轮=设置);
+          ② **按钮投影由灰黑改成彩色光晕**: 每个按钮的投影取其**自身色相**
+             (蓝按钮→亮蓝光晕), 且做**两层**(近层小 blur 饱和色 + 远层大 blur 柔光)
+             ⇒ 观感从"纸片浮在灰雾上"变成"按钮在发光";
+             深蓝 CTA 区上的白按钮用"亮天蓝光晕"而非黑投影, 否则白按钮底下会显脏。
+             ⚠️ .btn-soon 必须连 box-shadow 一起清空(不能只清 transform),
+                否则新增的 .btn-s 蓝调投影会套在"敬请期待"占位按钮上, 让它看着像能点。 -->
+<link rel="stylesheet" href="web/assets/style.css?v=31">
 </head>
 <body>
 
@@ -140,10 +173,19 @@
       <a href="#scenes" data-opt>适用场景</a>
       <a href="#specs">规格参数</a>
       <a href="#opensource" data-opt>开源</a>
-      <!-- 手机端抽屉里的「在线改键」: 原来是无属性的站内锚点, 滚到「在线工具」
+      <!-- 手机端抽屉里的「在线配置」: 原来是无属性的站内锚点, 滚到「在线工具」
            区块再由用户点按钮。该区块已按需求删除, 锚点成了死链 ——
-           改为 data-app-link 直接跳改键页, 与桌面端 .nav-app 行为一致。 -->
-      <a class="nav-menu-app" data-app-link href="#app">⚙ 在线改键</a>
+           改为 data-app-link 直接跳改键页, 与桌面端 .nav-app 行为一致。
+           ★ 10-07: 齿轮 emoji → 横箭头 SVG, 文案「在线改键」→「在线配置」,
+             与桌面端 .nav-app 保持完全一致(全站入口统一)。 -->
+      <a class="nav-menu-app" data-app-link href="#app">
+        <svg class="nav-app-ic" viewBox="0 0 24 24" width="16" height="16" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" focusable="false">
+          <path d="M4 12h15M13.4 6.2 19.4 12l-6 5.8"/>
+        </svg>
+        在线配置
+      </a>
       <a href="https://github.com/lii-x/VibeKey-F3" class="nav-menu-gh" target="_blank" rel="noopener noreferrer">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
           <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
@@ -151,7 +193,21 @@
         GitHub 开源仓库
       </a>
     </nav>
-    <a class="nav-app" data-app-link href="#app" title="打开 VibeKey-F3 在线改键">⚙ 在线改键</a>
+    <!-- ★ 10-07: 齿轮 emoji(⚙) → 横向右箭头 SVG, 文案「在线改键」→「在线配置」。
+         箭头与首屏/CTA 用的是同一套 path(`M4 12h15M13.4 6.2 19.4 12l-6 5.8`),
+         保证全站"去配置工具"的入口视觉统一。
+         ⚠️ 早前用户明确说过"只改首屏那一个", 现在用户主动要求导航栏也一起改
+            ⇒ 这条旧约定**作废**, 全站四处入口已统一。
+         title 里保留"在线改键"全称(不改), 因为它承担的是"完整说明"职责,
+         短标签用"在线配置"、悬浮提示给全称, 信息更充分。 -->
+    <a class="nav-app" data-app-link href="#app" title="打开 VibeKey-F3 在线配置工具">
+      <svg class="nav-app-ic" viewBox="0 0 24 24" width="15" height="15" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+           aria-hidden="true" focusable="false">
+        <path d="M4 12h15M13.4 6.2 19.4 12l-6 5.8"/>
+      </svg>
+      在线配置
+    </a>
     <a class="nav-gh" href="https://github.com/lii-x/VibeKey-F3" target="_blank" rel="noopener noreferrer"
        title="在 GitHub 上查看 VibeKey-F3 开源仓库" aria-label="GitHub 开源仓库">
       <svg viewBox="0 0 24 24" width="19" height="19" fill="currentColor" aria-hidden="true">
@@ -173,25 +229,127 @@
 
 <!-- ============ 首屏 ============ -->
 <section class="hero" id="top">
+  <!-- 10-07: 云层已按需求整体移除(用户: "那4朵云不要了")。
+       曾试过两版(椭圆+大模糊 / 圆盘并集), 结论是纯 CSS 云的观感始终不如
+       "干净的天空渐变 + 极光光斑" 来得利落, 于是直接去掉, 只留渐变与光斑。
+       CSS 里的 .hero-clouds/.cloud/.cf-p/cloudDrift 已一并删除, 别只删一边。 -->
+  <div class="hero-aurora" aria-hidden="true">
+    <span class="aurora-blob aurora-b1"></span>
+    <span class="aurora-blob aurora-b2"></span>
+    <span class="aurora-blob aurora-b3"></span>
+  </div>
   <div class="wrap hero-in">
     <div class="hero-txt">
       <span class="hero-badge">✦ AI 时代新交互效率工具</span>
-      <h1><span class="l1">VibeKey-F3</span><span class="l2">一颗顶三件 <em>随身</em>&nbsp;AI&nbsp;效率小工具</span></h1>
+      <!-- 第二行随文案轮换(对标 chatterfly 首屏): 所有短语都预先写在 DOM 里,
+           由 JS 交叉淡入淡出, 不在运行时拼 HTML。品牌行 .l1 固定不动,
+           避免品牌名闪;
+           高度由 JS 量出最高的一句后写死, 免得切换时把下方按钮顶来顶去。 -->
+      <h1>
+        <span class="l1">VibeKey-F3</span>
+        <span class="l2 rot" id="heroRot">
+          <span class="rot-i on">一颗顶三件 <em>随身</em>&nbsp;AI&nbsp;效率小工具</span>
+          <span class="rot-i">开口即成稿 <em>语音</em>实时转文字</span>
+          <span class="rot-i">手腕轻一转 <em>空中飞鼠</em>掌控光标</span>
+          <span class="rot-i">一键即触发 <em>AI</em> 随时待命</span>
+          <span class="rot-i">蓝牙 5.3 <em>三台设备</em>自由切换</span>
+        </span>
+      </h1>
       <p class="hero-sub">
         自定义快捷键、语音输入、空中飞鼠、Agent 状态灯——四大核心功能集成在
         71.5&times;21&times;28mm 的机身里。双模蓝牙 5.3 直连三台设备，
         让大厂搜罗的「AI 潮涌入口」真正变成物理按键。
       </p>
+      <!-- 四大功能标签。
+           ★ 10-07: 原来是 emoji(⌨ 🎙 🕹 💡), 用户反馈"一眼就是 AI 的感觉"——
+             emoji 是彩色位图字形, 各家系统/浏览器渲染出来形状、配色、粗细都不一致,
+             和这套"细线描边 + 单色蓝"的界面语言完全不搭, 且显得廉价。
+             改成**内联 SVG 线性图标**: 统一 1.6 描边、统一 currentColor(跟随文字色,
+             这里让它继承 .hero-tags 的 --blue), 与导航/按钮上的图标风格一致。
+             选型对应关系:
+               keyboard → 自定义快捷键(键帽轮廓 + 底部空格键)
+               mic      → 语音输入(话筒 + 支架)
+               cursor   → 空中飞鼠(箭头指针, 呼应"手腕轻转移动光标")
+               bulb     → Agent 状态灯(灯泡 + 灯丝, 呼应"状态灯/看得见")
+             ⚠️ 图标是装饰性的(info 已由旁边文字给出), 一律 aria-hidden + focusable=false,
+                免得屏幕阅读器把 SVG 当内容念一遍, 出现"自定义快捷键 键盘 自定义快捷键"这种重复。 -->
       <div class="hero-tags">
-        <span>⌨ 自定义快捷键</span>
-        <span>🎙 语音输入</span>
-        <span>🕹 空中飞鼠</span>
-        <span>💡 Agent 状态灯</span>
+        <span>
+          <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <rect x="2" y="6" width="20" height="12" rx="2.4"/>
+            <path d="M6.2 9.6h0M9.4 9.6h0M12.6 9.6h0M15.8 9.6h0M6.2 12.6h0M9.4 12.6h0M12.6 12.6h0M15.8 12.6h0M17.4 15.4h0"/>
+            <path d="M8.2 15h7.6"/>
+          </svg>
+          自定义快捷键
+        </span>
+        <span>
+          <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <rect x="9" y="2.6" width="6" height="11" rx="3"/>
+            <path d="M5.6 11.4a6.4 6.4 0 0 0 12.8 0"/>
+            <path d="M12 17.8v3.6M8.6 21.4h6.8"/>
+          </svg>
+          语音输入
+        </span>
+        <span>
+          <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M5.6 2.8 19 13.9h-6.2l3 7-2.7 1.2-3-7L5.6 19z"/>
+          </svg>
+          空中飞鼠
+        </span>
+        <span>
+          <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+               stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <path d="M9.2 18.4h5.6M10 21.4h4"/>
+            <path d="M12 2.6a6.4 6.4 0 0 1 3.7 11.6c-.6.5-.9 1-.9 1.6v.6H9.2v-.6c0-.6-.3-1.1-.9-1.6A6.4 6.4 0 0 1 12 2.6z"/>
+          </svg>
+          Agent 状态灯
+        </span>
       </div>
       <div class="hero-btns">
-        <a class="btn btn-p" data-app-link href="#app">⚙ 在线改键</a>
-        <a class="btn btn-s" href="#features">了解四大功能</a>
-        <a class="btn btn-s" href="#specs">查看规格参数</a>
+        <!-- 首屏主转化入口(客户端下载) —— 与页面底部 CTA 区共用同一套
+             data-gitee-repo / data-gh-repo 自动取版本逻辑(见文末脚本)。
+             ★ 底部 .cta 的 #dlBtn 是"主", 这里是"从": 脚本会把两处文案/链接
+               一并同步, 所以两处的 data-* 必须保持一致。
+             ★ 必须是普通 <a> 跳转: Gitee/Releases 直链是重定向 + 无 CORS 头,
+               JS fetch/XHR 会被浏览器拦掉。 -->
+        <a class="btn btn-p btn-dl" id="heroDlBtn"
+           data-gitee-repo="lii-x/vibe-key-f3"
+           data-gh-repo="lii-x/VibeKey-F3"
+           href="https://gitee.com/lii-x/vibe-key-f3/releases/download/studio-v1.1.4/VibeKey-F3_Studio_Setup_v1.1.4.exe">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+            <path d="M12 3v10.6l3.3-3.3 1.4 1.4L11 17.4 5.3 11.7l1.4-1.4L10 13.6V3h2zM5 19h14v2H5v-2z"/>
+          </svg>
+          <!-- ★ 10-07: 这个 id 目前已**不再被 JS 写入**(原先 JS 会把按钮文字
+               替换成纯版本号"v1.1.5", 用户要求"不要显示版本号", 已改为固定文案)。
+               保留 id 作为稳定的改文案锚点 —— 以后要调这几个字, 直接改这里即可。 -->
+          <span id="heroDlBtnText">下载 Windows 版</span>
+        </a>
+        <!-- ★ 10-07: 这里原来是 "⚙ 在线改键"(齿轮 emoji), 用户要求换成"横着的箭头"。
+             注意**只改首屏这一个** —— 导航栏与底部 CTA 的「在线改键」仍是齿轮(用户明确要求)。
+             箭头语义上也更贴: 这个按钮是"跳转/进入"改键工具, 用向右箭头比齿轮更直观
+             (齿轮是"设置", 箭头是"去那边")。
+             图标用 currentColor 描边, 跟随文字色, 所以 hover 变蓝时图标一同步变蓝。
+            ★ 10-07 文案调整: "在线改键" → "使用网页端配置"(用户要求)。
+              新文案更准确地说明"点进去做什么"(打开网页版配置工具),
+              且与下方功能区的"⚙ 打开在线改键工具"形成"简明版/详细版"的层次,
+              不再两处都是"在线改键"这种重复说法。
+              ⚠️ 仍**只改首屏这一处**, 其它三处「在线改键」保持原样。 -->
+        <a class="btn btn-s" data-app-link href="#app">
+          <svg class="btn-ic" viewBox="0 0 24 24" width="17" height="17" fill="none"
+               stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
+               aria-hidden="true" focusable="false">
+            <path d="M4 12h15M13.4 6.2 19.4 12l-6 5.8"/>
+          </svg>
+          使用网页端配置
+        </a>
+        <!-- macOS 占位: 暂不可点, 用 aria-disabled + tabindex="-1" 明确告知
+             辅助技术与键盘用户"这不是一个可用链接", 避免误点。 -->
+        <span class="btn btn-s btn-soon" aria-disabled="true" title="macOS 版正在开发中">
+           macOS 版 <em>敬请期待</em>
+        </span>
       </div>
     </div>
     <div class="hero-vis">
@@ -211,22 +369,18 @@
     </div>
     <div class="grd-4 rv">
       <article class="crd">
-        <div class="crd-ic">⌨</div>
         <h3>自定义快捷键</h3>
         <p>全键自由映射，单击、双击、长按都能独立改成任意组合。</p>
       </article>
       <article class="crd">
-        <div class="crd-ic">🎙</div>
         <h3>语音输入</h3>
         <p>内置高灵敏麦克风，轻声说话实时转文字，免去打字。</p>
       </article>
       <article class="crd">
-        <div class="crd-ic">🕹</div>
         <h3>空中飞鼠</h3>
         <p>姿态传感器感应，手腕轻转即可移动指针、滚轮与左右键。</p>
       </article>
       <article class="crd">
-        <div class="crd-ic">💡</div>
         <h3>Agent 状态灯</h3>
         <p>3 色 LED 加 RGB，任务状态一眼掌握，AI 在忙什么你看得见。</p>
       </article>
@@ -308,23 +462,6 @@
       <p>三个槽位按键独立配置存储，一台设备连三台机器。长按电源键即可切换当前槽位，每台设备一套按键方案，互不干扰。</p>
     </div>
 
-    <div class="rv">
-      <div class="slot-demo">
-        <div class="slot">
-          <b>槽位 ①</b>
-          <span>工作机</span>
-        </div>
-        <div class="slot">
-          <b>槽位 ②</b>
-          <span>笔记本</span>
-        </div>
-        <div class="slot">
-          <b>槽位 ③</b>
-          <span>平板</span>
-        </div>
-      </div>
-    </div>
-
     <div class="modes-note rv">
       <div class="mode-row">
         <span class="n" style="background:var(--blue)">蓝</span>
@@ -355,22 +492,18 @@
 
     <div class="grd-4 rv">
       <div class="mode-card">
-        <div class="mode-ic">1</div>
         <b>常规模式</b>
         <span>单击一次即触发</span>
       </div>
       <div class="mode-card">
-        <div class="mode-ic">2</div>
         <b>手势模式</b>
         <span>单击 / 双击 / 长按各配一个动作</span>
       </div>
       <div class="mode-card">
-        <div class="mode-ic">3</div>
         <b>EC 编码器</b>
         <span>上滚 / 按压 / 下滚三段独立设置</span>
       </div>
       <div class="mode-card">
-        <div class="mode-ic">4</div>
         <b>摇一摇</b>
         <span>开启后灵敏度 LWin+1 切换</span>
       </div>
@@ -381,7 +514,7 @@
         KEY L1–L3、KEY C1–C3 均支持上述映射，摇一摇灵敏度三档可调。
       </p>
       <div class="hero-btns" style="justify-content:center">
-        <a class="btn btn-p" data-app-link href="#app">⚙ 打开在线改键工具</a>
+        <a class="btn btn-p" data-app-link href="#app">打开在线配置工具</a>
       </div>
     </div>
 
@@ -483,7 +616,13 @@
             <span class="car-tag">Vibe Coding</span>
             <h4>把 AI 编程串成一条线</h4>
             <p>手不离键盘就能指挥 AI 写代码。语音输入加空中飞鼠，让「写需求—改代码—点运行」三个动作一气呵成。</p>
-            <span class="car-more">⌨ 自定义快捷键 · 🎙 语音输入</span>
+            <span class="car-more">
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="6" width="20" height="12" rx="2.4"/><path d="M6.2 9.6h0M9.4 9.6h0M12.6 9.6h0M15.8 9.6h0M6.2 12.6h0M9.4 12.6h0M12.6 12.6h0M15.8 12.6h0"/><path d="M8.2 15h7.6"/></svg>
+              自定义快捷键
+              <i class="car-dot"></i>
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="2.6" width="6" height="11" rx="3"/><path d="M5.6 11.4a6.4 6.4 0 0 0 12.8 0"/><path d="M12 17.8v3.6M8.6 21.4h6.8"/></svg>
+              语音输入
+            </span>
           </div>
           <div class="car-media">
             <img src="web/assets/img/scene-coding.jpg" alt="一位程序员在居家书房夜晚对着笔记本电脑写代码" width="640" height="760" loading="lazy">
@@ -495,7 +634,13 @@
             <span class="car-tag">会议与记录</span>
             <h4>不打断思路的记录方式</h4>
             <p>会议中想到什么就说什么，按一下语音键说完即上屏。空中飞鼠负责翻页，不必在键盘上盲找。</p>
-            <span class="car-more">🎙 语音输入 · 🕹 空中飞鼠</span>
+            <span class="car-more">
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="2.6" width="6" height="11" rx="3"/><path d="M5.6 11.4a6.4 6.4 0 0 0 12.8 0"/><path d="M12 17.8v3.6M8.6 21.4h6.8"/></svg>
+              语音输入
+              <i class="car-dot"></i>
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5.6 2.8 19 13.9h-6.2l3 7-2.7 1.2-3-7L5.6 19z"/></svg>
+              空中飞鼠
+            </span>
           </div>
           <div class="car-media">
             <img src="web/assets/img/scene-meeting.jpg" alt="一位职场人在现代会议室开线上会议并记录笔记" width="640" height="760" loading="lazy">
@@ -507,7 +652,13 @@
             <span class="car-tag">直播与创作</span>
             <h4>三键管住一整场直播</h4>
             <p>把常用指令映射到三个键上，配合空中飞鼠控制播放条，切场景、掐点、推流都跟得上手。</p>
-            <span class="car-more">⌨ 自定义快捷键 · 🕹 空中飞鼠</span>
+            <span class="car-more">
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="6" width="20" height="12" rx="2.4"/><path d="M6.2 9.6h0M9.4 9.6h0M12.6 9.6h0M15.8 9.6h0M6.2 12.6h0M9.4 12.6h0M12.6 12.6h0M15.8 12.6h0"/><path d="M8.2 15h7.6"/></svg>
+              自定义快捷键
+              <i class="car-dot"></i>
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M5.6 2.8 19 13.9h-6.2l3 7-2.7 1.2-3-7L5.6 19z"/></svg>
+              空中飞鼠
+            </span>
           </div>
           <div class="car-media">
             <img src="web/assets/img/scene-live.jpg" alt="一位内容创作者在家中直播工作台前戴着耳机创作" width="640" height="760" loading="lazy">
@@ -519,7 +670,13 @@
             <span class="car-tag">多设备办公</span>
             <h4>三台机器，一套好手感</h4>
             <p>长按电源键就能在三台设备间切换，每台各存一套按键方案。RGB 灯告诉你此刻连的是哪台。</p>
-            <span class="car-more">💡 Agent 状态灯 · ⌨ 三槽位配置</span>
+            <span class="car-more">
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M9.2 18.4h5.6M10 21.4h4"/><path d="M12 2.6a6.4 6.4 0 0 1 3.7 11.6c-.6.5-.9 1-.9 1.6v.6H9.2v-.6c0-.6-.3-1.1-.9-1.6A6.4 6.4 0 0 1 12 2.6z"/></svg>
+              Agent 状态灯
+              <i class="car-dot"></i>
+              <svg class="tg-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2" y="6" width="20" height="12" rx="2.4"/><path d="M6.2 9.6h0M9.4 9.6h0M12.6 9.6h0M15.8 9.6h0M6.2 12.6h0M9.4 12.6h0M12.6 12.6h0M15.8 12.6h0"/><path d="M8.2 15h7.6"/></svg>
+              三槽位配置
+            </span>
           </div>
           <div class="car-media">
             <img src="web/assets/img/scene-multi.jpg" alt="一位职场人在明亮办公桌前同时使用笔记本与平板" width="640" height="760" loading="lazy">
@@ -564,20 +721,56 @@
   <div class="wrap cta-in">
     <h2>VibeKey-F3 让 AI 交互触手可及</h2>
     <p>把「AI 潮涌入口」做成真正能按下的物理按键。</p>
+    <!-- 下载入口（Gitee 主源, 自动取最新版）
+         · 主按钮默认写死当前已知版本做"无 JS 兜底"(Gitee 直链按 tag+固定文件名,
+           加载慢或 JS 被拦时也能点开); JS 起来后会用 Gitee API 自动纠正为真实最新。
+         ·以后【上传新版本到 Gitee 的 studio-vX.Y.Z 即可】, 官网无需改代码自动更新
+           —— resolveDownload() 会挑tag 最高(studio-vX.Y.Z 按数字比, 不是字符串比)的那个。
+         · 备用源保留 GitHub Releases(国内不稳时的一线生机)。
+         ⚠️ 下载一律用普通 a 标签跳转: Gitee/Releases 资产直链都是重定向+无 CORS 头,
+            JS fetch/XHR 会被浏览器拦(实测 Gitee 两跳 302 首跳无 CORS 头)。 -->
+    <!-- 10-07: 「对比规格」按钮已按需求删除 —— 导航栏已有「规格参数」项,
+         页面上也紧挨着规格区块, 多这一个按钮属于重复入口, 白占视觉重量。
+         ⚠️ 顺带: 删掉后 CTA 只剩 3 个按钮, 与首屏按钮组的构成节奏也更接近了。 -->
     <div class="cta-btns">
-      <a class="btn btn-p" data-app-link href="#app">⚙ 在线改键</a>
-      <a class="btn btn-gh" href="https://github.com/lii-x/VibeKey-F3" target="_blank" rel="noopener noreferrer">
+      <a class="btn btn-dl" id="dlBtn"
+         data-gitee-repo="lii-x/vibe-key-f3"
+         data-gh-repo="lii-x/VibeKey-F3"
+         href="https://gitee.com/lii-x/vibe-key-f3/releases/download/studio-v1.1.4/VibeKey-F3_Studio_Setup_v1.1.4.exe">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
+          <path d="M12 3v10.6l3.3-3.3 1.4 1.4L11 17.4 5.3 11.7l1.4-1.4L10 13.6V3h2zM5 19h14v2H5v-2z"/>
+        </svg>
+        <span id="dlBtnText">下载 Windows 版 v1.1.4</span>
+      </a>
+      <!-- ★ 10-07: 与首屏同步 —— 齿轮 emoji 换成横箭头, 文案「在线改键」→
+           「使用网页端配置」。★ 注意这是**第二处**改文案了(首屏是 v26 改的),
+             用户这次明确说"这里的内容也同步一下";
+             剩下导航栏 + 导航抽屉两处的「⚙ 在线改键」**保持原样不动**。 -->
+      <a class="btn btn-p" data-app-link href="#app">
+        <svg class="btn-ic" viewBox="0 0 24 24" width="17" height="17" fill="none"
+             stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
+             aria-hidden="true" focusable="false">
+          <path d="M4 12h15M13.4 6.2 19.4 12l-6 5.8"/>
+        </svg>
+        使用网页端配置
+      </a>
+      <a class="btn btn-gh" href="https://gitee.com/lii-x/vibe-key-f3/releases" target="_blank" rel="noopener noreferrer">
         <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
           <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58v-2.03c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.21.09 1.84 1.24 1.84 1.24 1.07 1.84 2.81 1.31 3.5 1 .11-.78.42-1.31.76-1.61-2.67-.3-5.47-1.34-5.47-5.95 0-1.31.47-2.39 1.24-3.23-.13-.3-.54-1.52.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6.01 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.66.24 2.88.12 3.18.77.84 1.23 1.92 1.23 3.23 0 4.62-2.8 5.64-5.48 5.94.43.37.82 1.1.82 2.22v3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
         </svg>
-        GitHub 开源
+        Gitee 开源
       </a>
-      <a class="btn btn-s" href="#specs">对比规格</a>
     </div>
+    <!-- ★ 10-07: 原「Windows 10/11 · Gitee 主源（国内直连）· 备用下载源（GitHub）」
+         整行说明已按需求删除(用户: "这两个内容不要")。连带把空的 <p id="dlNote">
+         节点也一并去掉 —— 留一个空 <p> 只会白白占用一个段落间距(margin)。
+         ⚠️ 连带影响: 这行原本承载着 GitHub 备用下载入口(#dlGhLink),
+            删掉后 **页面上再无 GitHub 下载入口**; JS 侧对应的 fixGhLink() 也已移除。
+            目前下载主源是 Gitee(国内直连), 若日后需要备用源, 建议放页脚做小链接。 -->
     <p style="margin-top:22px;color:rgba(255,255,255,.62);font-size:14px">
-      在线改键工具需通过 USB 或蓝牙连接设备；固件升级仅支持 USB 连接。
+      使用网页端配置需通过 USB 或蓝牙连接设备；固件升级仅支持 USB 连接。
     </p>
-  </div>
+ </div>
 </section>
 
 <!-- ============ 页脚 ============ -->
@@ -604,8 +797,9 @@
 //   ① 所有卡片重叠在同一卡位, JS 只写 data-off(-2..2), 视觉全交给 CSS;
 //      环形数组用取模算"相对位移", 所以四张/五张/六张都能跑, 不用改逻辑。
 //   ② 只监听 pointer 事件 —— 统一覆盖鼠标/触摸/手写笔, 免得写两套逻辑。
-//   ③ 自动播放用 setInterval, 用户一碰(悬停/按下)就 clearInterval, 松开再重启,
-//      不会跟人抢操作。
+//   ③ 自动播放用 setInterval; **按下拖拽 / 点圆点 / 点侧卡**时 clearInterval,
+//      让位给手动操作, 之后自动重启, 不会跟人抢操作。
+//      ⚠️ 悬停**不**暂停(10-07 移除, 见下方说明)。
 //   ④ prefers-reduced-motion 时不自动播, 但拖拽/点击照常(纯手动)。
 (function () {
   var root = document.getElementById('car');
@@ -764,9 +958,14 @@
     var mx = Math.abs(t.clientX - sx), my = Math.abs(t.clientY - sy);
     if (mx > my) e.preventDefault();        // 仅横向为主的滑动才拦
   }, { passive: false });
-  // 鼠标悬停时暂停 —— 用户正在看的时候别自动换掉
-  root.addEventListener('mouseenter', stopAuto);
-  root.addEventListener('mouseleave', startAuto);
+  // ★ 10-07: 原来这里有两行「悬停暂停」——
+  //     root.addEventListener('mouseenter', stopAuto);
+  //     root.addEventListener('mouseleave', startAuto);
+  //   设计初衷是"用户正在看的时候别自动换掉", 但实测体验不好:
+  //   鼠标只要停在轮播框内, 轮播就永远不动了(用户反馈"鼠标悬停在这个窗口里面,
+  //   它就不会滚动")。桌面端鼠标本来就常年停在页面中间, 等于自动播放被废掉。
+  //   ⇒ 已删除, 悬停时照常自动播放。
+  //   ⚠️ 拖拽(pointerdown)与点圆点/点侧卡时仍会 stopAuto, 那是为了让位给手动操作, 保留。
 
   // 键盘: 左右方向键切换(无障碍)
   root.setAttribute('tabindex', '0');
@@ -875,6 +1074,142 @@
   };
   window.addEventListener('scroll', tick, { passive: true });
   tick();
+})();
+
+// ---------- 下载按钮: 自动取 Gitee 上的最新安装包 ----------
+// 需求: 用户上传新版本到 Gitee(studio-vX.Y.Z)后, 官网**无需改代码**自动指向新版。
+// 实现: 启动后查 Gitee Releases 列表 → 挑出 studio-vX.Y.Z 里 tag 最高的一个
+//       → 改写主按钮 href 与文案; 失败则保持 HTML 里写死的兜底版本(无 JS 也能点)。
+// 为什么按 tag 数字排序而不是用 API 的 /releases/latest:
+//   ★ Gitee 的 latest 是按【发布时间】取, 而固件 Release(vX.Y.Z)与上位机安装包
+//     (studio-vX.Y.Z)混在同一个列表里 —— 实测 /releases/latest 返回的是固件
+//     v1.1.2, 会把固件当安装包给用户。所以必须自己筛 studio-* 再按版本号比。
+// 为什么不用 /releases/latest/download/xxx.exe:
+//   那个端点按【文件名】匹配, 版本号变了(v1.1.5→v1.2.0)就失效; 且 Gitee 资产
+//   直链是两跳 302, 拼接文件名不可靠。这里用列表 API 拿真实 asset 的直链。
+// 只 fetch 列表(小 JSON), 下载仍是普通 a 标签跳转 —— 资产直链不带 CORS 头。
+(function () {
+  var btn = document.getElementById('dlBtn');
+  var txt = document.getElementById('dlBtnText');
+  /* 首屏那个下载按钮: 与底部 CTA 是同一件事的两个入口, 版本/链接必须一致。
+     ★ 用数组 + querySelectorAll 而不是写死两个 id —— 以后要再加一个入口,
+       只要给它 data-gitee-repo + 一个 .btn-dl 类就自动纳入同步。 */
+  var btnAll = document.querySelectorAll('.btn-dl[data-gitee-repo]');
+  if (!btn) return;
+  var giteeRepo = btn.getAttribute('data-gitee-repo') || '';
+
+  /* 从 tag 字符串里取 "vX.Y.Z" 的数字三元组: "studio-v1.10.2" → [1,10,2] */
+  function verOf(tag) {
+    var m = /(\d+)\.(\d+)\.(\d+)/.exec(tag || '');
+    return m ? [+m[1], +m[2], +m[3]] : null;
+  }
+  /* 逐段比较(而不是字符串比, 否则 "1.1.10" 会被判成比 "1.1.9" 小) */
+  function cmp(a, b) {
+    for (var i = 0; i < 3; i++) {
+      if (a[i] !== b[i]) return a[i] - b[i];
+    }
+    return 0;
+  }
+
+  /* ★ 10-07 简化: 原来这里还会重建 #dlNote 那行说明文字(含 GitHub 备用源链接)。
+     该行已按需求整行删除, 所以 apply() 现在**只负责同步两个下载按钮的
+     href 与文案**, 不再碰任何说明节点 —— 顺带把那套"重建 innerHTML 导致
+     #dlGhLink 引用失效"的坑一起消掉了(节点都没了, 坑自然不存在)。
+     ★★ 10-07 用户要求首屏按钮**不显示版本号**(原来这里被替换成纯 "v1.1.5",
+        按钮上只剩一个版本号, 不知道是干什么的 —— 用户: "不要显示版本号")。
+        所以首屏文案改为**固定不变**的 "下载 Windows 版", 不再跟随版本变。
+        底部 CTA 仍显示 "下载 Windows 版 v1.1.5"(那里空间大、需要看出新旧)。
+        ⚠️ 版本号只写进 href(url 里已含 studio-vX.Y.Z), 视觉上不呈现。 */
+  function apply(tag, url) {
+    for (var i = 0; i < btnAll.length; i++) btnAll[i].href = url;
+    if (txt) txt.textContent = '下载 Windows 版 ' + tag.replace(/^studio-/, '');
+    // 首屏按钮: 刻意**不写** textContent —— 保持 HTML 里写死的 "下载 Windows 版"。
+    // 版本号由 href 里的 studio-vX.Y.Z 保证拿到最新包, 按钮上不再显示。
+  }
+
+  function pick(list) {
+    var best = null, bestV = null;
+    list.forEach(function (rel) {
+      var tag = rel.tag_name || '';
+      if (!/^studio-v\d+\.\d+\.\d+$/.test(tag)) return;   // 只认上位机安装包
+      var assets = rel.assets || [];
+      for (var i = 0; i < assets.length; i++) {
+        var n = assets[i].name || '';
+        if (!/\.exe$/i.test(n)) continue;
+        var v = verOf(tag);
+        if (!v) continue;
+        if (!bestV || cmp(v, bestV) > 0) { bestV = v; best = { tag: tag, url: assets[i].browser_download_url }; }
+        break;                                             // 一个 Release 只取第一个 exe
+      }
+    });
+    return best;
+  }
+
+  if (!giteeRepo) return;
+  var api = 'https://gitee.com/api/v5/repos/' + giteeRepo + '/releases?per_page=30';
+  fetch(api, { headers: { Accept: 'application/json' } })
+    .then(function (r) { return r.ok ? r.json() : Promise.reject(r.status); })
+    .then(function (j) {
+      var hit = Array.isArray(j) ? pick(j) : null;
+      if (hit && hit.url) apply(hit.tag, hit.url);
+    })
+    .catch(function () {
+      /* Gitee 抽风/离线: 静默保留 HTML 里写死的兜底版本, 不打扰用户 */
+    });
+
+  /* ★ 10-07: 原本这里还有一段 fixGhLink() —— 用来把 #dlGhLink(GitHub 备用源
+     链接)指向 GitHub releases 页。该链接所在的整行说明已按需求删除, 节点不存在,
+     这段逻辑随之作废, 一并移除(留着只会是永不命中的死代码)。
+     ⚠️ 遗留: 现在页面上**没有 GitHub 备用下载入口**了。若日后国内 Gitee
+        出问题, 用户无从切换 —— 需要恢复的话, 建议放在页脚(foot)里做一个小链接,
+        而不是塞回 CTA 那行说明。 */
+})();
+
+// ---------- 首屏标题第二行: 定时轮换(对标 chatterfly) ----------
+// 做法: 所有短语已静态写在 HTML 里(不用 JS 拼串, 无 XSS/闪烁), 这里只切换
+//   .on 类做交叉淡入淡出 —— 元素全部 position:absolute 叠在一起, 所以要把
+//   容器高度事先量出来写死, 否则切换时高度在 0 与一行之间跳, 会把下方
+//   按钮/文案顶得上下抖。
+// 无障碍: 系统开了"减少动态效果"就不轮换(保持第一句), 但仍会量好高度。
+(function () {
+  var rot = document.getElementById('heroRot');
+  if (!rot) return;
+  var items = rot.querySelectorAll('.rot-i');
+  if (items.length < 2) return;
+
+  var reduce = window.matchMedia &&
+               window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  // 量高度: 临时让容器不可见(不闪), 把所有短语改成静态堆叠量最高的一句,
+  // 写完 height 再撤掉 —— 纯读操作, 不会引起重排闪烁。
+  function fit() {
+    rot.style.visibility = 'hidden';
+    rot.classList.add('measuring');
+    var maxH = 0;
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].offsetHeight > maxH) maxH = items[i].offsetHeight;
+    }
+    rot.classList.remove('measuring');
+    rot.style.height = maxH + 'px';
+    rot.style.visibility = '';
+  }
+  fit();
+
+  var idx = 0;
+  function show(n) {
+    items[idx].classList.remove('on');
+    idx = n;
+    items[idx].classList.add('on');
+  }
+  if (!reduce) {
+    setInterval(function () { show((idx + 1) % items.length); }, 3400);
+  }
+  // 窄屏换行行数会变(同一句可能从1行变2行), 得重新量
+  var rt = null;
+  window.addEventListener('resize', function () {
+    if (rt) clearTimeout(rt);
+    rt = setTimeout(fit, 180);
+  }, { passive: true });
 })();
 </script>
 </body>

@@ -116,12 +116,17 @@ a { color: inherit; text-decoration: none; }
 .nav-cta:hover { background: var(--blue-d); transform: translateY(-1px); }
 /* 导航「在线改键」入口: 描边样式, 与主 CTA 区分但同样醒目 */
 .nav-app {
-  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0;
+  display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0;
   padding: 8px 14px; border-radius: 999px;
   border: 1.5px solid rgba(10,132,224,.42); color: var(--blue);
   font-size: 13.5px; font-weight: 600; white-space: nowrap;
   transition: background .18s, border-color .18s, transform .18s;
 }
+/* ★ 10-07: 「在线配置」的横箭头图标(齿轮 emoji → SVG)。
+   描边用 currentColor, 所以 hover 变蓝时图标自动跟着变, 无需额外 hover 规则。
+   flex-shrink:0 防止窄屏被压扁; 竖向上因为父级是 inline-flex+center 已自动居中。 */
+.nav-app .nav-app-ic,
+.nav-menu-app .nav-app-ic { flex-shrink: 0; }
 .nav-app:hover { background: var(--blue-l); border-color: var(--blue); transform: translateY(-1px); }
 /* GitHub 开源入口: 纯图标按钮(桌面), 与其它胶囊区隔, 用中性色避免抢主色 */
 .nav-gh {
@@ -155,7 +160,16 @@ a { color: inherit; text-decoration: none; }
    现在过渡一路铺到 hero 底边, 底边刚好是纯白, 与下方 .sec 的白底无缝衔接。 */
 .hero {
   position: relative; overflow: hidden;
-  background: linear-gradient(176deg, #E9F4FF 0%, #F3F9FF 44%, #FAFCFF 76%, #fff 100%);
+  /* 10-07: 由"极淡的蓝白渐变"换成【天空】渐变 —— 原来上端 #E9F4FF 太白,
+     用户反馈"颜色不丰富"。现在上端是明确的天空蓝, 一路过渡到底边纯白,
+     与下方 .sec 白底无缝衔接(端点必须落在区块底边, 不能中途就变白)。
+     ★ 10-07 试过改成【深色 Aurora】(用户确认了方向), 做完发现**不如原来的浅色天空** ——
+       深底把首屏文字/标签/按钮全要反转成浅色, 白色产品图虽然更"托"得住,
+       但整屏偏暗、与下方白底区块反差过大, 整体反而不如浅色天空清爽。
+     ⇒ 已整体回退到浅色天空方案(文字深色 / 毛玻璃白标签 / 白底次级按钮)。 */
+  background: linear-gradient(179deg,
+              #A6CBEB 0%, #BCDAF2 15%, #D6E8F8 38%,
+              #ECF6FD 62%, #FAFDFF 84%, #fff 100%);
 }
 
 /* 10-06 动态背景(对标 chatterfly 的"会动的底")—— 纯 CSS, 无 JS / 无依赖, 三层:
@@ -193,19 +207,21 @@ a { color: inherit; text-decoration: none; }
    被裁掉的部分等于白做, 看着就像"缺了一块"。 */
 .aurora-b1 {
   width: 560px; height: 560px; left: -120px; top: -110px;
-  background: radial-gradient(circle, rgba(10,132,224,.20), transparent 70%);
+  /* 10-07: 底色由"极淡蓝白"换成天空蓝后, 原来 .20 的蓝光斑被背景吃掉、几乎看不见。
+     统一提高不透明度, 让蓝/青/紫三层色相在天空上重新显形(用户要的"颜色丰富")。 */
+  background: radial-gradient(circle, rgba(10,132,224,.30), transparent 70%);
   animation: aurora1 30s ease-in-out infinite alternate;
 }
 .aurora-b2 {
   width: 480px; height: 480px; right: -90px; top: 150px;
-  background: radial-gradient(circle, rgba(0,180,224,.15), transparent 70%);
+  background: radial-gradient(circle, rgba(0,186,232,.26), transparent 70%);
   animation: aurora2 38s ease-in-out infinite alternate;
 }
 /* 紫色原来在 bottom:-210px, 只剩一条很薄的边露在首屏底部, 基本看不见;
    提到 bottom:-70px 让它完整参与构图, 再靠上面的 mask 自然收尾。 */
 .aurora-b3 {
   width: 460px; height: 460px; left: 32%; bottom: -70px;
-  background: radial-gradient(circle, rgba(122,110,255,.13), transparent 70%);
+  background: radial-gradient(circle, rgba(122,110,255,.24), transparent 70%);
   animation: aurora3 34s ease-in-out infinite alternate;
 }
 @keyframes aurora1 { from { transform: translate3d(0,0,0) scale(1); }    to { transform: translate3d(100px,64px,0) scale(1.12); } }
@@ -224,6 +240,9 @@ a { color: inherit; text-decoration: none; }
   animation: dotDrift 26s linear infinite;
 }
 @keyframes dotDrift { from { background-position: 0 0; } to { background-position: 260px 0; } }
+/* ★ 深底 Aurora 方案里加过 .hero-fade(底部提亮雾, 用于深蓝→白底的过渡),
+   该方案已整体回退, 这个类随之删除 —— 浅色天空方案里底边本来就是纯白,
+   与下方 .sec 无缝衔接, 不需要任何过渡层。 */
 
 .hero-in {
   position: relative; z-index: 1;                 /* 动态背景都在这一层之下 */
@@ -260,12 +279,58 @@ a { color: inherit; text-decoration: none; }
 /* 两行各自成块: 第二行按词组换行, 避免出现孤字 */
 .hero h1 .l1, .hero h1 .l2 { display: block; }
 .hero h1 em { font-style: normal; color: var(--blue); }
+
+/* ---------- 第二行标题轮换(10-07, 对标 chatterfly 首屏) ----------
+   所有短语都绝对定位叠在同一处, 靠 .on 切换透明度+微小上移做交叉淡入淡出。
+   容器高度由 JS 量最高的一句写死(见 index.html 末尾脚本), 否则切换时高度
+   在 0/一行之间跳, 会把下方按钮顶得上下抖。
+   .measuring 只用于"量高度": 那一刻让所有短语恢复静态堆叠, 量完即撤。 */
+.hero h1 .rot { position: relative; }
+.hero h1 .rot-i {
+  display: block; position: absolute; left: 0; top: 0; width: 100%;
+  opacity: 0; transform: translateY(9px);
+  transition: opacity .5s ease, transform .5s ease;
+  pointer-events: none;
+}
+.hero h1 .rot-i.on { opacity: 1; transform: none; }
+.hero h1 .rot.measuring .rot-i { position: static; opacity: 1; transform: none; transition: none; }
 .hero-sub { margin-top: 20px; font-size: clamp(16px, 1.6vw, 19px); color: var(--ink-2); max-width: 540px; }
 .hero-tags { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+/* ---------- 功能标签: 毛玻璃 (10-07) ----------
+   用户: "里面的矩形改成毛玻璃效果"。
+   ★ 原来是不透明白底(background:#fff) —— 压在天空渐变上就是一个"实心白块",
+     和背景完全脱开, 看着像贴纸。
+   ★ 毛玻璃三件套(缺一不可, 少一个就不是毛玻璃):
+     ① `background: rgba(255,255,255,.45)` 半透明 —— 让背后的天空色透上来;
+     ② `backdrop-filter: blur()` —— 把透过来的背景**糊掉**, 这才是"玻璃"的关键;
+        只加半透明白不 blur 只是"变淡", 背景的渐变色块仍然清晰可辨, 不是玻璃;
+     ③ 细白描边 `rgba(255,255,255,.7)` —— 模拟玻璃边缘的高光,
+        同时把半透明胶囊从背景里"勾"出轮廓, 否则边界会糊进天空里。
+   ★ 为什么不加 saturate(): 导航栏那处用了 `saturate(180%)`, 因为那里背后是
+     彩色光斑, 需要提饱和才显色; 这里背后是**纯天空渐变**(本身已经很淡),
+     再提饱和没有效果反而多一层滤镜开销, 所以只 blur。
+   ★ 文字色同时压深: 半透明白底比纯白底"轻", 原来的 --ink-3 级灰会看不清。
+   ★ 期间试过在深色 Aurora 方案下反转成"暗玻璃"(半透明深蓝底), 已随该方案回退。 */
 .hero-tags span {
-  padding: 8px 16px; border-radius: 999px; background: #fff;
-  border: 1px solid var(--line); font-size: 14px; font-weight: 500; color: var(--ink-2);
-  box-shadow: 0 1px 6px rgba(11,42,91,.05);
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 8px 16px; border-radius: 999px;
+  background: rgba(255, 255, 255, .45);
+  -webkit-backdrop-filter: blur(10px);
+          backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, .7);
+  font-size: 14px; font-weight: 500; color: var(--ink-2);
+  box-shadow: 0 1px 6px rgba(11, 42, 91, .04);
+}
+/* 兜底: 老浏览器不支持 backdrop-filter 时, .45 半透明白会让文字压不住背景
+  (尤其文字背后正好是深一点的天空蓝)。此时退回更实的白底, 保证可读性优先。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .hero-tags span { background: rgba(255, 255, 255, .82); }
+}
+/* 标签图标: 用 currentColor 描边, 但颜色单给一档品牌蓝 —— 图标是"点缀",
+   全黑会和文字糊在一起, 蓝色能让四个标签一眼看出是同一组功能。 */
+.hero-tags .tg-ic {
+  width: 16px; height: 16px; flex-shrink: 0;
+  color: var(--blue);
 }
 .hero-btns { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 34px; }
 .btn {
@@ -273,10 +338,70 @@ a { color: inherit; text-decoration: none; }
   padding: 14px 30px; border-radius: 999px; font-size: 15.5px; font-weight: 600;
   transition: transform .18s, box-shadow .18s, background .18s;
 }
-.btn-p { background: var(--blue); color: #fff; box-shadow: 0 6px 20px rgba(10,132,224,.28); }
-.btn-p:hover { background: var(--blue-d); transform: translateY(-2px); box-shadow: 0 10px 28px rgba(10,132,224,.34); }
+/* 按钮内联图标(如「在线改键」的横箭头): 描边用 currentColor,
+   所以按钮 hover 变蓝时图标自动跟着变色, 不需要额外写 hover 规则。
+   flex-shrink:0 防止窄屏被压扁。 */
+.btn .btn-ic { flex-shrink: 0; }
+/* ---------- 按钮阴影: 由"灰黑投影"改成【彩色投影】(10-07) ----------
+   用户要求"背景阴影改成彩色的"。
+   ★ 原理: 人眼对"投影颜色"其实很敏感 —— 灰黑投影(rgba(11,42,91,.2) 这类)
+     会让按钮看着像"纸片浮在灰雾上"; 换成**按钮自身色相的投影**后, 按钮与阴影
+     色相一致, 观感是"这个按钮在发光", 质感立刻高级一档(参考图里就是这种)。
+   ★ 做法: 不用单纯加深透明度, 而是把**投影做两层** ——
+       · 近层: 小 blur 的饱和色 ⇒ 紧贴按钮的一圈"本命色辉光"
+       · 远层: 大 blur 的同色系 ⇒ 向外散开的柔光
+     两层叠加 = 彩色光晕, 比单层 rgba 通透得多。
+   ★ 阴影色一律**取自按钮色相的加饱和版**, 不要直接拿按钮底色当 shadow ——
+     底色太亮时投影会发白、失去"影"的重量感。 */
+.btn-p {
+  background: var(--blue); color: #fff;
+  /* 蓝按钮 → 亮蓝光晕 */
+  box-shadow: 0 4px 12px rgba(10,132,224,.42), 0 10px 30px rgba(0,150,255,.34);
+}
+.btn-p:hover {
+  background: var(--blue-d); transform: translateY(-2px);
+  /* hover 时光晕更大更亮, 与"抬起来"的位移一起强化反馈 */
+  box-shadow: 0 7px 18px rgba(10,132,224,.5), 0 16px 40px rgba(0,150,255,.42);
+}
 .btn-s { background: #fff; color: var(--navy); border: 1.5px solid var(--line); }
-.btn-s:hover { border-color: var(--blue); color: var(--blue); transform: translateY(-2px); }
+/* 白底次级按钮: 本体没有色相, 若硬给彩色影会很突兀。
+   做法是给一层**很淡的蓝调投影**(而不是灰) —— 单独看不明显,
+   但和旁边的蓝色主按钮同处一行时, 整体色调是统一的, 不会有"一颗灰点"。 */
+.btn-s { box-shadow: 0 4px 14px rgba(10,132,224,.13); }
+.btn-s:hover {
+  border-color: var(--blue); color: var(--blue); transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(10,132,224,.2), 0 12px 30px rgba(10,132,224,.14);
+}
+/* 首屏「下载 Windows 版」: 复用底部 .btn-dl 的视觉语言(亮蓝实心),
+   但那个类的浅底配色是给深色 CTA 区用的, 首屏是浅色天空底, 所以只借形状,
+   颜色仍走 .btn-p。
+   ★★ 10-07 两次修正记录(别再来回摆):
+      ① 初版给这里单独加大光晕(14px/38px) → 用户: "阴影太大";
+      ② 收到与 .btn-p 同档(12px/26px) → 用户: "蓝色阴影还是太大";
+      ⇒ 现在**再收一档**: 模糊半径缩到 8px/18px、不透明度降到 .34/.24,
+        基本只留"按钮下方贴着一层淡蓝"的分量, 不再往外散开。
+      ★ 规律(踩两次才明确): 浅色天空底上的彩色光晕**天生比深色底上显眼**,
+        因为浅底没有"暗"去吸收光。所以浅底按钮的影要**比常规更小更淡**,
+        不能沿用深底那套参数直接减一点就完事 —— 要减到"几乎只剩贴边一层"。
+      ★ hover 态保持比常态大一号即可(有位移配合, 大一点才对得上), 但也同步收小。 */
+.hero-btns .btn-dl { box-shadow: 0 2px 8px rgba(10,132,224,.34), 0 5px 18px rgba(0,150,255,.24); }
+.hero-btns .btn-dl:hover { box-shadow: 0 3px 10px rgba(10,132,224,.42), 0 8px 24px rgba(0,150,255,.32); }
+/* 「macOS 版 敬请期待」占位按钮: 不可点, 所以必须显式压掉 hover 反馈 ——
+   否则鼠标移上去照样变色上浮, 用户会以为点得动, 点了没反应更困惑。
+   .btn-s:hover 是全局规则, 这里用同等特异度 + 后置覆盖回来。
+   ★ box-shadow 也必须一起清掉(不能只清 transform): 否则上面新加的
+     .btn-s 蓝调投影仍会套在占位按钮上, 让它看着"像个能点的按钮"。 */
+.btn-soon,
+.btn-soon:hover {
+  background: #fff; color: var(--ink-3); border-color: var(--line);
+  cursor: not-allowed; transform: none; box-shadow: none;
+  display: inline-flex; align-items: center; gap: 8px;
+}
+.btn-soon em {
+  font-style: normal; font-size: .86em; font-weight: 600;
+  padding: 2px 7px; border-radius: 999px;
+  background: var(--blue-l); color: var(--blue);
+}
 .hero-vis { position: relative; display: grid; place-items: center; min-height: 460px; }
 .hero-vis img {
   width: auto; max-width: 260px; max-height: 440px;
@@ -309,14 +434,8 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid var(--line); transition: transform .22s, box-shadow .22s, border-color .22s;
 }
 .crd:hover { transform: translateY(-6px); box-shadow: var(--sh-l); border-color: rgba(10,132,224,.3); }
-.crd-ic {
-  width: 54px; height: 54px; border-radius: 14px;
-  display: grid; place-items: center; font-size: 25px; margin-bottom: 20px;
-  background: var(--blue-l);
-}
-.crd:nth-child(2) .crd-ic { background: var(--orange-l); }
-.crd:nth-child(3) .crd-ic { background: #E8F8F0; }
-.crd:nth-child(4) .crd-ic { background: #F1ECFE; }
+/* 10-07: 卡片上方的圆角图标块(.crd-ic)已按需求移除(用户: "这些图标都不要"),
+   对应的 .crd-ic / .crd:nth-child(n) .crd-ic 三条规则一并删除。 */
 .crd h3 { font-size: 18.5px; font-weight: 700; color: var(--navy); margin-bottom: 10px; }
 .crd p { font-size: 14.8px; color: var(--ink-2); }
 
@@ -369,13 +488,9 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ---------- 槽位/模式 ---------- */
-.slot-demo { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 8px; }
-.slot {
-  padding: 26px 22px; border-radius: var(--r-s); background: #fff;
-  border: 1px solid var(--line); text-align: center;
-}
-.slot b { display: block; color: var(--navy); font-size: 16.5px; margin-bottom: 6px; }
-.slot span { font-size: 13.8px; color: var(--ink-2); }
+/* ★ 10-07: .slot-demo / .slot 已删 —— 「蓝牙多设备切换」区的三张槽位卡
+   (槽位 ①②③ / 工作机·笔记本·平板)按需求整块移除(用户: "框起来的内容不要")。
+   下方 .modes-note(连接/配对/HFP 模式说明)保留。 */
 
 /* ---------- 窄栏文字(无配图时用) ---------- */
 .narrow { max-width: 760px; margin: 0 auto; }
@@ -407,14 +522,9 @@ a { color: inherit; text-decoration: none; }
   transition: transform .2s, box-shadow .2s, border-color .2s;
 }
 .mode-card:hover { transform: translateY(-4px); box-shadow: var(--sh); border-color: rgba(10,132,224,.3); }
-.mode-ic {
-  width: 44px; height: 44px; margin: 0 auto 16px; border-radius: 50%;
-  background: var(--blue); color: #fff; display: grid; place-items: center;
-  font-size: 18px; font-weight: 800;
-}
-.mode-card:nth-child(2) .mode-ic { background: var(--orange); }
-.mode-card:nth-child(3) .mode-ic { background: #22C55E; }
-.mode-card:nth-child(4) .mode-ic { background: #A855F7; }
+/* ★ 10-07: .mode-ic(序号色块 ①②③④)及其配色覆盖规则已删 ——
+   卡片上的彩色编号圆点按需求移除(用户: "框起来的这个色块不要")。
+   现卡片只剩 标题 + 说明 两行。 */
 .mode-card b { display: block; color: var(--navy); font-size: 17.5px; margin-bottom: 7px; }
 .mode-card span { font-size: 14.2px; color: var(--ink-2); }
 
@@ -646,6 +756,18 @@ a { color: inherit; text-decoration: none; }
 .car-more {
   margin-top: auto; align-self: flex-start;
   font-size: 13px; font-weight: 600; color: var(--ink-3);
+  /* 10-07: 由 emoji 换成 SVG 图标后, 这一行变成 flex 才能让每一个
+     "图标 + 文字"成组、组与组之间用 .car-dot 小圆点分隔。
+     ★ 用 flex + gap 而不是保留原来的" · "字符分隔: 分隔符用字符时,
+       换行位置会落在" ·"后面导致行首出现孤零零的点; 换成 flex 子元素后
+       分隔点与文字是独立 flex item, 换行时不会与图标/文字拆散。 */
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+}
+.car-more .tg-ic { width: 14px; height: 14px; flex-shrink: 0; color: var(--blue); }
+/* 组间分隔点: 一个小圆点, 用 background 画(不用字符, 免字体差异) */
+.car-dot {
+  width: 3px; height: 3px; border-radius: 50%; flex-shrink: 0;
+  background: currentColor; opacity: .45; margin: 0 2px;
 }
 /* 右半张图: 现在是 640×760 的真实场景照(竖版), 直接**铺满**媒体区。
    ★ object-position 用 center 50%(居中), **不要再用 32%** ——
@@ -809,10 +931,41 @@ a { color: inherit; text-decoration: none; }
 .cta h2 { font-size: clamp(26px, 3.4vw, 38px); font-weight: 800; color: #fff; }
 .cta p { margin-top: 16px; color: rgba(255,255,255,.8); font-size: 16.5px; }
 .cta-btns { display: flex; gap: 14px; justify-content: center; margin-top: 34px; flex-wrap: wrap; }
-.cta .btn-p { background: #fff; color: var(--navy); box-shadow: 0 6px 20px rgba(0,0,0,.2); }
-.cta .btn-p:hover { background: #F0F7FF; }
-.cta .btn-s { background: transparent; color: #fff; border-color: rgba(255,255,255,.4); }
-.cta .btn-s:hover { border-color: #fff; color: #fff; }
+/* CTA 区是**深蓝底**, 按钮是白底 —— 这里有两种"彩色阴影"可选, 取其一:
+   · 白色投影(旧做法 rgba(0,0,0,.2) 其实是黑投影) → 在白按钮下会显脏、发灰;
+   · **亮蓝光晕**(现做法) → 白按钮坐在深蓝底上, 下方泛出蓝光, 与整个区块同色系,
+     观感是"按钮在发光"而不是"按钮底下有块黑斑"。
+   ★ 深底上的光晕不透明度要比浅底上**更高**才看得出来(深蓝本就吃光),
+     所以这里给到 .5/.38, 比首屏浅底那组(.45/.4)更实。 */
+.cta .btn-p {
+  background: #fff; color: var(--navy);
+  /* ★ 10-07 收小(与 .btn-dl 同步, 用户: "旁边的白色那个你还没改呢"):
+     原 5px/16px .5 + 14px/38px .38 → 3px/9px .38 + 8px/20px .26, 偏移也一并收。
+     白按钮在深蓝底上本就很跳, 光晕再大就成了"一圈雾", 收小后只留贴边一层蓝光。 */
+  box-shadow: 0 3px 9px rgba(120,200,255,.38), 0 8px 20px rgba(60,160,255,.26);
+}
+.cta .btn-p:hover {
+  background: #F0F7FF;
+  box-shadow: 0 5px 13px rgba(120,200,255,.48), 0 12px 28px rgba(60,160,255,.34);
+}
+.cta .btn-s { background: transparent; color: #fff; border-color: rgba(255,255,255,.4); box-shadow: none; }
+.cta .btn-s:hover { border-color: #fff; color: #fff; box-shadow: 0 6px 18px rgba(255,255,255,.16); }
+/* ---- 下载按钮(CTA 区): 全站唯一的"转化入口", 用亮蓝实心 + 更大阴影与其余按钮拉开层次。
+   放在 .btn-p 之前定义, 避免被后面的 .cta .btn-p 覆盖(同权重时后者生效)。 ---- */
+.btn-dl {
+  background: var(--blue); color: #fff;
+  /* 深底上的蓝按钮: 用"亮天蓝"光晕(比本体蓝更亮), 否则蓝压蓝、光晕看不出来。
+     ★ 10-07 第 2 版(收小): 原 6px/18px .55 + 16px/42px .45 光晕"太大了"(用户反馈),
+        收到 3px/10px .40 + 8px/22px .28, 偏移也同步从 6px/16px 收到 3px/8px。
+        —— 同「浅底光晕规律」: 不只要缩 blur 半径, y 偏移要一起缩, 否则仍显得"往下掉"。 */
+  box-shadow: 0 3px 10px rgba(60,170,255,.40), 0 8px 22px rgba(0,150,255,.28);
+}
+.btn-dl:hover {
+  background: var(--blue-d);
+  transform: translateY(-2px);
+  box-shadow: 0 5px 14px rgba(60,170,255,.50), 0 12px 30px rgba(0,150,255,.36);
+}
+.btn-dl svg { flex-shrink: 0; }
 /* GitHub 按钮(CTA 区): 与主 CTA 并列, 用半透明底区分 */
 .btn-gh { background: rgba(255,255,255,.12); color: #fff; border: 1.5px solid rgba(255,255,255,.35); }
 .btn-gh:hover { background: rgba(255,255,255,.22); border-color: #fff; transform: translateY(-2px); }
@@ -901,7 +1054,7 @@ a { color: inherit; text-decoration: none; }
     border-bottom: 1px solid var(--line); border-radius: 0;
   }
   .nav-links a:active { background: var(--blue-l); }
-  /* 「在线改键」在抽屉里做成醒目的主按钮 */
+  /* 「在线配置」在抽屉里做成醒目的主按钮 */
   .nav-links a.nav-menu-app {
     display: flex; align-items: center; justify-content: center; gap: 6px;
     margin-top: 18px; padding: 15px 18px;
@@ -934,7 +1087,7 @@ a { color: inherit; text-decoration: none; }
   .hero-ring { width: 280px; height: 280px; }
   .split { grid-template-columns: 1fr; }
   .split-rev .split-vis { order: 0; }
-  .grd-4, .steps, .slot-demo { grid-template-columns: 1fr; }
+  .grd-4, .steps { grid-template-columns: 1fr; }
   .modes-note { grid-template-columns: 1fr; }
   .step::after { display: none; }
   .spec { grid-template-columns: 1fr; padding: 8px 24px; }

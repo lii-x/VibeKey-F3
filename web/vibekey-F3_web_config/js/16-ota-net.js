@@ -77,15 +77,21 @@ var OTA_LIST_SOURCES = [
 ];
 
 // 下载通道表(按顺序尝试, 任一成功即可)。理由见 otaDownloadRelease 上方注释。
-// ★ jsDelivr 通道的两个要点(踩过坑):
+// ★ jsDelivr 通道的三个要点(踩过坑):
 //   1. 仓库名必须是 **GitHub** 仓库(OTA_GH_REPO), 不能用 Gitee 的 OTA_REPO ——
 //      jsDelivr 只代理 GitHub/GitLab/npm, 指向 Gitee 会 404。
 //   2. 路径是 releases/firmware/<file> —— 固件随仓库入库(由 tools/sync_firmware.py
 //      从 Gitee 拉取校验后同步), 不是仓库根目录。目录说明见 releases/firmware/README.md。
+//   3. ★ 分支名必须写 @main —— 2026-10-07 仓库重建后只剩 main 一个分支。
+//      写 @master 时 jsDelivr 仍返回 200(它缓存了旧分支的假象), 缓存一过期固件
+//      下载就静默失效; 下面的"版本tag"通道是真正的兜底。
 var OTA_MIRRORS = [
   { name: 'jsDelivr',
     build: function (r) {
-      return 'https://cdn.jsdelivr.net/gh/' + OTA_GH_REPO + '@master/releases/firmware/' + r.file;
+      // ★ 必须用 @main: 2026-10-07 仓库重建后只剩main 一个分支(旧的 master 已删)。
+      //   写 @master 时 jsDelivr 会一直返回 200 —— 那是它缓存了旧分支内容的"假象",
+      //   缓存过期后固件下载会静默失效。tag 通道(下一条)是真正的兜底。
+      return 'https://cdn.jsdelivr.net/gh/' + OTA_GH_REPO + '@main/releases/firmware/' + r.file;
     } },
   { name: 'jsDelivr(版本tag)',
     build: function (r) {
