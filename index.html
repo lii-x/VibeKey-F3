@@ -129,8 +129,16 @@
              ⇒ 观感从"纸片浮在灰雾上"变成"按钮在发光";
              深蓝 CTA 区上的白按钮用"亮天蓝光晕"而非黑投影, 否则白按钮底下会显脏。
              ⚠️ .btn-soon 必须连 box-shadow 一起清空(不能只清 transform),
-                否则新增的 .btn-s 蓝调投影会套在"敬请期待"占位按钮上, 让它看着像能点。 -->
-<link rel="stylesheet" href="web/assets/style.css?v=32">
+                否则新增的 .btn-s 蓝调投影会套在"敬请期待"占位按钮上, 让它看着像能点。
+     v25~v32: 见 git log(在线改键入口/场景轮播/CTA 下载/说明书入口等, 已上线)。
+     v33: ★ 手机端改「桌面版整体等比缩小」——
+          废弃原先"手机端单独响应式重排"的做法(用户看后否决: 文字挤成窄条、
+          产品图被裁、按钮要横滑)。现改为:
+            .vk-scale 固定 1280px 排版 → transform: scale(视口宽/1280) 整体缩小;
+            style.css 末尾新增覆盖区, 窄屏时作废全部 11 处 @media 断点;
+            导航因 transform 包含块而由 fixed 降级为 absolute(不再吸顶)。
+          详见 index.html 缩放外壳注释与 style.css 末尾覆盖区注释。 -->
+<link rel="stylesheet" href="web/assets/style.css?v=33">
 </head>
 <body>
 
@@ -156,6 +164,109 @@
     });
   });
 </script>
+
+<!-- ============ 等比缩放驱动 ============
+     ★ 10-08: 窄屏(<=1280px)时把整个桌面版按比例缩小, 一屏看全。
+
+     做三件事:
+       ① 给 <html> 加/摘 .vk-fixed —— 这是 CSS 覆盖区(style.css 末尾)的开关,
+          加了它所有 @media (max-width:...) 的移动端改动才被作废;
+       ② 算缩放比 k = 视口宽 / 1280, 写到 .vk-scale 的 --vh-k 上,
+          CSS 用 transform: scale(var(--vh-k)) 缩小;
+       ③ 把 .vk-scale 缩放后的实际高度回写给外层 .vk-scale-outer
+          —— transform 不改布局高度, 不补这一下页面底部会空一大截。
+
+     ⚠️ 放在 <body> 起始处同步执行(不包 DOMContentLoaded):
+        缩放必须赶在首次绘制前生效, 否则会闪一下"没缩放的桌面版"。
+        此时 .vk-scale 还没被解析到 ⇒ 用 document.querySelector 拿不到,
+        所以直接读 body 首个子元素, 或退一步等 DOMContentLoaded 补算高度。
+        这里用后者: 先立刻置类与比例(消除横向滚动条), 高度稍后补。 -->
+<script>
+(function () {
+  var DESIGN_W = 1280;          // 设计稿宽度, 必须与 CSS 的 --max 一致
+  var html = document.documentElement;
+
+  // ★ 一个很容易踩的边界: 不能看到 `vw <= 1280` 就缩放。
+  //   clientWidth 已经扣掉纵向滚动条(桌面 Edge 约 15px), 于是:
+  //     窗口 1281px → clientWidth 1266 → 判定为"要缩放"
+  //   若此时 CSS 覆盖区写的是 `@media (max-width: 1280px)`, 该媒体查询
+  //   **不匹配**(视口 1281 > 1280) ⇒ 画布拿不到 `width: 1280px`, 仍是 100%
+  //   (= 1266) ⇒ 变成"用 1266 的画布、配 1266/1280 的缩放比",
+  //   桌面宽度下平白缩了一截(实测 k=0.989、画布 1266)。
+  //
+  //   对策**不是**改这里的阈值, 而是让 CSS 覆盖区的阈值放宽(见 style.css 末尾
+  //   写 `max-width: 1400px`, 并附了原因): 只要媒体查询在候选区间内都匹配,
+  //   真伪就完全由下面的 .vk-fixed 类单独决定 ⇒ 单一判据, 不会错位。
+  //
+  //   缩放比恒为 clientWidth / DESIGN_W; 画布 CSS 宽恒为 DESIGN_W(见 CSS),
+  //   于是"画布宽 × k === clientWidth", 任何宽度下都铺满且不溢出。
+  //
+  //   ⚠️ 用 clientWidth 而不是 window.innerWidth: innerWidth 含滚动条,
+  //      拿它算 k 会让缩放后的内容比可用区宽 15px, 触发横向滚动条;
+  //      而横向滚动条一出现又会改变可用宽 ⇒ 反馈循环(抖动)。
+  function apply() {
+    var vw = html.clientWidth;   // 真实可用宽(已排除纵向滚动条)
+    if (vw < DESIGN_W) {
+      var k = vw / DESIGN_W;
+      html.classList.add('vk-fixed');
+      html.style.setProperty('--vh-k', k);
+    } else {
+      // 桌面端: 完全恢复原生响应式, 不留任何缩放痕迹
+      html.classList.remove('vk-fixed');
+      html.style.removeProperty('--vh-k');
+    }
+    fixHeight();
+  }
+
+  // transform 不撑高度 ⇒ 把缩放后的真实高度回写给外层容器
+  function fixHeight() {
+    var sc = document.querySelector('.vk-scale');
+    var out = document.querySelector('.vk-scale-outer');
+    if (!sc || !out) return;
+    if (!html.classList.contains('vk-fixed')) { out.style.height = ''; return; }
+    var k = parseFloat(html.style.getPropertyValue('--vh-k')) || 1;
+    // offsetHeight 是未缩放的布局高, 乘 k 即缩放后视觉高
+    out.style.height = Math.round(sc.offsetHeight * k) + 'px';
+  }
+
+  // 首屏图片是本地静态资源, load 事件后高度才算得准
+  apply();
+  window.addEventListener('resize', apply, { passive: true });
+  window.addEventListener('load', fixHeight);
+  document.addEventListener('DOMContentLoaded', apply);
+
+  // 图片解码完成会改变布局高度, 逐个补算(不做持续监听, 只在解码时各补一次)
+  document.addEventListener('DOMContentLoaded', function () {
+    document.querySelectorAll('.vk-scale img').forEach(function (img) {
+      if (img.complete) return;
+      img.addEventListener('load', fixHeight, { once: true });
+      img.addEventListener('error', fixHeight, { once: true });
+    });
+  });
+})();
+</script>
+
+<!-- ============ 缩放外壳 ============
+     ★ 10-08: 手机端不再单独设计版式, 改成「桌面版整体等比缩小」。
+       背景: 试过一版"手机端结构对齐桌面端"的响应式改造(逐档重排),
+       用户看后否决 —— 效果很糟糕, 文字被挤成窄条、产品图被右边裁掉、
+       按钮要横滑才能点全。于是回到最朴素的思路: 桌面版就是一版做好的画,
+       手机上直接把这幅画按比例缩小, 一屏看全, 不做任何重排。
+
+     实现:
+       ① body 里所有内容包进 .vk-scale(固定 1280px 宽的"设计画布");
+       ② 外层 .vk-scale-outer 用 --scale 折算后的高度撑住文档流,
+          .vk-scale 用 transform: scale() 缩小 —— transform 不参与布局,
+          不撑高度, 所以必须由外层补回(见 CSS 里的 height 计算);
+       ③ 视口 <=1280px 时, CSS 把全站所有 @media 断点"关掉"
+          (通过给 html 加 .vk-fixed 类 + 媒体查询改用 .vk-fixed 作用域),
+          让内层永远按桌面版布局排版, 再统一缩放。
+
+     ⚠️ 为什么导航要放在这层里面: transform 会创建包含块,
+        里面的 position:fixed 会退化成相对该元素定位, 不再是视口固定。
+        所以窄屏下 .nav 改 absolute(见 CSS), 由外壳承担滚动。 -->
+<div class="vk-scale-outer" id="vkScaleOuter">
+<div class="vk-scale" id="vkScale">
 
 <!-- ============ 导航 ============ -->
 <header class="nav">
@@ -802,6 +913,9 @@
     <small>© VibeKey-F3 · AI 时代新交互效率工具 · 规格参数以实物为准</small>
   </div>
 </footer>
+
+</div><!-- /.vk-scale -->
+</div><!-- /.vk-scale-outer -->
 
 <script>
 // ---------- 场景轮播(对标 Chatterfly) ----------

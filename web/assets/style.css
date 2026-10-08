@@ -47,6 +47,51 @@ a { color: inherit; text-decoration: none; }
 /* ---------- 容器 ---------- */
 .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
 
+/* ---------- 等比缩放外壳 ----------
+   ★ 10-08: 手机端改成"桌面版整体等比缩小", 不再做响应式重排。
+
+   思路: 把整页内容放进一个固定 --max(1280px) 宽的"设计画布" .vk-scale,
+   再对它做 transform: scale(k), k = 视口宽 / 1280。
+   transform 只影响绘制、不改布局 ⇒ .vk-scale 仍按 1280px 占位,
+   所以外面必须再包一层 .vk-scale-outer, 用 (100% / k) 的反向高度把
+   "实际占位"折回来, 否则页面底部会多出一大截空白。
+
+   数据流(JS 只负责写 --vh-k, 其余全由 CSS 推导):
+     JS: --vh-k = 视口宽 / 1280   (k <= 1 时才动手, >1 即桌面端不缩放)
+     CSS: .vk-scale { transform: scale(var(--vh-k)); transform-origin: top left; }
+          .vk-scale-outer { height: calc(设计高 * var(--vh-k)) }
+   但设计高在 CSS 里拿不到(CSS 不能读元素实际高), 于是外层高度交给 JS
+   写一个像素值 —— 见 vkScaleOuter 的 style.height, 由 JS 量 .vk-scale 的
+   offsetHeight * k 得到。这里 CSS 只给兜底(不设 height 时不影响桌面端)。
+
+   ⚠️ 为什么导航能跟着缩: 导航也在这层里(见 index.html 注释)。
+      transform 会创建 containing block, 里面的 position:fixed 退化成
+      "相对 .vk-scale 固定" ⇒ 视觉上仍然贴着页面顶部, 且随整页一起缩小。
+      ⚠️ 但 .vk-scale 有 transform 时自身不滚动, 页面滚动仍由 body 承担,
+      所以导航"吸顶"效果在窄屏下会失效(随内容滚走)。这是等比缩放的
+      固有代价 —— 用户明确要"整体缩小一屏看全", 接受此权衡。 */
+.vk-scale {
+  width: 100%;
+  transform-origin: top left;
+  /* 桌面端 --vh-k 恒为 1, scale(1) 不产生任何视觉/布局差异 */
+  transform: scale(var(--vh-k, 1));
+}
+
+/* 缩放外壳: 只负责"用折算后的高度撑住文档流"。
+   ⚠️ 这里**不要**写 overflow:hidden —— 内层 .vk-scale 在窄屏下固定 1280px
+      宽(比视口宽), 裁切交给 body{overflow-x:hidden}(既有规则)统一处理,
+      两层裁切会让视觉溢出量变得难以推理。
+   ⚠️ 也不要给 width 约束: 必须让内层的 1280px 原样保留, 否则缩放基准被破坏。 */
+.vk-scale-outer { width: 100%; }
+
+/* ---------- 窄屏: 关掉一切响应式重排, 纯缩放 ----------
+   ★ 关键难点: 源码里有 11 处 @media (max-width: ...) 断点,
+     手机打开时全都会命中, 把版式改成"手机版" —— 那缩放的就是被改坏的版式。
+   对策: 给 html 加 .vk-fixed 类(由 JS 判断窄屏时加), 然后用
+     `html.vk-fixed` 把所有断点条件"反向覆盖"掉。
+     这些媒体查询必须写在文件**最末尾**(见文件底部 override 区),
+     否则同优先级下后来者居上会被原始断点盖回去。 */
+
 /* ---------- 导航 ----------
    布局要点(踩过坑): 导航项 8 个 + logo + 2 个按钮, 若只靠 margin-left:auto 硬挤,
    容器宽度不够时子项(都带 nowrap)会溢出并**互相叠在一起**(用户截图)。
@@ -1104,4 +1149,197 @@ a { color: inherit; text-decoration: none; }
   .grd-4 { grid-template-columns: 1fr; }
   .spec-row { flex-direction: column; gap: 4px; }
   .spec-row dt { width: auto; }
+}
+
+/* ============================================================
+   ★★★ 等比缩放: 窄屏覆盖区 (必须放在文件最末尾) ★★★
+   ============================================================
+   目的: 窄屏时把上面所有 @media (max-width:...) 的响应式改动
+   **全部作废**, 让页面始终以桌面版布局排版, 再由 .vk-scale 整体缩放。
+
+   ★★ 这里媒体查询的阈值(1400px)**故意写得比真正的切换点(1280)宽**:
+     真正的开关是 <html> 上的 .vk-fixed 类, 由 JS 按 clientWidth 判定。
+     媒体查询只负责"这段样式在窄屏候选区间内可以生效", 不负责判定。
+     若这里写 1280, 会与 JS 判据错位:
+       JS 用 clientWidth(<1280 才缩放), CSS 用视口宽(<=1280 才匹配)。
+       窗口 1281px 时 clientWidth=1266 ⇒ JS 认为要缩放, 但视口 1281 > 1280
+       ⇒ 媒体查询不匹配 ⇒ 画布拿不到 width:1280, 仍是 100%(=1266),
+       于是"按 1266 的画布、用 1266/1280 的比例缩放", 桌面宽度下平白缩小一截。
+     阈值放宽到 1400 后, 1281~1400 这一段媒体查询也能匹配,
+     此时是否真的缩放完全由 JS 的 .vk-fixed 决定 —— 单一判据, 不再错位。
+     (>1400 的窗口必然 clientWidth>1280, 不可能进入缩放, 放宽不会误伤。)
+
+   ★ 每条规则都带 `html.vk-fixed` 前缀, 而不只依赖媒体查询:
+     媒体查询只管"匹配与否", 不加前缀的话规则优先级与原始断点同级,
+     靠"写在文件末尾、后来者居上"也能赢 —— 但那依赖书写顺序, 很脆。
+     显式加 `html.vk-fixed` 把优先级提到 (0,1,1), 稳赢原始断点的 (0,1,0);
+     以后有人在文件更后面追加样式也不会意外盖掉这里的规则。 */
+@media (max-width: 1400px) {
+  /* ---- 0. 画布: 钉成设计稿宽度 1280px ----
+     ★ 为什么必须写死 1280, 而不是写 100%:
+       JS 用 k = clientWidth / 1280 缩小。要让"缩放后正好铺满 clientWidth",
+       就必须满足   画布宽 × k = clientWidth
+       ⇒            画布宽 = clientWidth / k = clientWidth / (clientWidth/1280) = 1280
+       所以画布宽**恒等于 1280**, 与视口多宽无关 —— 这是等比缩放的数学前提。
+       父级 .vk-scale-outer 是普通块容器, 不会压缩子元素; 这里再补 max-width:none
+       兜住"子元素被某个 max-width 限制"的意外, 保证画布稳定是 1280。
+       超出视口的部分由 transform: scale() 收回, 不产生横向滚动。 */
+  html.vk-fixed .vk-scale { width: 1280px; max-width: none; }
+
+  /* ---- 1. 导航容器 ----
+     900 档把 --nav-h 改成 60px、logo 缩到 18px、nav-in gap 收成 12px,
+     这里全部还原成桌面值(--nav-h 的桌面值就是 :root 里的 64px)。
+     ⚠️ 在 :root 级别的 .vkk-fixed 下重声明 --nav-h 会污染 __ROOT__,
+        所以改绑到 html.vk-fixed —— html 就是根元素, 效果等价但不覆盖 :root 块。 */
+  html.vk-fixed { --nav-h: 64px; }
+  html.vk-fixed .nav-in { height: var(--nav-h); gap: 16px; }
+  html.vk-fixed .logo { font-size: 19px; }
+
+  /* ---- 2. 导航定位 ----
+     transform 会创建包含块, 里面的 position:fixed 退化为"相对 .vk-scale 固定"
+     ⇒ 窄屏下改用 absolute, 视觉上仍贴页面顶部且随整页缩放。
+     (代价: 不再吸顶, 见文件顶部 .vk-scale 注释) */
+  html.vk-fixed .nav { position: absolute; }
+
+  /* ---- 3. 导航: 撤销汉堡抽屉, 恢复横向链接条 ----
+     ⚠️ 开关类是 .nav-toggle(不是 .nav-burger), 见 L179。 */
+  html.vk-fixed .nav-toggle { display: none; }
+  html.vk-fixed .nav-cta,
+  html.vk-fixed .nav-app,
+  html.vk-fixed .nav-gh { display: inline-flex; }
+  /* 1240 档收窄的 gap 与 1080 档被隐藏的次要点, 一并还原 */
+  html.vk-fixed .nav-links { gap: 20px; }
+  html.vk-fixed .nav-links a[data-opt] { display: inline; }
+  html.vk-fixed .nav-links a.nav-menu-app,
+  html.vk-fixed .nav-links a.nav-menu-gh { display: none; }
+  /* 关闭态抽屉(900 档)还原成静态横向条。
+     ⚠️ 900 档同时写了 `.nav-links` 与 `.nav-links.open` 两套,
+        都要覆盖: 未打开的抽屉默认 transform:translateX(100%)、opacity:0、
+        pointer-events:none —— 不覆盖就会"导航菜单整条不可见/不可点"。 */
+  html.vk-fixed .nav-links,
+  html.vk-fixed .nav-links.open {
+    position: static; display: flex; flex-direction: row;
+    gap: 20px; margin-left: auto; margin-top: 0;
+    padding: 0; min-height: 0; max-height: none;
+    background: none; overflow: visible;
+    transform: none; opacity: 1; pointer-events: auto;
+    box-shadow: none; transition: none;
+  }
+  html.vk-fixed .nav-links a,
+  html.vk-fixed .nav-links a[data-opt] {
+    display: inline; flex-shrink: 0;
+    padding: 0; border-radius: 0;
+    font-size: 14px; font-weight: 500; color: var(--ink-2);
+  }
+  /* 抽屉专用的"立即购买"伪元素, 桌面版不要 */
+  html.vk-fixed .nav-links::after { content: none; display: none; }
+  /* 抽屉打开时导航补的实底, 桌面版清掉(桌面用 .is-solid 那套毛玻璃) */
+  html.vk-fixed .nav:has(.nav-links.open),
+  html.vk-fixed .nav.is-drawer { background: transparent; border-bottom-color: transparent; }
+
+  /* ---- 4. 首屏: 还原两栏左对齐 ----
+     1080/1024/860 三档都改过 .hero-in, 逐项还原:
+       · 1080: 单列 + 居中 + padding 60/68
+       · 1024: 1fr 340px + gap:36px   ← 上轮漏了 gap, 导致左栏被多算 12px
+       · 860:  单列 + 居中 + padding 56/64 + hero-vis order:-1
+     ⚠️ gap 必须显式写回 48px, 否则 1024 档的 36px 会残留。 */
+  html.vk-fixed .hero-in {
+    grid-template-columns: minmax(0, 1fr) 380px;
+    gap: 48px;
+    text-align: left;
+    padding: calc(76px + var(--nav-h)) 24px 84px;
+  }
+  /* ⚠️⚠️ 关键: 首屏标题与副标题用的是 clamp(..., Nvw, ...) ——
+       vw 永远跟着**视口宽**走, 不认容器宽。1280 画布在 390px 手机上排版时,
+       视口仍是 390 ⇒ 取到 clamp 的下限(34px / 16px), 而桌面取上限(50px / 19px),
+       于是"缩小后"标题会明显偏小、与桌面不一致 —— 这正是对比测试抓到的差异。
+       修法: 缩放模式下把这两处**钉死成桌面上限值**, 让 vw 彻底不起作用。 */
+  html.vk-fixed .hero h1 { font-size: 50px; line-height: 1.2; }
+  html.vk-fixed .hero-sub { font-size: 19px; line-height: 1.7; margin-left: 0; margin-right: 0; }
+  /* 桌面基础是 `justify-content: normal`(flex 里等同 flex-start)。
+     显式写回 normal, 而不是 flex-start —— 虽然视觉等价, 但保持与桌面
+     逐字节一致, 省得以后再对比时又是一堆"看起来相同实则不同"的噪音。 */
+  html.vk-fixed .hero-tags,
+  html.vk-fixed .hero-btns { justify-content: normal; }
+  html.vk-fixed .hero-vis { order: 0; }
+  /* 桌面: width:auto; max-width:260px; max-height:440px
+     860 档改成 max-width:260px 叠加 1080 档的 max-width:220px + max-height:320px,
+     这里必须把三个值都写全, 只写 max-width 会漏掉 max-height。 */
+  html.vk-fixed .hero-vis img { width: auto; max-width: 260px; max-height: 440px; }
+  /* 桌面基础是 300px(1080 档 260 / 860 档 280 / 我上轮误写 340) */
+  html.vk-fixed .hero-ring { width: 300px; height: 300px; }
+
+  /* ---- 5. 首屏光斑: 还原桌面尺寸 ----
+     900 档把 4 个光斑整体缩小内收(免得糊满手机屏)。缩放方案下不需要,
+     还原成基础值, 否则 1280 画布上光斑会显得只有中间一小团。 */
+  html.vk-fixed .hero::before { width: 620px; height: 620px; right: -140px; top: -180px; }
+  html.vk-fixed .aurora-b1 { width: 560px; height: 560px; left: -120px; top: -110px; }
+  html.vk-fixed .aurora-b2 { width: 480px; height: 480px; right: -90px; top: 150px; }
+  html.vk-fixed .aurora-b3 { width: 460px; height: 460px; left: 32%; bottom: -70px; }
+
+  /* ---- 5. ★ 流体字号: 全部钉死成桌面上限 ----
+     全站有 7 处 clamp(a, Nvw, b) 流体字号(vw 认视口宽, 不认容器宽)。
+     窄屏下视口只有 375~430px ⇒ 全部取到下限, 比桌面小一大截,
+     整体缩完就会"标题比桌面版明显瘦小", 与"等比缩小"的预期不符。
+     统一钉成 clamp 的上限值 = 1281px 桌面下的实际取值。
+       来源: L314 h1 / L335 hero-sub / L465 sec-head h2 / L466 sec-head p
+             L489 split-txt h3 / L490 split-txt > p / L535 narrow .lead / L969 cta h2
+     ⚠️ 以后新增 clamp 字号, 必须在这里补一条, 否则又会"缩完偏小"。 */
+  html.vk-fixed .sec-head h2 { font-size: 40px; }
+  html.vk-fixed .sec-head p { font-size: 17.5px; }
+  html.vk-fixed .split-txt h3 { font-size: 33px; }
+  html.vk-fixed .split-txt > p { font-size: 17px; }
+  html.vk-fixed .narrow .lead { font-size: 17.5px; }
+  html.vk-fixed .cta h2 { font-size: 38px; }
+
+  /* ---- 6. 通用栅格: 全部还原桌面列数 ----
+     ⚠️ 一律用 minmax(0, 1fr) 而非 1fr: 栅格默认 min-width:auto,
+        子项里的不换行内容(如 h1 的 AI&nbsp;效率)会把列撑宽导致整行溢出。
+        这条是本项目踩过的坑, 桌面基础样式里也是这么写的。 */
+  html.vk-fixed .grd-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  html.vk-fixed .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  html.vk-fixed .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; }
+  html.vk-fixed .split-rev .split-vis { order: -1; }
+  html.vk-fixed .modes-note { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  html.vk-fixed .step::after { display: block; }
+  html.vk-fixed .spec { grid-template-columns: 1fr 1fr; gap: 0 56px; padding: 12px 40px; }
+  /* ⚠️ gap 桌面是 16px(480 档才改 0); dt 宽桌面是 132px(480 档才改 auto) */
+  html.vk-fixed .spec-row { flex-direction: row; gap: 16px; }
+  html.vk-fixed .spec-row dt { width: 132px; }
+  html.vk-fixed .sec { padding: 92px 0; }
+  html.vk-fixed .gh-card { padding: 34px 38px; }
+  /* 桌面是 `flex-shrink:0` + 默认对齐; 860 档加了 width:100%/justify-content:center,
+     必须把这两个**显式还原**, 只写 width:auto 压不住 justify-content。 */
+  html.vk-fixed .gh-btn { width: auto; flex-shrink: 0; justify-content: normal; }
+
+  /* ---- 7. 轮播: 还原桌面尺寸与位移 ----
+     ⚠️⚠️ 这里**不要**自己编数字。轮播的尺寸与位移是联动的:
+         露出宽 = 位移 + (W·sx − W)/2, 且组宽 = W + 2·露出 必须 ≤ 视口。
+         各档历史值都是按这个公式算的, 缩放方案下唯一正确的做法是
+         **原样还原桌面基础值**(L634/L662/L700-718), 让 1280 画布内的构图
+         保持与桌面完全一致, 再由 scale() 统一缩小。
+         (上一版这里手写了 height:700px / width:1016px, 全是错的 ——
+          既把 max-width 当成了卡宽, 又和 --vis/--sx 对不上。) */
+  html.vk-fixed .car-stage {
+    max-width: 1016px; height: 322px;
+    --vis: 162px; --sx: .85;
+  }
+  html.vk-fixed .car-card {
+    width: 620px; height: 322px;
+    grid-template-columns: 1fr 52%;
+  }
+  html.vk-fixed .car-body { padding: 26px 14px 22px 30px; }
+  html.vk-fixed .car-body h4 { font-size: 20px; margin: 12px 0 8px; }
+  html.vk-fixed .car-body p { font-size: 13.8px; line-height: 1.7; }
+  html.vk-fixed .car-tag { padding: 5px 12px; font-size: 12px; }
+  html.vk-fixed .car-more { font-size: 13px; }
+  html.vk-fixed .car-card[data-off="-1"] { transform: translateX(calc(-50% + 102px)) scale(.85); }
+  html.vk-fixed .car-card[data-off="1"]  { transform: translateX(calc(50% - 102px))  scale(.85); }
+  html.vk-fixed .car-card[data-off="-2"] { transform: translateX(calc(-50% + 330px)) scale(.78); }
+  html.vk-fixed .car-card[data-off="2"]  { transform: translateX(calc(50% - 330px))  scale(.78); }
+
+  /* ---- 8. 滚动出现动画 ----
+     窄屏一屏看到的是"缩小后的整页", IntersectionObserver 在缩放容器里
+     可触发区域会变窄, 容易让人误以为"内容没加载"。窄屏直接全部置为已进入。 */
+  html.vk-fixed .rv { opacity: 1; transform: none; }
 }
