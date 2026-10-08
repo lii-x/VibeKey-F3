@@ -22,9 +22,8 @@
   --sh: 0 4px 24px rgba(11, 42, 91, .08);
   --sh-l: 0 12px 48px rgba(11, 42, 91, .14);
   --max: 1280px;
-  /* 导航高度: 桌面 64 / 手机 60, 改高度时只改这一个值。
-     .nav-in 用它定高, .hero 用它补顶部留白(导航已 fixed 脱离文档流),
-     html 用它做 scroll-padding-top(锚点跳转不被导航盖住) —— 三处联动。 */
+  /* 导航高度: 改高度时只改这一个值。.nav-in 定高 / .hero 补顶部留白 /
+     html 的 scroll-padding-top 三处联动。 */
   --nav-h: 64px;
 }
 
@@ -48,28 +47,11 @@ a { color: inherit; text-decoration: none; }
 .wrap { max-width: var(--max); margin: 0 auto; padding: 0 24px; }
 
 /* ---------- 等比缩放外壳 ----------
-   ★ 10-08: 手机端改成"桌面版整体等比缩小", 不再做响应式重排。
-
-   思路: 把整页内容放进一个固定 --max(1280px) 宽的"设计画布" .vk-scale,
-   再对它做 transform: scale(k), k = 视口宽 / 1280。
-   transform 只影响绘制、不改布局 ⇒ .vk-scale 仍按 1280px 占位,
-   所以外面必须再包一层 .vk-scale-outer, 用 (100% / k) 的反向高度把
-   "实际占位"折回来, 否则页面底部会多出一大截空白。
-
-   数据流(JS 只负责写 --vh-k, 其余全由 CSS 推导):
-     JS: --vh-k = 视口宽 / 1280   (k <= 1 时才动手, >1 即桌面端不缩放)
-     CSS: .vk-scale { transform: scale(var(--vh-k)); transform-origin: top left; }
-          .vk-scale-outer { height: calc(设计高 * var(--vh-k)) }
-   但设计高在 CSS 里拿不到(CSS 不能读元素实际高), 于是外层高度交给 JS
-   写一个像素值 —— 见 vkScaleOuter 的 style.height, 由 JS 量 .vk-scale 的
-   offsetHeight * k 得到。这里 CSS 只给兜底(不设 height 时不影响桌面端)。
-
-   ⚠️ 为什么导航能跟着缩: 导航也在这层里(见 index.html 注释)。
-      transform 会创建 containing block, 里面的 position:fixed 退化成
-      "相对 .vk-scale 固定" ⇒ 视觉上仍然贴着页面顶部, 且随整页一起缩小。
-      ⚠️ 但 .vk-scale 有 transform 时自身不滚动, 页面滚动仍由 body 承担,
-      所以导航"吸顶"效果在窄屏下会失效(随内容滚走)。这是等比缩放的
-      固有代价 —— 用户明确要"整体缩小一屏看全", 接受此权衡。 */
+   整页内容放进固定 1280px 宽的"设计画布" .vk-scale, 窄屏时 scale(视口宽/1280) 整体缩小。
+   ⚠️ transform 不改布局 ⇒ .vk-scale 仍按 1280px 占位, 外层 .vk-scale-outer 的高度
+      必须由 JS 用 offsetHeight × k 写回(见 index.html 的 fixHeight)。
+   ⚠️ transform 创建 containing block ⇒ 内部 position:fixed 退化为相对本元素,
+      导航因此不再吸顶(窄屏下的固有代价, 已接受)。 */
 .vk-scale {
   width: 100%;
   transform-origin: top left;
@@ -77,37 +59,21 @@ a { color: inherit; text-decoration: none; }
   transform: scale(var(--vh-k, 1));
 }
 
-/* 缩放外壳: 只负责"用折算后的高度撑住文档流"。
-   ⚠️ 这里**不要**写 overflow:hidden —— 内层 .vk-scale 在窄屏下固定 1280px
-      宽(比视口宽), 裁切交给 body{overflow-x:hidden}(既有规则)统一处理,
-      两层裁切会让视觉溢出量变得难以推理。
-   ⚠️ 也不要给 width 约束: 必须让内层的 1280px 原样保留, 否则缩放基准被破坏。 */
+/* 缩放外壳: 只负责用折算后的高度撑住文档流。
+   ⚠️ 不要写 overflow:hidden, 也不要给 width 约束 —— 内层 1280px 必须原样保留,
+      否则缩放基准被破坏; 横向裁切交给 body{overflow-x:hidden}。 */
 .vk-scale-outer { width: 100%; }
 
 /* ---------- 窄屏: 关掉一切响应式重排, 纯缩放 ----------
-   ★ 关键难点: 源码里有 11 处 @media (max-width: ...) 断点,
-     手机打开时全都会命中, 把版式改成"手机版" —— 那缩放的就是被改坏的版式。
-   对策: 给 html 加 .vk-fixed 类(由 JS 判断窄屏时加), 然后用
-     `html.vk-fixed` 把所有断点条件"反向覆盖"掉。
-     这些媒体查询必须写在文件**最末尾**(见文件底部 override 区),
-     否则同优先级下后来者居上会被原始断点盖回去。 */
+   源码里有 11 处 @media 断点, 手机打开时会全部命中把版式改成"手机版"。对策:
+   JS 给 html 加 .vk-fixed, 再在文件**最末尾**用 html.vk-fixed 反向覆盖掉
+   (必须放末尾, 否则会被原始断点盖回去)。 */
 
 /* ---------- 导航 ----------
-   布局要点(踩过坑): 导航项 8 个 + logo + 2 个按钮, 若只靠 margin-left:auto 硬挤,
-   容器宽度不够时子项(都带 nowrap)会溢出并**互相叠在一起**(用户截图)。
-   对策: ① nav-in 显式 min-width:0, 让 flex 子项能真正收缩;
-        ② overflow:hidden 兜底, 极端情况只裁不叠;
-        ③ 分档降级 —— 中等宽度隐藏纯锚点项只留核心几项, 窄屏全收进汉堡菜单。
-
-   ★★ 透明 → 毛玻璃(对标 Chatterfly):
-     常态(nav 不带 .is-solid)完全透明, 直接浮在首屏动态背景上;
-     页面滚动超过 --nav-h 的一半后, JS 给 .nav 加 .is-solid,
-     背景变成半透明白 + backdrop-filter 模糊, 与背景里的内容分层。
-   ★ 为什么用 fixed 而不是 sticky:
-     sticky 时导航始终占着文档流里的 64px, 首屏顶部会留出一条空白带,
-     透明了反而像"上面缺了一块"(用户截图里首屏标题整体下移且导航悬空)。
-     fixed 让导航真正浮在内容之上, 首屏背景能从 y=0 连续铺下来。
-     代价: 导航不再给页面"顶开"空间, 必须由 .hero 的 padding-top 补上(见下)。 */
+   ⚠️ 导航项都是 nowrap, 宽度不够时会溢出互相叠在一起。对策: nav-in 显式
+      min-width:0 让 flex 子项能收缩 + overflow:hidden 兜底 + 分档降级。
+   ⚠️ 用 fixed 而非 sticky: sticky 始终占文档流 64px, 透明后首屏顶部会留一条
+      空白带像"缺了一块"。代价是导航不再顶开空间, 由 .hero 的 padding-top 补。 */
 .nav {
   position: fixed; top: 0; left: 0; right: 0; z-index: 100;
   background: transparent;
@@ -115,8 +81,7 @@ a { color: inherit; text-decoration: none; }
   transition: background .32s ease, border-color .32s ease,
               box-shadow .32s ease, backdrop-filter .32s ease;
 }
-/* 滚动后的毛玻璃态。半透明白 + 模糊, 背景里的光斑/极光会透出模糊的色块,
-   这是毛玻璃效果的关键 —— 只加白底不 blur 就是"变白"而不是"毛玻璃"。 */
+/* 滚动后的毛玻璃态。⚠️ 关键是 backdrop-filter 的 blur, 只加白底就是"变白"。 */
 .nav.is-solid {
   background: rgba(255, 255, 255, .72);
   -webkit-backdrop-filter: saturate(180%) blur(18px);
@@ -124,15 +89,13 @@ a { color: inherit; text-decoration: none; }
   border-bottom-color: var(--line);
   box-shadow: 0 2px 16px rgba(11, 42, 91, .06);
 }
-/* 兜底: 极老的浏览器不支持 backdrop-filter 时, 半透明白会显得"灰蒙"、
-   文字对比度不够。此时给一版更实的白底, 保证可读性。 */
+/* 兜底: 老浏览器不支持 backdrop-filter 时, 半透明白会灰蒙、对比度不够。 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .nav.is-solid { background: rgba(255, 255, 255, .96); }
 }
 .nav-in { display: flex; align-items: center; gap: 16px; height: var(--nav-h); min-width: 0; }
 .logo { display: flex; align-items: center; gap: 9px; font-size: 19px; font-weight: 800; color: var(--navy); white-space: nowrap; flex-shrink: 0; }
-/* 品牌标识: 直接用改键页那张官方图标(VibeKey-F3 蓝底白字),
-   不再自绘蓝色方块, 保证官网上机与配置工具是同一个 logo。 */
+/* 品牌标识: 直接用改键页那张官方图标, 保证与配置工具是同一个 logo。 */
 .logo-mark {
   width: 30px; height: 30px; border-radius: 7px; overflow: hidden;
   display: grid; place-items: center; flex-shrink: 0;
@@ -144,11 +107,8 @@ a { color: inherit; text-decoration: none; }
   font-size: 14px; color: var(--ink-2); font-weight: 500;
   transition: color .18s; white-space: nowrap; flex-shrink: 0;
 }
-/* 抽屉专用项(在线改键 / GitHub): **桌面端必须隐藏**。
-   这两项的样式只写在 @media (max-width:900px) 里, 桌面端若不显式隐藏,
-   它们会作为普通导航项挤进 .nav-links, 再被 overflow:hidden 裁掉 ->
-   出现「GitHub 开源仓库」被切一半的现象(用户截图)。
-   桌面端另有 .nav-app / .nav-gh 两个独立按钮承担这两件事。 */
+/* ⚠️ 抽屉专用项(在线改键 / GitHub)在桌面端必须隐藏, 否则会挤进 .nav-links
+   被 overflow:hidden 裁掉一半。桌面端由 .nav-app / .nav-gh 承担这两件事。 */
 .nav-links a.nav-menu-app,
 .nav-links a.nav-menu-gh { display: none; }
 .nav-links a:hover { color: var(--blue); }
@@ -167,9 +127,8 @@ a { color: inherit; text-decoration: none; }
   font-size: 13.5px; font-weight: 600; white-space: nowrap;
   transition: background .18s, border-color .18s, transform .18s;
 }
-/* ★ 10-07: 「在线配置」的横箭头图标(齿轮 emoji → SVG)。
-   描边用 currentColor, 所以 hover 变蓝时图标自动跟着变, 无需额外 hover 规则。
-   flex-shrink:0 防止窄屏被压扁; 竖向上因为父级是 inline-flex+center 已自动居中。 */
+/* 「在线配置」的横箭头图标: 描边用 currentColor, hover 时自动跟随文字色;
+   flex-shrink:0 防窄屏被压扁。 */
 .nav-app .nav-app-ic,
 .nav-menu-app .nav-app-ic { flex-shrink: 0; }
 .nav-app:hover { background: var(--blue-l); border-color: var(--blue); transform: translateY(-1px); }
@@ -181,8 +140,7 @@ a { color: inherit; text-decoration: none; }
 }
 .nav-gh:hover { color: var(--navy); background: var(--nav); }
 .nav-gh span { font-size: 13.5px; font-weight: 600; }
-/* 汉堡按钮: 手机端主入口, 做成带描边的方形按钮, 比裸图标更易点。
-   用 grid 让「汉堡/关闭」两个图标叠在同一格, 切换只靠 display。 */
+/* 汉堡按钮: 用 grid 把「汉堡/关闭」两个图标叠在同一格, 切换只靠 display。 */
 .nav-toggle {
   flex-shrink: 0;
   width: 40px; height: 40px; border: 1px solid var(--line); border-radius: 10px;
@@ -199,29 +157,20 @@ a { color: inherit; text-decoration: none; }
 .nav-toggle[aria-expanded="true"] { border-color: var(--blue); background: var(--blue-l); }
 
 /* ---------- 首屏 ---------- */
-/* 背景渐变必须**收在 100%**(hero 底部)而不是中段就变白 ——
-   否则浅蓝会在 hero 中间就淡成白色, 与 hero 底边之间留一段"白",
-   视觉上就是整层底色被齐刷刷切一刀, 像被拆成两半(用户截图)。
-   现在过渡一路铺到 hero 底边, 底边刚好是纯白, 与下方 .sec 的白底无缝衔接。 */
+/* ⚠️ 渐变的白色端点必须落在 hero 底边(100%), 不能中途就变白 ——
+   否则底色在中段被齐齐切断, 并要与下方 .sec 的白底无缝衔接。 */
 .hero {
   position: relative; overflow: hidden;
-  /* 10-07: 由"极淡的蓝白渐变"换成【天空】渐变 —— 原来上端 #E9F4FF 太白,
-     用户反馈"颜色不丰富"。现在上端是明确的天空蓝, 一路过渡到底边纯白,
-     与下方 .sec 白底无缝衔接(端点必须落在区块底边, 不能中途就变白)。
-     ★ 10-07 试过改成【深色 Aurora】(用户确认了方向), 做完发现**不如原来的浅色天空** ——
-       深底把首屏文字/标签/按钮全要反转成浅色, 白色产品图虽然更"托"得住,
-       但整屏偏暗、与下方白底区块反差过大, 整体反而不如浅色天空清爽。
-     ⇒ 已整体回退到浅色天空方案(文字深色 / 毛玻璃白标签 / 白底次级按钮)。 */
+  /* 天空渐变: 上端天空蓝 → 底边纯白(与下方 .sec 无缝)。
+     ⚠️ 试过深色 Aurora 方案, 整屏偏暗且与下方白底反差过大, 已回退。 */
   background: linear-gradient(179deg,
               #A6CBEB 0%, #BCDAF2 15%, #D6E8F8 38%,
               #ECF6FD 62%, #FAFDFF 84%, #fff 100%);
 }
 
-/* 10-06 动态背景(对标 chatterfly 的"会动的底")—— 纯 CSS, 无 JS / 无依赖, 三层:
-   ① 右上光晕改成缓慢"呼吸"(缩放 + 淡入淡出)
-   ② 3 个大号柔光斑各自独立漂移, 周期 30/38/34s 互质 ⇒ 长时间也不重复
-   ③ 极淡点阵纹理横向滚动, 补一层细颗粒感, 用 mask 让四周淡出避免硬边
-   三层一律 z-index:0, 内容 .hero-in 是 z-index:1 ⇒ 动画永远在文字/按钮之下, 不影响可读性与点击。 */
+/* 首屏动态背景(纯 CSS, 三层): 右上光晕呼吸 + 3 个柔光斑漂移(周期 30/38/34s 互质)
+   + 点阵纹理横向滚动。
+   ⚠️ 三层一律 z-index:0, 内容 .hero-in 是 z-index:1 —— 动画永远在文字/按钮之下。 */
 .hero::before {
   content: ''; position: absolute; z-index: 0;
   width: 620px; height: 620px;
@@ -234,26 +183,19 @@ a { color: inherit; text-decoration: none; }
   to   { transform: scale(1.16); opacity: 1;  }
 }
 
-/* 光斑层自带上下淡出 mask: 光斑本身是"越靠边越淡"的柔光, 若只靠
-   overflow:hidden 硬裁, 边缘会出现一条明显的直边(像背景被切了一刀)。
-   这里在容器上再叠一层纵向 mask, 让光斑在碰到 hero 上下边之前就自己
-   化掉, 裁切线永远看不见。
-   ★ 顶部淡出起点从 14% 收到 8%: 导航改成 fixed 后 hero 顶边就是视口顶边,
-     原来 14% 的淡出区正好盖住导航那一条, 光斑透不到导航后面, 毛玻璃就
-     只能糊到纯色 —— 看着像"导航下面垫了块白板", 不是玻璃。收到 8% 让
-     光斑能铺到导航区域, 滚动后才有真实的模糊色块透出来。 */
+/* 光斑层叠一层纵向淡出 mask: 若只靠 overflow:hidden 硬裁, 边缘会出现一条直边。
+   ⚠️ 顶部淡出起点必须够小(8%): 起点太大时淡出区正好盖住导航那一条,
+      光斑透不到导航后面, 毛玻璃只能糊到纯色。 */
 .hero-aurora {
   position: absolute; inset: 0; z-index: 0; overflow: hidden; pointer-events: none;
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 8%, #000 62%, transparent 96%);
           mask-image: linear-gradient(to bottom, transparent 0, #000 8%, #000 62%, transparent 96%);
 }
 .aurora-blob { position: absolute; border-radius: 50%; will-change: transform; }
-/* 三个光斑都往画面内侧收, 别把大半身子甩到 hero 外面去 ——
-   被裁掉的部分等于白做, 看着就像"缺了一块"。 */
+/* 三个光斑往画面内侧收, 别把大半身子甩到 hero 外面。 */
 .aurora-b1 {
   width: 560px; height: 560px; left: -120px; top: -110px;
-  /* 10-07: 底色由"极淡蓝白"换成天空蓝后, 原来 .20 的蓝光斑被背景吃掉、几乎看不见。
-     统一提高不透明度, 让蓝/青/紫三层色相在天空上重新显形(用户要的"颜色丰富")。 */
+  /* 天空蓝底会把低不透明度的蓝光斑吃掉, 故统一提高到 .30/.26/.24。 */
   background: radial-gradient(circle, rgba(10,132,224,.30), transparent 70%);
   animation: aurora1 30s ease-in-out infinite alternate;
 }
@@ -262,8 +204,7 @@ a { color: inherit; text-decoration: none; }
   background: radial-gradient(circle, rgba(0,186,232,.26), transparent 70%);
   animation: aurora2 38s ease-in-out infinite alternate;
 }
-/* 紫色原来在 bottom:-210px, 只剩一条很薄的边露在首屏底部, 基本看不见;
-   提到 bottom:-70px 让它完整参与构图, 再靠上面的 mask 自然收尾。 */
+/* ⚠️ bottom 不要太负(原 -210px 只剩一条薄边看不见), -70px 让它完整参与构图。 */
 .aurora-b3 {
   width: 460px; height: 460px; left: 32%; bottom: -70px;
   background: radial-gradient(circle, rgba(122,110,255,.24), transparent 70%);
@@ -273,9 +214,8 @@ a { color: inherit; text-decoration: none; }
 @keyframes aurora2 { from { transform: translate3d(0,0,0) scale(1.07); } to { transform: translate3d(-86px,54px,0) scale(.94); } }
 @keyframes aurora3 { from { transform: translate3d(0,0,0) scale(.95); }   to { transform: translate3d(66px,-76px,0) scale(1.14); } }
 
-/* 点阵纹理: 横向缓慢滚动补颗粒感。mask 用纵向渐隐(而非原来的径向) ——
-   径向会在左右两侧也淡出, 靠边处出现半截点阵; 纵向只管上下, 左右保持满密度,
-   底边也不会跟 hero 底边撞出一条横线。 */
+/* 点阵纹理: 横向缓慢滚动。⚠️ mask 用纵向渐隐而非径向 ——
+   径向会在左右两侧也淡出让靠边处出现半截点阵。 */
 .hero::after {
   content: ''; position: absolute; inset: 0; z-index: 0; pointer-events: none;
   background-image: radial-gradient(circle, rgba(11,42,91,.10) 1px, transparent 1.1px);
@@ -285,21 +225,17 @@ a { color: inherit; text-decoration: none; }
   animation: dotDrift 26s linear infinite;
 }
 @keyframes dotDrift { from { background-position: 0 0; } to { background-position: 260px 0; } }
-/* ★ 深底 Aurora 方案里加过 .hero-fade(底部提亮雾, 用于深蓝→白底的过渡),
-   该方案已整体回退, 这个类随之删除 —— 浅色天空方案里底边本来就是纯白,
-   与下方 .sec 无缝衔接, 不需要任何过渡层。 */
+/* (.hero-fade 随深色 Aurora 方案一并移除, 浅色天空方案不需要过渡层。) */
 
 .hero-in {
   position: relative; z-index: 1;                 /* 动态背景都在这一层之下 */
   display: grid; grid-template-columns: 1fr 380px;
   gap: 48px; align-items: center;
-  /* 顶部留白 = 原有间距 + 导航高度: 导航已 fixed 脱离文档流, 不再"顶开"页面,
-     不补这一段的话首屏标题会钻到导航底下。这一条是 fixed 改造的必要补丁。 */
+  /* ⚠️ 顶部留白 = 原间距 + 导航高: 导航已 fixed 脱离文档流, 不补标题会钻到导航底下。 */
   padding: calc(76px + var(--nav-h)) 24px 84px;
 }
 
-/* 无障碍: 系统开了"减少动态效果"(prefers-reduced-motion)就把首屏动画全停 ——
-   仍保留静态光斑, 页面不会变成白板。顺带把原本就在动的 .hero-ring 也一并停掉。 */
+/* 无障碍: 减少动态效果时停掉首屏动画(保留静态光斑, 页面不会变白板)。 */
 @media (prefers-reduced-motion: reduce) {
   .hero::before, .hero::after, .aurora-blob, .hero-ring { animation: none !important; }
 }
@@ -325,8 +261,8 @@ a { color: inherit; text-decoration: none; }
 .hero h1 .l1, .hero h1 .l2 { display: block; }
 .hero h1 em { font-style: normal; color: var(--blue); }
 
-/* ---------- 第二行标题轮换(10-07, 对标 chatterfly 首屏) ----------
-   所有短语都绝对定位叠在同一处, 靠 .on 切换透明度+微小上移做交叉淡入淡出。
+/* ---------- 第二行标题轮换(对标 chatterfly 首屏) ----------
+   所有短语绝对定位叠在同一处, 靠 .on 切换透明度+微小上移做交叉淡入淡出。
    容器高度由 JS 量最高的一句写死(见 index.html 末尾脚本), 否则切换时高度
    在 0/一行之间跳, 会把下方按钮顶得上下抖。
    .measuring 只用于"量高度": 那一刻让所有短语恢复静态堆叠, 量完即撤。 */
@@ -341,22 +277,10 @@ a { color: inherit; text-decoration: none; }
 .hero h1 .rot.measuring .rot-i { position: static; opacity: 1; transform: none; transition: none; }
 .hero-sub { margin-top: 20px; font-size: clamp(16px, 1.6vw, 19px); color: var(--ink-2); max-width: 540px; }
 .hero-tags { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
-/* ---------- 功能标签: 毛玻璃 (10-07) ----------
-   用户: "里面的矩形改成毛玻璃效果"。
-   ★ 原来是不透明白底(background:#fff) —— 压在天空渐变上就是一个"实心白块",
-     和背景完全脱开, 看着像贴纸。
-   ★ 毛玻璃三件套(缺一不可, 少一个就不是毛玻璃):
-     ① `background: rgba(255,255,255,.45)` 半透明 —— 让背后的天空色透上来;
-     ② `backdrop-filter: blur()` —— 把透过来的背景**糊掉**, 这才是"玻璃"的关键;
-        只加半透明白不 blur 只是"变淡", 背景的渐变色块仍然清晰可辨, 不是玻璃;
-     ③ 细白描边 `rgba(255,255,255,.7)` —— 模拟玻璃边缘的高光,
-        同时把半透明胶囊从背景里"勾"出轮廓, 否则边界会糊进天空里。
-   ★ 为什么不加 saturate(): 导航栏那处用了 `saturate(180%)`, 因为那里背后是
-     彩色光斑, 需要提饱和才显色; 这里背后是**纯天空渐变**(本身已经很淡),
-     再提饱和没有效果反而多一层滤镜开销, 所以只 blur。
-   ★ 文字色同时压深: 半透明白底比纯白底"轻", 原来的 --ink-3 级灰会看不清。
-   ★ 期间试过在深色 Aurora 方案下反转成"暗玻璃"(半透明深蓝底), 已随该方案回退。 */
-.hero-tags span {
+/* ---------- 功能标签: 毛玻璃 ----------
+   ⚠️ 毛玻璃三件套缺一不可: ① 半透明白底(让天空色透上来) ② backdrop-filter:blur
+      (这才是"玻璃"的关键, 只加半透明白只是"变淡") ③ 细白描边(勾出轮廓)。
+   这里不加 saturate(): 背后是纯天空渐变(本身很淡), 提饱和无效果还多一层滤镜开销。 */.hero-tags span {
   display: inline-flex; align-items: center; gap: 7px;
   padding: 8px 16px; border-radius: 999px;
   background: rgba(255, 255, 255, .45);
@@ -366,13 +290,11 @@ a { color: inherit; text-decoration: none; }
   font-size: 14px; font-weight: 500; color: var(--ink-2);
   box-shadow: 0 1px 6px rgba(11, 42, 91, .04);
 }
-/* 兜底: 老浏览器不支持 backdrop-filter 时, .45 半透明白会让文字压不住背景
-  (尤其文字背后正好是深一点的天空蓝)。此时退回更实的白底, 保证可读性优先。 */
+/* 兜底: 老浏览器不支持 backdrop-filter 时退回更实的白底, 保证可读性。 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .hero-tags span { background: rgba(255, 255, 255, .82); }
 }
-/* 标签图标: 用 currentColor 描边, 但颜色单给一档品牌蓝 —— 图标是"点缀",
-   全黑会和文字糊在一起, 蓝色能让四个标签一眼看出是同一组功能。 */
+/* 标签图标: currentColor 描边 + 单给一档品牌蓝(全黑会和文字糊在一起)。 */
 .hero-tags .tg-ic {
   width: 16px; height: 16px; flex-shrink: 0;
   color: var(--blue);
@@ -383,21 +305,11 @@ a { color: inherit; text-decoration: none; }
   padding: 14px 30px; border-radius: 999px; font-size: 15.5px; font-weight: 600;
   transition: transform .18s, box-shadow .18s, background .18s;
 }
-/* 按钮内联图标(如「在线改键」的横箭头): 描边用 currentColor,
-   所以按钮 hover 变蓝时图标自动跟着变色, 不需要额外写 hover 规则。
-   flex-shrink:0 防止窄屏被压扁。 */
+/* 按钮内联图标: currentColor 描边, hover 自动跟随文字色; flex-shrink:0 防压扁。 */
 .btn .btn-ic { flex-shrink: 0; }
-/* ---------- 按钮阴影: 由"灰黑投影"改成【彩色投影】(10-07) ----------
-   用户要求"背景阴影改成彩色的"。
-   ★ 原理: 人眼对"投影颜色"其实很敏感 —— 灰黑投影(rgba(11,42,91,.2) 这类)
-     会让按钮看着像"纸片浮在灰雾上"; 换成**按钮自身色相的投影**后, 按钮与阴影
-     色相一致, 观感是"这个按钮在发光", 质感立刻高级一档(参考图里就是这种)。
-   ★ 做法: 不用单纯加深透明度, 而是把**投影做两层** ——
-       · 近层: 小 blur 的饱和色 ⇒ 紧贴按钮的一圈"本命色辉光"
-       · 远层: 大 blur 的同色系 ⇒ 向外散开的柔光
-     两层叠加 = 彩色光晕, 比单层 rgba 通透得多。
-   ★ 阴影色一律**取自按钮色相的加饱和版**, 不要直接拿按钮底色当 shadow ——
-     底色太亮时投影会发白、失去"影"的重量感。 */
+/* ---------- 按钮阴影: 彩色投影 ----------
+   投影取按钮**自身色相**的加饱和版(不要拿底色当 shadow, 太亮会发白),
+   且做两层: 近层小 blur 的本命色辉光 + 远层大 blur 的柔光。 */
 .btn-p {
   background: var(--blue); color: #fff;
   /* 蓝按钮 → 亮蓝光晕 */
@@ -405,37 +317,24 @@ a { color: inherit; text-decoration: none; }
 }
 .btn-p:hover {
   background: var(--blue-d); transform: translateY(-2px);
-  /* hover 时光晕更大更亮, 与"抬起来"的位移一起强化反馈 */
+  /* hover 光晕更大更亮 */
   box-shadow: 0 7px 18px rgba(10,132,224,.5), 0 16px 40px rgba(0,150,255,.42);
 }
 .btn-s { background: #fff; color: var(--navy); border: 1.5px solid var(--line); }
-/* 白底次级按钮: 本体没有色相, 若硬给彩色影会很突兀。
-   做法是给一层**很淡的蓝调投影**(而不是灰) —— 单独看不明显,
-   但和旁边的蓝色主按钮同处一行时, 整体色调是统一的, 不会有"一颗灰点"。 */
+/* 白底次级按钮: 给一层很淡的蓝调投影(而非灰), 与旁边蓝色主按钮色调统一。 */
 .btn-s { box-shadow: 0 4px 14px rgba(10,132,224,.13); }
 .btn-s:hover {
   border-color: var(--blue); color: var(--blue); transform: translateY(-2px);
   box-shadow: 0 6px 18px rgba(10,132,224,.2), 0 12px 30px rgba(10,132,224,.14);
 }
-/* 首屏「下载 Windows 版」: 复用底部 .btn-dl 的视觉语言(亮蓝实心),
-   但那个类的浅底配色是给深色 CTA 区用的, 首屏是浅色天空底, 所以只借形状,
-   颜色仍走 .btn-p。
-   ★★ 10-07 两次修正记录(别再来回摆):
-      ① 初版给这里单独加大光晕(14px/38px) → 用户: "阴影太大";
-      ② 收到与 .btn-p 同档(12px/26px) → 用户: "蓝色阴影还是太大";
-      ⇒ 现在**再收一档**: 模糊半径缩到 8px/18px、不透明度降到 .34/.24,
-        基本只留"按钮下方贴着一层淡蓝"的分量, 不再往外散开。
-      ★ 规律(踩两次才明确): 浅色天空底上的彩色光晕**天生比深色底上显眼**,
-        因为浅底没有"暗"去吸收光。所以浅底按钮的影要**比常规更小更淡**,
-        不能沿用深底那套参数直接减一点就完事 —— 要减到"几乎只剩贴边一层"。
-      ★ hover 态保持比常态大一号即可(有位移配合, 大一点才对得上), 但也同步收小。 */
+/* 首屏「下载 Windows 版」: 只借 .btn-dl 的形状, 颜色仍走 .btn-p(首屏是浅底)。
+   ⚠️ 浅色天空底上的彩色光晕天生比深色底上显眼(浅底没有"暗"去吸收光),
+      所以这里的影要比常规更小更淡 —— 参数别照搬深底那套。 */
 .hero-btns .btn-dl { box-shadow: 0 2px 8px rgba(10,132,224,.34), 0 5px 18px rgba(0,150,255,.24); }
 .hero-btns .btn-dl:hover { box-shadow: 0 3px 10px rgba(10,132,224,.42), 0 8px 24px rgba(0,150,255,.32); }
-/* 「macOS 版 敬请期待」占位按钮: 不可点, 所以必须显式压掉 hover 反馈 ——
-   否则鼠标移上去照样变色上浮, 用户会以为点得动, 点了没反应更困惑。
-   .btn-s:hover 是全局规则, 这里用同等特异度 + 后置覆盖回来。
-   ★ box-shadow 也必须一起清掉(不能只清 transform): 否则上面新加的
-     .btn-s 蓝调投影仍会套在占位按钮上, 让它看着"像个能点的按钮"。 */
+/* 占位按钮不可点, 必须显式压掉 hover 反馈。
+   ⚠️ box-shadow 要一起清掉(不能只清 transform), 否则 .btn-s 的蓝调投影
+      仍会套上来, 让它看着像能点。 */
 .btn-soon,
 .btn-soon:hover {
   background: #fff; color: var(--ink-3); border-color: var(--line);
@@ -479,8 +378,7 @@ a { color: inherit; text-decoration: none; }
   border: 1px solid var(--line); transition: transform .22s, box-shadow .22s, border-color .22s;
 }
 .crd:hover { transform: translateY(-6px); box-shadow: var(--sh-l); border-color: rgba(10,132,224,.3); }
-/* 10-07: 卡片上方的圆角图标块(.crd-ic)已按需求移除(用户: "这些图标都不要"),
-   对应的 .crd-ic / .crd:nth-child(n) .crd-ic 三条规则一并删除。 */
+/* (.crd-ic 图标块及配套规则已整体移除。) */
 .crd h3 { font-size: 18.5px; font-weight: 700; color: var(--navy); margin-bottom: 10px; }
 .crd p { font-size: 14.8px; color: var(--ink-2); }
 
@@ -533,9 +431,7 @@ a { color: inherit; text-decoration: none; }
 }
 
 /* ---------- 槽位/模式 ---------- */
-/* ★ 10-07: .slot-demo / .slot 已删 —— 「蓝牙多设备切换」区的三张槽位卡
-   (槽位 ①②③ / 工作机·笔记本·平板)按需求整块移除(用户: "框起来的内容不要")。
-   下方 .modes-note(连接/配对/HFP 模式说明)保留。 */
+/* (.slot-demo / .slot 槽位卡已整体移除; 下方 .modes-note 保留。) */
 
 /* ---------- 窄栏文字(无配图时用) ---------- */
 .narrow { max-width: 760px; margin: 0 auto; }
@@ -567,9 +463,7 @@ a { color: inherit; text-decoration: none; }
   transition: transform .2s, box-shadow .2s, border-color .2s;
 }
 .mode-card:hover { transform: translateY(-4px); box-shadow: var(--sh); border-color: rgba(10,132,224,.3); }
-/* ★ 10-07: .mode-ic(序号色块 ①②③④)及其配色覆盖规则已删 ——
-   卡片上的彩色编号圆点按需求移除(用户: "框起来的这个色块不要")。
-   现卡片只剩 标题 + 说明 两行。 */
+/* (.mode-ic 序号色块及配色覆盖规则已移除, 卡片只剩标题 + 说明两行。) */
 .mode-card b { display: block; color: var(--navy); font-size: 17.5px; margin-bottom: 7px; }
 .mode-card span { font-size: 14.2px; color: var(--ink-2); }
 
@@ -608,157 +502,93 @@ a { color: inherit; text-decoration: none; }
   font-size: 13.2px; color: var(--ink-3); text-align: center;
 }
 
-/* ---------- 场景轮播(对标 Chatterfly) ----------
-   做法: 所有卡片**绝对定位重叠**在同一张卡位上, 靠 JS 给每张卡写
-   data-off(-1 / 0 / 1), CSS 按 data-off 决定它缩多少、偏多少、亮不亮。
-   为什么不用 flex 轨道 + translateX:那样侧卡会被父容器 overflow 裁掉,
-   而且"中间大两边小"的比例要靠固定宽度硬凑,换个数就得重算。
-   绝对定位 + data-off 让"几张卡都能用", 增删卡片只改 HTML。 */
-.sec-car {
+/* ---------- 场景轮播 ----------
+   卡片绝对定位重叠在同一卡位, JS 只写 data-off(-2..2), CSS 按 data-off
+   决定缩多少/偏多少/亮不亮 —— 增删卡片只改 HTML。
+   不用 flex 轨道 + translateX: 侧卡会被父容器裁掉, 且比例要硬凑。 */.sec-car {
   overflow: hidden;                      /* 侧卡甩出边界的部分直接裁掉 */
-  /* 标题到卡片只留 34px(默认 .sec-head 是 56px): 轮播卡片本身有 336px 高,
-     再加 56px 空白会把底部圆点顶出首屏, 观感上像"下面还有东西没加载出来"。 */
-  padding-bottom: 74px;
-  background:
+  /* 标题到卡片只留 34px(默认 56px): 再大底部的圆点会被顶出首屏。 */
+  padding-bottom: 74px;  background:
     radial-gradient(58% 74% at 14% 6%, rgba(10,132,224,.10), transparent 62%),
     radial-gradient(52% 68% at 88% 92%, rgba(122,110,255,.10), transparent 62%),
     var(--bg-2);
 }
 .sec-car .sec-head { margin-bottom: 34px; }
-/* .car: 轮播交互根节点。
-   ★ touch-action: pan-y —— 触屏上允许**纵向滚动页面**, 但横向手势由脚本接管。
-     这解决了"手指/指针落在轮播上就滚不动页面"的问题:
-     只写 touch-action:pan-y 就等于告诉浏览器"纵向你自己滚, 横向别管(交给自己)"。
-     它和 JS 里那条"仅横向才 preventDefault"的 touchmove 是同一目的的两道保险
-     (老内核不认识 touch-action 时靠 JS 兜底, 反之亦然)。
-     注意: 横向交给脚本正是拖拽轮播需要的, 所以这里**不能**写 none。
-     (早期 JS 里是无条件 preventDefault, 把纵向滚动也拦了 —— 那才是那个 bug。) */
+/* ⚠️ touch-action: pan-y —— 纵向交给浏览器滚页面, 横向交给脚本(拖拽轮播需要),
+      所以**不能**写 none。与 JS 里"仅横向才 preventDefault"是同一目的的两道保险。 */
 .car { position: relative; touch-action: pan-y; }
-/* 卡位: 高=中间卡高度。宽度按 Chatterfly 的比例定 ——
-   它是 中间卡 ~370px + 两侧各露 ~110px ≈ 590px 一组, 在 1080 宽屏里占约 55%。
-   我先前做成 中间卡 680 + 两侧各露 250 = 1160px 一组, 整排横铺到接近满屏,
-   用户反馈"这么长、变形了"。现在收成 中间卡 560 + 各露 112 ≈ 784px, 居中一小簇。 */
+/* 卡位: 高 = 中间卡高度。整组宽度 = 中间卡 + 两侧各露一段, 居中一小簇。 */
 .car-stage {
   position: relative;
   height: 322px;
   margin: 4px auto 0;
-  /* 主卡 620 + 两侧各露 ~198 ≈ 1016。上轮收到 744(主卡 560)其实收过头了:
-     主卡变窄后图片区跟着窄, 主要人物被压成窄条、脸只剩一半(用户截图)。
-     Chatterfly 是 中间卡 ~720 + 两侧各露 ~170 ≈ 1060, 这里取 1016 与其对齐,
-     既让主卡人物完整, 又没回到更早那版 1160"横铺近满屏"的毛病。 */
+  /* 主卡 620 + 两侧各露 ~198 ≈ 1016。再窄会把主卡人物压成窄条。 */
   max-width: 1016px;
   /* ★ 侧卡露出宽度(也是侧卡图片区的宽度)—— 一处定义, 全站复用。
-     改这个值时必须同步改侧卡位移, 公式见下面 data-off 那一段注释:
-       T = --vis − W·sx/2 */
+     改这个值时必须同步改侧卡位移, 公式见下面 data-off 那一段注释: T = --vis − W·sx/2 */
   --vis: 162px;
   --sx: .85;          /* 侧卡等比缩放, 媒体区宽度要用它反算 */
-  /* ★ 这里**不要**加 overflow:hidden ——
-     试过把裁切下沉到卡位, 结果侧卡超出卡位的部分被切掉, 连**圆角**一起变成直角,
-     侧卡看起来像"被刀削过的方块", 反而更难看。
-     横向溢出由 .sec-car { overflow:hidden } 兜(它是 section 级, 只裁绘制不裁圆角),
-     再由 body{overflow-x:hidden} 挡住滚动条, 两层足够。 */
+  /* ⚠️ 这里不要加 overflow:hidden —— 会连侧卡的圆角一起切成直角。
+     横向溢出由 .sec-car 与 body 两层兜住即可。 */
 }
 /* 拖拽时整条 track 平移, 提前提升合成层, 避免拖动掉帧 */
 .car-track { position: relative; height: 100%; will-change: transform; }
-/* ★ 拖拽限幅: JS 写 --drag 位移, 这里只接收。
-   没有限幅时, 整条 track 会连中间卡一起被拖出卡位, 三张卡就同时完整露出来,
-   看着像"散架/变形"(用户截图)。限制在一个侧卡的偏移量内, 视觉上始终是
-   "中间卡 + 两侧露边"这个结构, 只是整体在轻微偏移。 */
+/* 拖拽时 JS 写 track 位移, 这里只关掉过渡(限幅在 JS 侧做)。 */
 .car.is-drag .car-track { transition: none; }
-/* 卡位注释更新 */
 .car-card {
   position: absolute; inset: 0; margin: auto;
   width: 620px; height: 322px;
-  /* ★ 图片区占 52%(上轮 44%): 44% 时 620×.44 = 273px 宽, 而图是 640×760 的竖版,
-     cover 到 273×322 只能保留中间一条竖切片, 人物被压很窄。
-     52% = 322px 宽, 更接近 Chatterfly 的"图片区约一半卡宽"。 */
+  /* 图片区占 52%: 再窄会让 640×760 的竖版图 cover 后人被压成一条切片。 */
   display: grid; grid-template-columns: 1fr 52%;
   border-radius: 20px; overflow: hidden;
   background: #fff; border: 1px solid rgba(11,42,91,.07);
   box-shadow: 0 16px 42px rgba(11,42,91,.11);
   cursor: pointer;
-  /* ★ 只过渡 transform/opacity/filter/shadow, **不要把 width 也写进 transition** ——
-     卡片尺寸变化必须瞬时完成, 否则拖拽时会看到侧卡"慢慢长大", 手套发黏。 */
+  /* ⚠️ 不要把 width 写进 transition —— 尺寸变化会显得"慢慢长大", 拖拽发黏。 */
   transition: transform .62s cubic-bezier(.22,.68,.24,1),
               opacity .5s ease, box-shadow .5s ease, filter .5s ease;
   will-change: transform;
 }
 /* --- 三种状态: 中间 / 左侧 / 右侧 ---
-   620×.88 = 546, 半宽 273; 位移 198 → 侧卡内缘落在 198-273 = -75,
-   即中间卡左右各露 310-75 = 235px 中的一部分, 实测露边 ≈ 198+273-310 = 161px,
-   与 Chatterfly 的 ~170px 基本一致。 */
-/* --- 三种状态: 中间 / 左侧 / 右侧 ---
-   ★★★ 位移的**唯一正确公式**(前几轮一直在凑数字, 现在推导清楚并实测验证过) ★★★
-   变换语义: `transform: translateX(A) scale(sx)` —— 先 scale(关于自身中心, 中心不动),
-             再整体平移 A。所以以主卡中心为原点:
-               侧卡中心 = A,  侧卡半宽 = h = W·sx/2
-               侧卡范围 = [A − h, A + h]
-               被主卡(左缘 −W/2)挡住后, 屏幕露出区 = [A − h, −W/2]
-               ⇒ 露出宽 vis = (−W/2) − (A − h) = h − W/2 − A
-               ⇒ A = h − W/2 − vis
-   而 CSS 里写的 `translateX(calc(-50% - T))` 中, **−50% 是相对元素自身宽度 W 的**
-   (不是相对卡位! 这点极易搞错) ⇒ A = −W/2 − T
-               ⇒ T = −W/2 − A = vis − h = vis − W·sx/2
-   ⚠ 历史坑: v9~v11 一直用 T = vis + h − W/2 之类的式子, 全都多算了一个主卡半宽,
-     导致侧卡被推出老远 —— 实测 translateX(calc(-50% - 236px)) 下侧卡中心
-     离主卡中心 546px(= 310 + 236), 露出宽高达 472px 而不是预期 162px,
-     屏幕上传卡几乎整张露出来(用户截图"这个东西太长了")。
-   ★ 本例 T = 162 − 620×.76/2 = −74 ⇒ 写成 `calc(-50% + 74px)`。 */
+   ★★★ 位移的**唯一正确公式**(别再凭感觉凑数字) ★★★
+     transform: translateX(A) scale(sx) 先 scale(中心不动)再平移 A。
+     以主卡中心为原点(主卡宽 W): 侧卡中心 = A, 侧卡半宽 = h = W·sx/2,
+     被主卡左缘(−W/2)挡住后, 露出宽 vis = h − W/2 − A。
+     而 CSS 的 `translateX(calc(-50% - T))` 中 **−50% 相对元素自身宽 W**
+     (不是相对卡位!) ⇒ A = −W/2 − T ⇒ **T = vis − W·sx/2**。
+     ⚠️ 漏算/多算主卡半宽会让露出宽差出几倍, 务必按上式算。
+     ⚠️ 侧卡缩放必须**等比**(单参数 scale): 写成 scale(x,y) 会把图片拉变形,
+        "看起来竖一点"靠位移控制露出宽度就够了。
+   本例 T = 162 − 620×.85/2 ≈ −102 ⇒ `calc(-50% + 102px)`。 */
 .car-card[data-off="0"] { transform: translateX(0) scale(1); z-index: 3; }
-/* 侧卡横向多收、纵向少收 → "竖着的图片块"而不是扁长条(用户:"这个东西太长了") */
-/* ★★ 必须用**等比** scale(单参数), 绝不能写成 scale(x, y) ★★
-   v12 用了 scale(.76, .94) 想把侧卡做成"竖着的图片块", 结果**图片被拉变形了**
-   (用户反馈"两边的图片都变形了感觉") —— 横向缩 76%、纵向缩 94%,
-   两者不等就把整张图硬压扁: 人变宽、椅子变高, 看着像胖了一圈。
-   等比 scale(.85) 才是正确做法: 侧卡整体小一圈, 宽高比不变。
-   ★ "侧卡看起来竖一点"这个需求, 靠**位移**控制露出宽度就够了,
-     不需要靠拉扁缩放去伪造比例。 */
 .car-card[data-off="-1"] { transform: translateX(calc(-50% + 102px)) scale(.85);
                            z-index: 2; filter: saturate(.74); }
 .car-card[data-off="1"]  { transform: translateX(calc(50% - 102px))  scale(.85);
                            z-index: 2; filter: saturate(.74); }
-/* 再往里一张: 完全隐藏, 只作拖动时的缓冲, 静止时不可见也不可点。
-   T2 = vis2 − h, 这里取 vis2 = −36(负值 = 藏到主卡后面被完全挡住)。 */
+/* 再往里一张: 完全隐藏, 只作拖动时的缓冲。 */
 .car-card[data-off="-2"] { transform: translateX(calc(-50% + 330px)) scale(.78);
                            z-index: 1; opacity: 0; pointer-events: none; }
 .car-card[data-off="2"]  { transform: translateX(calc(50% - 330px))  scale(.78);
                            z-index: 1; opacity: 0; pointer-events: none; }
-/* ★ 侧卡只露图片, 文字区收起 ——
-   卡片是"左文字 + 右图片"结构, 侧卡往旁边偏出去后, 露出来的那条带
-   正好落在文字区里, 于是屏幕上出现"套好手感""思路的记录方式"这种
-   **半截标题**(用户截图, 读起来莫名其妙)。
-   几何上无解: 偏出去的部分永远是卡片的左端, 而图片在右端。
-   所以干脆让侧卡**只显示图片**: 文字区 display:none 让它**彻底脱离网格**,
-   图片区再接管整个卡面。
-
-   ★ 必须是 display:none, **不能用 visibility:hidden** ——
-     visibility 只隐藏绘制, **元素仍占据布局空间**, 于是 .car-body 还在第一行,
-     而 .car-media 的 grid-column:1/-1 被挤到第二行,
-     结果侧卡上方 2/3 是空白色块、只有下方一条有图(用户截图"乱套了")。 */
+/* 侧卡只显示图片: 卡片是"左文字 + 右图片", 偏出去露出的正好是文字区,
+   会出现半截标题; 而图片在右端, 几何上无法让文字端露出完整内容。   ⚠️ 必须 display:none, 不能用 visibility:hidden —— 后者仍占布局空间,
+      会把 .car-media 挤到第二行, 导致侧卡上方大片空白。 */
 .car-card:not([data-off="0"]) .car-body { display: none; }
-/* ★★ 关键: 侧卡的图片区要**贴住被露出的那一条**, 而不是铺满整卡 ★★
-   铺满整卡 + object-fit:cover 时, 图片是按整个卡宽去裁的:
-   人物坐在画面中央, 于是**露出来的那一小条里全是背景**(书架/墙面),
-   人脸恰好落在露边之外 —— 用户截图:"这里人物都看不到啦"。
+/* ★★ 侧卡的图片区必须**贴住被露出的那一条**, 不能铺满整卡 ★★
+   铺满 + cover 时人物坐在画面中央 ⇒ 露出的那一小条里全是背景, 人脸落在露边之外。
 
-   ★★★ 露出端在左右两侧是**相反**的(实测标定, 别再靠推理搞反) ★★★
-     实测(视口 1256, 主卡 [318,938], 侧卡宽 472):
-       · 左侧卡 C[156, 628] → 屏幕可见 [156, 318]
-         → 卡内 x ∈ [0, 162] = **最左 162px** → 媒体区要**贴左**(margin-right:auto)
-       · 右侧卡 C[628, 1100] → 屏幕可见 [938, 1100]
-         → 卡内 x ∈ [310, 472] = **最右 162px** → 媒体区要**贴右**(margin-left:auto)
-     ⚠ 直觉上容易想反(觉得"左边的卡露出右端"), 别再改了 ——
-       写反的症状是: 侧卡露出的那一条是**纯白底色**, 完全看不到图。
+   ⚠️ 露出端左右**相反**(实测标定, 别靠推理改):
+      左卡露出的是**左端** ⇒ 媒体区贴左(margin-right:auto);
+      右卡露出的是**右端** ⇒ 媒体区贴右(margin-left:auto)。
+      写反的症状 = 侧卡露出的那条是**纯白底色**, 完全看不到图。
 
-   ★★ 宽度必须**反除以侧卡缩放比**: width: max(var(--vis) / var(--sx) * 1.04, 150px)
-     ① --vis 是**屏幕视觉宽度**, 而 .car-media 的 CSS 宽度还要被 scale(sx) 再缩一次。
-        直接写 `--vis` 会偏小 —— 例如桌面 vis 162、sx .85 时, 媒体区视觉只有
-        138px < 162px, 露出的右侧会露出一条白边。必须 vis / sx。
-        (CSS 里没法直接用侧卡的缩放值, 所以 --sx 跟 --vis 一起在各断点声明。)
-     ② max(..., 150px) 是**下限**: 窄屏档 --vis 只有 45px, 若严格按比例给,
-        媒体区太窄, cover 渲染出的图里人物的脸会落在容器可视范围之外
-        (只剩一段背景)。给 150px 下限保证人物完整入框,
-        多出来的部分被 .car-card{overflow:hidden} 裁掉 —— 那正是"只露一条"的效果。 */
+   ★ 宽度要**反除以侧卡缩放比**: width: max(var(--vis) / var(--sx) * 1.04, 150px)
+      ① --vis 是屏幕**视觉**宽度, .car-media 还会被 scale(sx) 再缩一次,
+         直接写 --vis 会偏小 ⇒ 露出侧边露白。必须 vis / sx。
+         (CSS 取不到侧卡缩放值, 故 --sx 与 --vis 一起在各断点声明。)
+      ② max(...,150px) 是**下限**: 窄屏 --vis 仅 45px, 严格按比例会让 cover 出的
+         脸落到容器可视范围外。给 150px 保证人物入框, 多出部分被 .car-card
+         的 overflow:hidden 裁掉 —— 那正是"只露一条"的效果。 */
 .car-card:not([data-off="0"]) .car-media {
   grid-column: 1 / -1; grid-row: 1;
   width: max(calc(var(--vis, 162px) / var(--sx, .85) * 1.04), 150px);
@@ -771,12 +601,11 @@ a { color: inherit; text-decoration: none; }
 .car-card[data-off="1"] .car-media,
 .car-card[data-off="2"] .car-media { margin-left: auto; }
 /* 图片在这一小块里 cover 铺满。
-   ★ 横向锚点两侧统一用 **left**, 不要按"朝卡片外侧"去设 right ——
+   ★ 横向锚点统一用 **left**, 不要按"朝卡片外侧"设 right ——
      实测这几张竖图 cover 到 172×303 时渲染成 255 宽, 人物落在渲染图 x 68~179;
-     若用 right(显示渲染图 x∈[83,255]), 露出的右端正好是画面右侧的**空背景**
-     (落地灯/墙面), 人又看不见了(用户截图就是这样)。
+     用 right 只显示 x∈[83,255], 露出的右端正好是画面右侧**空背景**(人又看不见)。
      left 显示 x∈[0,172], 完整覆盖人物区间, 左右两侧都成立。
-   纵向 42%: 这几张 AI 场景照构图偏上(人物头在上 1/3), 略往上抬才对得齐。 */
+   纵向 42%: 这几张 AI 场景照构图偏上(头在上 1/3), 略往上抬才对得齐。 */
 .car-card:not([data-off="0"]) .car-media img {
   transform: none;
   object-position: left 42%;
@@ -801,11 +630,8 @@ a { color: inherit; text-decoration: none; }
 .car-more {
   margin-top: auto; align-self: flex-start;
   font-size: 13px; font-weight: 600; color: var(--ink-3);
-  /* 10-07: 由 emoji 换成 SVG 图标后, 这一行变成 flex 才能让每一个
-     "图标 + 文字"成组、组与组之间用 .car-dot 小圆点分隔。
-     ★ 用 flex + gap 而不是保留原来的" · "字符分隔: 分隔符用字符时,
-       换行位置会落在" ·"后面导致行首出现孤零零的点; 换成 flex 子元素后
-       分隔点与文字是独立 flex item, 换行时不会与图标/文字拆散。 */
+  /* ★ 用 flex + gap 而非 " · " 字符分隔: 字符分隔换行时会落在" ·"后面,
+     行首出现孤零零的点; flex item 分隔则不会与图标/文字拆散。 */
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
 }
 .car-more .tg-ic { width: 14px; height: 14px; flex-shrink: 0; color: var(--blue); }
@@ -814,11 +640,10 @@ a { color: inherit; text-decoration: none; }
   width: 3px; height: 3px; border-radius: 50%; flex-shrink: 0;
   background: currentColor; opacity: .45; margin: 0 2px;
 }
-/* 右半张图: 现在是 640×760 的真实场景照(竖版), 直接**铺满**媒体区。
-   ★ object-position 用 center 50%(居中), **不要再用 32%** ——
-     32% 是早期"图片区只有 273px 宽"时为了保住头顶定的锚点,
-     结果画面整体上移, 人物额头/头顶被切在上边缘(用户截图"人显示不全")。
-     现在图片区有 322px 宽, 居中裁切, 人物从头到胸口完整落在框里。
+/* 右半张图: 640×760 竖版实景照, 直接铺满媒体区。
+   ★ object-position 用 center 50%(居中), **不要用 32%** ——
+     32% 是早期图片区仅 273px 宽时保住头顶的锚点, 会让画面整体上移、
+     人物额头/头顶被切在上边缘。现在图片区 322px 宽, 居中人从头到胸完整入框。
    pointer-events:none 让点图等于点卡, 不让 img 吃掉 click。 */
 .car-media {
   position: relative; overflow: hidden;
@@ -836,20 +661,14 @@ a { color: inherit; text-decoration: none; }
 }
 .car-card[data-off="0"] .car-media img { transform: scale(1.05); }
 
-/* --- 底部圆点: 未选中 = 正圆, 选中 = 一根矩形条(和 Chatterfly 一致) ---
-   ★ 上一版用 `transform: scaleX(3.25)` 把 8px 的圆横向拉长,
-     结果圆角被一起拉成**椭圆**, 用户反馈"这里为啥是椭圆的? 要起码是矩形"。
-     scaleX 是几何变换, 圆角半径也跟着 X 方向放大, 必然出椭圆 ——
-     要矩形就只能**真的改宽度**。
-   ★ v12 曾用负 margin 抵消宽度增量:
-     选中时 width 8→24(+16px), 左右各 margin:-8px 让**占位宽度锁死在 8px**,
-     整排点不重排、只有这根条自己向两侧长出去。
-   ★ v18 去掉这个负边距 —— 它有个致命副作用: 选中条两侧的视觉间隙被吃掉 8px
-     (gap 9 − 8 = **1px**), 用户反馈"这里的间隙太近"(截图箭头正指蓝条与下一个点之间)。
-     现在直接让选中条占满 24px 布局宽度 ⇒ **所有相邻间隙统一 = gap**, 不再有"贴住"感。
-     代价: 选中项变化时整排会随宽度过渡平滑重排(端点最多位移 8px) ——
-     但位移由 width 的 transition 逐帧驱动 flex 重排, 是连续滑动而非跳变, 观感可接受。
-     gap 同时由 9px 提到 12px, 留出更舒展的呼吸感。 */
+/* --- 底部圆点: 未选中 = 正圆, 选中 = 一根矩形条 ---
+   ★ 必须**真的改宽度**, 不能用 `transform: scaleX()` 拉长 8px 圆 ——
+     scaleX 是几何变换, 圆角半径也跟着放大, 必然拉成**椭圆**。
+   ★ 不要用负 margin 抵消宽度增量(选中 width 8→24, 左右各 margin:-8px):
+     会把选中条两侧的视觉间隙吃掉 8px(gap 9 − 8 = **1px**), 出现"贴住"感。
+     直接让选中条占满 24px 布局宽度 ⇒ 相邻间隙统一 = gap。
+     代价: 选中项切换时整排会随宽度过渡平滑重排(端点最多位移 8px),
+     但由 width 的 transition 逐帧驱动 flex 重排, 是连续滑动而非跳变。 */
 .car-dots { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 30px; }
 .car-dot {
   flex: 0 0 auto;
@@ -865,8 +684,8 @@ a { color: inherit; text-decoration: none; }
   width: 24px;
   background: #C3D2E2;          /* 底槽与普通圆点同色, 填进去的蓝才显得出来 */
 }
-/* 选中圆点 = 进度条: 里面这条 .car-fill 从左往右填满, 填满的瞬间换下一张图。
-   时长由 JS 写成 --car-dur(值 = 自动切换间隔 AUTO), 两处同源, 不会走偏。 */
+/* 选中圆点 = 进度条: 里面这条 .car-fill 从左往右填满, 填满瞬间换下一张图。
+   时长由 JS 写成 --car-dur(值 = 自动切换间隔 AUTO), 两处同源不会走偏。 */
 .car-fill {
   position: absolute; inset: 0;
   border-radius: inherit;
@@ -876,7 +695,7 @@ a { color: inherit; text-decoration: none; }
 }
 .car-dot[aria-selected="true"] .car-fill { opacity: 1; }
 .car-dot.is-run .car-fill { animation: carFill var(--car-dur, 4.6s) linear forwards; }
-/* 悬停/拖拽暂停自动播放时, 填充条一起冻住; 松开后由 JS 从头重播, 与定时器重新对齐 */
+/* 悬停/拖拽暂停自动播放时填充条一起冻住; 松开后由 JS 从头重播, 与定时器重新对齐 */
 .car-dots.is-paused .car-dot.is-run .car-fill { animation-play-state: paused; }
 @keyframes carFill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 .car-dot:hover { background: #8FB4D8; }
@@ -893,7 +712,7 @@ a { color: inherit; text-decoration: none; }
   /* 减动效下不自动播(见 JS) ⇒ 进度条不会跑, 直接显示成"填满"的选中态 */
   .car-dot[aria-selected="true"] .car-fill { animation: none; transform: scaleX(1); }
 }
-/* 中屏: 卡片与位移按同比例收一档, 侧卡同样保持"瘦长"的比例
+/* 中屏: 卡片与位移按同比例收一档, 侧卡同样保持"瘦长"比例
    540×.74=400 宽(半宽 200), 位移 = 露出 158 + 200 = 358 → 取 358 */
 @media (max-width: 1140px) {
   .car-stage { max-width: 880px; height: 300px; --vis: 140px; --sx: .85; }
@@ -909,13 +728,11 @@ a { color: inherit; text-decoration: none; }
   .car-tag { padding: 5px 11px; font-size: 11.5px; }
   .car-more { font-size: 12px; }
 }
-/* 窄屏: **不为手机端单独设计版式**, 只是把桌面版整体等比缩小。
-   用户要求"手机端跟电脑端显示效果差不多就行", 所以这里刻意保持
-   "左文字 + 右图片 + 两侧露边" 的同一套结构, 只改尺寸/字号/位移。
+/* 窄屏: **不为手机端单独设计版式**, 只是把桌面版整体等比缩小,
+   刻意保持"左文字 + 右图片 + 两侧露边"的同一套结构, 只改尺寸/字号/位移。
 
    ★ 宽度用百分比(86%), **不能用 100vw** ——
-     body 上有 overflow-x:hidden, 而 100vw 算的是"含滚动条宽度",
-     窄屏下会比 .car-stage 的实际宽度大 15~17px,
+     100vw 算的是"含滚动条宽度", 窄屏下比 .car-stage 实际宽度大 15~17px,
      于是 inset:0 + margin:auto 的居中基准被撑歪, 整张卡偏右、一边露边一边被切。 */
 @media (max-width: 900px) {
   .car-stage { max-width: 88%; height: 250px; --vis: 109px; --sx: .82; }
@@ -930,8 +747,7 @@ a { color: inherit; text-decoration: none; }
          露出宽 = 位移 + (W·sx − W)/2     ← W=卡宽, sx=侧卡横向缩放
          ⇒ 位移 = 目标露出 + (W − W·sx)/2 = 109 + (681 − 681×.70)/2 ≈ 211
        ★ 同时受视口约束: 组宽 = W + 2·露出 必须 ≤ 视口, 否则侧卡被切在屏幕外。
-         900 档: 681 + 2×109 = 899 ≤ 900 ✓ (已经是上限, 不能再多露)
-       之前写 347 是直接把"位移"当成"露出"了, 会让组宽冲到 1153 > 视口 900。 */
+         900 档: 681 + 2×109 = 899 ≤ 900 ✓ (已是上限, 不能再多露) */
   /* T = vis − W·sx/2 = 109 − 681×.82/2 ≈ −170 ⇒ calc(-50% + 170px), 等比缩放 */
   .car-card[data-off="-1"] { transform: translateX(calc(-50% + 170px)) scale(.82); }
   .car-card[data-off="1"]  { transform: translateX(calc(50% - 170px))  scale(.82); }
@@ -947,7 +763,6 @@ a { color: inherit; text-decoration: none; }
   /* 480 档: 卡 389 / 视口 480, 单侧余量仅 (480−389)/2 ≈ 45px。
      位移 = 45 + (389 − 389×.68)/2 ≈ 107。
      再想多露只能让主卡更窄, 但那会挤掉文字 —— 所以窄屏就露这么点。 */
-  /* T = vis − W·sx/2 = 45 − 389×.80/2 ≈ −111 ⇒ calc(-50% + 111px), 等比缩放 */
   .car-card[data-off="-1"] { transform: translateX(calc(-50% + 111px)) scale(.8); }
   .car-card[data-off="1"]  { transform: translateX(calc(50% - 111px))  scale(.8); }
   .car-card[data-off="-2"] { transform: translateX(calc(-50% + 260px)) scale(.72); }
@@ -976,17 +791,13 @@ a { color: inherit; text-decoration: none; }
 .cta h2 { font-size: clamp(26px, 3.4vw, 38px); font-weight: 800; color: #fff; }
 .cta p { margin-top: 16px; color: rgba(255,255,255,.8); font-size: 16.5px; }
 .cta-btns { display: flex; gap: 14px; justify-content: center; margin-top: 34px; flex-wrap: wrap; }
-/* CTA 区是**深蓝底**, 按钮是白底 —— 这里有两种"彩色阴影"可选, 取其一:
-   · 白色投影(旧做法 rgba(0,0,0,.2) 其实是黑投影) → 在白按钮下会显脏、发灰;
-   · **亮蓝光晕**(现做法) → 白按钮坐在深蓝底上, 下方泛出蓝光, 与整个区块同色系,
-     观感是"按钮在发光"而不是"按钮底下有块黑斑"。
+/* CTA 区是**深蓝底**, 按钮是白底 —— 用"亮蓝光晕"而非白色投影:
+   白按钮坐在深蓝底上, 下方泛蓝光与区块同色系, 观感是"按钮发光"而非"底下有块黑斑"。
    ★ 深底上的光晕不透明度要比浅底上**更高**才看得出来(深蓝本就吃光),
      所以这里给到 .5/.38, 比首屏浅底那组(.45/.4)更实。 */
 .cta .btn-p {
   background: #fff; color: var(--navy);
-  /* ★ 10-07 收小(与 .btn-dl 同步, 用户: "旁边的白色那个你还没改呢"):
-     原 5px/16px .5 + 14px/38px .38 → 3px/9px .38 + 8px/20px .26, 偏移也一并收。
-     白按钮在深蓝底上本就很跳, 光晕再大就成了"一圈雾", 收小后只留贴边一层蓝光。 */
+  /* ★ 白按钮在深蓝底上本就很跳, 光晕再大就成了"一圈雾", 只留贴边一层蓝光。 */
   box-shadow: 0 3px 9px rgba(120,200,255,.38), 0 8px 20px rgba(60,160,255,.26);
 }
 .cta .btn-p:hover {
@@ -1000,9 +811,7 @@ a { color: inherit; text-decoration: none; }
 .btn-dl {
   background: var(--blue); color: #fff;
   /* 深底上的蓝按钮: 用"亮天蓝"光晕(比本体蓝更亮), 否则蓝压蓝、光晕看不出来。
-     ★ 10-07 第 2 版(收小): 原 6px/18px .55 + 16px/42px .45 光晕"太大了"(用户反馈),
-        收到 3px/10px .40 + 8px/22px .28, 偏移也同步从 6px/16px 收到 3px/8px。
-        —— 同「浅底光晕规律」: 不只要缩 blur 半径, y 偏移要一起缩, 否则仍显得"往下掉"。 */
+     ★ 同「浅底光晕规律」: 不只要缩 blur 半径, y 偏移要一起缩, 否则仍显得"往下掉"。 */
   box-shadow: 0 3px 10px rgba(60,170,255,.40), 0 8px 22px rgba(0,150,255,.28);
 }
 .btn-dl:hover {
@@ -1021,8 +830,7 @@ a { color: inherit; text-decoration: none; }
 .foot-in { display: flex; flex-wrap: wrap; gap: 16px 20px; justify-content: space-between; align-items: center; }
 .foot small { color: var(--ink-3); font-size: 13.5px; }
 /* 页脚链接组: 把「开源仓库 / 使用说明」收成一组, 让 .foot-in 保持三段布局
-   (左 logo | 中链接组 | 右版权)。直接加第 4 个子项会被 space-between 均匀摊开。 */
-.foot-links { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; }
+   (左 logo | 中链接组 | 右版权)。直接加第 4 个子项会被 space-between 均匀摊开。 */.foot-links { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 22px; }
 .foot-gh,
 .foot-doc {
   display: inline-flex; align-items: center; gap: 6px;
@@ -1038,7 +846,7 @@ a { color: inherit; text-decoration: none; }
 /* ---------- 响应式 ---------- */
 @media (max-width: 1240px) {
   /* 中等宽度: 隐藏信息价值低的纯锚点项, 只留核心几项。
-     8 项 + logo + 2 按钮在 1280 容器下会溢出叠字(用户截图), 这一档专门兜住。 */
+     8 项 + logo + 2 按钮在 1280 容器下会溢出叠字, 这一档专门兜住。 */
   .nav-links a[data-opt] { display: none; }
   .nav-links { gap: 18px; }
 }
@@ -1061,24 +869,19 @@ a { color: inherit; text-decoration: none; }
   .split { gap: 40px; }
 }
 @media (max-width: 900px) {
-  /* 手机端: 导航收进抽屉。做成整屏卡片式菜单, 比窄条下拉好用得多。
-     ★ 透明→毛玻璃的逻辑与桌面端一致, 这里只覆盖两点:
-       ① 导航高度收到 60px(同时更新 --nav-h, hero 留白/scroll-padding 跟着变);
-       ② 抽屉是 fixed 导航的子元素, 抽屉本身不透明, 所以**抽屉打开时导航必须
-          换成实底** —— 否则导航条是透明的, 背后滚动的内容会直接透出来,
-          和下面白色抽屉拼在一起非常乱。 */
+  /* 手机端: 导航收进抽屉(整屏卡片式菜单)。
+     ★ 抽屉打开时导航必须换成**实底** —— 抽屉是不透明的白色,
+       导航若保持透明, 背后滚动的内容会透出来和抽屉拼在一起, 非常乱。 */
   :root { --nav-h: 60px; }
   .nav-in { height: var(--nav-h); gap: 12px; }
   .logo { font-size: 18px; }
   .nav-toggle { display: grid; }
   /* 抽屉: 挂在 .nav(fixed)下用 absolute 定位。
      不用 fixed —— 祖先 .wrap 有 max-width, fixed 会以 wrap 为包含块,
-     在窄屏下算出的 left/right 会偏, 导致抽屉被裁掉一半。 */
-  /* 抽屉打开态: 给导航补一层实底 + 分隔线。
-     两个选择器并存 —— `.nav:has(.nav-links.open)` 是纯 CSS 方案,
+     left/right 算出的值会偏, 导致抽屉被裁掉一半。 */
+  /* 抽屉打开态: 两个选择器并存 —— `.nav:has(.nav-links.open)` 是纯 CSS 方案,
      `.nav.is-drawer` 是 JS 兜底(见 index.html 的 setOpen):
-     :has() 在 Safari 15.3 以下 / 一些安卓 WebView 里整条规则不解析,
-     那时导航会保持透明, 背后滚动的内容直接透出来, 和白色抽屉拼在一起很乱。 */
+     :has() 在 Safari 15.3 以下 / 一些安卓 WebView 里整条规则不解析。 */
   .nav:has(.nav-links.open),
   .nav.is-drawer {
     background: rgba(255, 255, 255, .97);
@@ -1120,8 +923,7 @@ a { color: inherit; text-decoration: none; }
     text-align: center; color: var(--ink-2); font-weight: 600;
   }
   .nav-links a.nav-menu-gh:active { background: var(--nav-hover); color: var(--navy); }
-  /* 抽屉底部补一个购买入口, 让手机端也能转化 */
-  .nav-links::after {
+  /* 抽屉底部补一个购买入口, 让手机端也能转化 */  .nav-links::after {
     content: '立即购买'; display: block; margin-top: 12px;
     padding: 15px 18px; border-radius: 12px; text-align: center;
     background: var(--orange); color: #fff; font-size: 16px; font-weight: 700;
@@ -1154,68 +956,54 @@ a { color: inherit; text-decoration: none; }
 /* ============================================================
    ★★★ 等比缩放: 窄屏覆盖区 (必须放在文件最末尾) ★★★
    ============================================================
-   目的: 窄屏时把上面所有 @media (max-width:...) 的响应式改动
-   **全部作废**, 让页面始终以桌面版布局排版, 再由 .vk-scale 整体缩放。
+   目的: 窄屏时把上面所有 @media (max-width:...) 的响应式改动**全部作废**,
+   让页面始终以桌面版布局排版, 再由 .vk-scale 整体缩放。
 
-   ★★ 这里媒体查询的阈值(1400px)**故意写得比真正的切换点(1280)宽**:
-     真正的开关是 <html> 上的 .vk-fixed 类, 由 JS 按 clientWidth 判定。
+   ★★ 媒体查询阈值(1400px)**故意写得比真正的切换点(1280)宽**:
+     真正的开关是 <html> 上的 .vk-fixed 类, 由 JS 按 clientWidth 判定;
      媒体查询只负责"这段样式在窄屏候选区间内可以生效", 不负责判定。
-     若这里写 1280, 会与 JS 判据错位:
-       JS 用 clientWidth(<1280 才缩放), CSS 用视口宽(<=1280 才匹配)。
-       窗口 1281px 时 clientWidth=1266 ⇒ JS 认为要缩放, 但视口 1281 > 1280
-       ⇒ 媒体查询不匹配 ⇒ 画布拿不到 width:1280, 仍是 100%(=1266),
-       于是"按 1266 的画布、用 1266/1280 的比例缩放", 桌面宽度下平白缩小一截。
-     阈值放宽到 1400 后, 1281~1400 这一段媒体查询也能匹配,
-     此时是否真的缩放完全由 JS 的 .vk-fixed 决定 —— 单一判据, 不再错位。
+     若这里写 1280 会与 JS 判据错位: clientWidth 已扣滚动条约 15px,
+     窗口 1281px 时 clientWidth=1266 ⇒ JS 判定要缩放, 但视口 1281 > 1280
+     ⇒ 媒体查询不匹配 ⇒ 画布拿不到 width:1280, 桌面宽度下平白缩小一截。
      (>1400 的窗口必然 clientWidth>1280, 不可能进入缩放, 放宽不会误伤。)
 
-   ★ 每条规则都带 `html.vk-fixed` 前缀, 而不只依赖媒体查询:
-     媒体查询只管"匹配与否", 不加前缀的话规则优先级与原始断点同级,
-     靠"写在文件末尾、后来者居上"也能赢 —— 但那依赖书写顺序, 很脆。
-     显式加 `html.vk-fixed` 把优先级提到 (0,1,1), 稳赢原始断点的 (0,1,0);
-     以后有人在文件更后面追加样式也不会意外盖掉这里的规则。 */
+   ★ 每条规则都带 `html.vk-fixed` 前缀: 显式把优先级提到 (0,1,1), 稳赢
+     原始断点的 (0,1,0) —— 否则只靠"写在末尾、后来者居上"很脆。 */
 @media (max-width: 1400px) {
   /* ---- 0. 画布: 钉成设计稿宽度 1280px ----
-     ★ 为什么必须写死 1280, 而不是写 100%:
-       JS 用 k = clientWidth / 1280 缩小。要让"缩放后正好铺满 clientWidth",
-       就必须满足   画布宽 × k = clientWidth
-       ⇒            画布宽 = clientWidth / k = clientWidth / (clientWidth/1280) = 1280
-       所以画布宽**恒等于 1280**, 与视口多宽无关 —— 这是等比缩放的数学前提。
-       父级 .vk-scale-outer 是普通块容器, 不会压缩子元素; 这里再补 max-width:none
-       兜住"子元素被某个 max-width 限制"的意外, 保证画布稳定是 1280。
-       超出视口的部分由 transform: scale() 收回, 不产生横向滚动。 */
+     ★ 必须写死 1280 而非 100%: JS 用 k = clientWidth / 1280 缩小, 要让
+       "缩放后正好铺满 clientWidth" 就必须满足 画布宽 × k = clientWidth
+       ⇒ 画布宽 = clientWidth / k = 1280, **与视口多宽无关** —— 等比缩放的数学前提。
+       补 max-width:none 兜住"被子元素 max-width 限制"的意外。
+       超出视口的部分由 scale() 收回, 不产生横向滚动。 */
   html.vk-fixed .vk-scale { width: 1280px; max-width: none; }
 
   /* ---- 1. 导航容器 ----
-     900 档把 --nav-h 改成 60px、logo 缩到 18px、nav-in gap 收成 12px,
-     这里全部还原成桌面值(--nav-h 的桌面值就是 :root 里的 64px)。
-     ⚠️ 在 :root 级别的 .vkk-fixed 下重声明 --nav-h 会污染 __ROOT__,
-        所以改绑到 html.vk-fixed —— html 就是根元素, 效果等价但不覆盖 :root 块。 */
+     ⚠️ 不要在 :root 级别的 .vk-fixed 下重声明 --nav-h(会污染 __ROOT__),
+        改绑 html.vk-fixed —— html 就是根元素, 效果等价但不覆盖 :root 块。 */
   html.vk-fixed { --nav-h: 64px; }
   html.vk-fixed .nav-in { height: var(--nav-h); gap: 16px; }
   html.vk-fixed .logo { font-size: 19px; }
 
   /* ---- 2. 导航定位 ----
-     transform 会创建包含块, 里面的 position:fixed 退化为"相对 .vk-scale 固定"
-     ⇒ 窄屏下改用 absolute, 视觉上仍贴页面顶部且随整页缩放。
-     (代价: 不再吸顶, 见文件顶部 .vk-scale 注释) */
+     transform 创建包含块, 内部 position:fixed 退化为"相对 .vk-scale 固定"
+     ⇒ 窄屏下改用 absolute。(代价: 不再吸顶, 见文件顶部 .vk-scale 注释) */
   html.vk-fixed .nav { position: absolute; }
 
   /* ---- 3. 导航: 撤销汉堡抽屉, 恢复横向链接条 ----
-     ⚠️ 开关类是 .nav-toggle(不是 .nav-burger), 见 L179。 */
+     ⚠️ 开关类是 .nav-toggle(不是 .nav-burger)。 */
   html.vk-fixed .nav-toggle { display: none; }
   html.vk-fixed .nav-cta,
   html.vk-fixed .nav-app,
   html.vk-fixed .nav-gh { display: inline-flex; }
-  /* 1240 档收窄的 gap 与 1080 档被隐藏的次要点, 一并还原 */
   html.vk-fixed .nav-links { gap: 20px; }
   html.vk-fixed .nav-links a[data-opt] { display: inline; }
   html.vk-fixed .nav-links a.nav-menu-app,
   html.vk-fixed .nav-links a.nav-menu-gh { display: none; }
   /* 关闭态抽屉(900 档)还原成静态横向条。
-     ⚠️ 900 档同时写了 `.nav-links` 与 `.nav-links.open` 两套,
-        都要覆盖: 未打开的抽屉默认 transform:translateX(100%)、opacity:0、
-        pointer-events:none —— 不覆盖就会"导航菜单整条不可见/不可点"。 */
+     ⚠️ 900 档同时写了 `.nav-links` 与 `.nav-links.open` 两套, 都要覆盖:
+        未打开的抽屉默认 transform:translateX(100%)、opacity:0、pointer-events:none
+        —— 不覆盖就会"导航菜单整条不可见/不可点"。 */
   html.vk-fixed .nav-links,
   html.vk-fixed .nav-links.open {
     position: static; display: flex; flex-direction: row;
@@ -1238,10 +1026,7 @@ a { color: inherit; text-decoration: none; }
   html.vk-fixed .nav.is-drawer { background: transparent; border-bottom-color: transparent; }
 
   /* ---- 4. 首屏: 还原两栏左对齐 ----
-     1080/1024/860 三档都改过 .hero-in, 逐项还原:
-       · 1080: 单列 + 居中 + padding 60/68
-       · 1024: 1fr 340px + gap:36px   ← 上轮漏了 gap, 导致左栏被多算 12px
-       · 860:  单列 + 居中 + padding 56/64 + hero-vis order:-1
+     1080/1024/860 三档都改过 .hero-in, 逐项还原。
      ⚠️ gap 必须显式写回 48px, 否则 1024 档的 36px 会残留。 */
   html.vk-fixed .hero-in {
     grid-template-columns: minmax(0, 1fr) 380px;
@@ -1249,41 +1034,36 @@ a { color: inherit; text-decoration: none; }
     text-align: left;
     padding: calc(76px + var(--nav-h)) 24px 84px;
   }
-  /* ⚠️⚠️ 关键: 首屏标题与副标题用的是 clamp(..., Nvw, ...) ——
-       vw 永远跟着**视口宽**走, 不认容器宽。1280 画布在 390px 手机上排版时,
-       视口仍是 390 ⇒ 取到 clamp 的下限(34px / 16px), 而桌面取上限(50px / 19px),
-       于是"缩小后"标题会明显偏小、与桌面不一致 —— 这正是对比测试抓到的差异。
-       修法: 缩放模式下把这两处**钉死成桌面上限值**, 让 vw 彻底不起作用。 */
+  /* ⚠️⚠️ 关键: 首屏 h1 与副标题是 clamp(..., Nvw, ...) —— vw 只认**视口宽**,
+       不认容器宽。1280 画布在 390px 手机上排版时视口仍是 390 ⇒ 取 clamp 下限,
+       于是"缩小后"标题明显偏小。修法: 钉死成桌面上限值, 让 vw 彻底不起作用。 */
   html.vk-fixed .hero h1 { font-size: 50px; line-height: 1.2; }
   html.vk-fixed .hero-sub { font-size: 19px; line-height: 1.7; margin-left: 0; margin-right: 0; }
   /* 桌面基础是 `justify-content: normal`(flex 里等同 flex-start)。
-     显式写回 normal, 而不是 flex-start —— 虽然视觉等价, 但保持与桌面
-     逐字节一致, 省得以后再对比时又是一堆"看起来相同实则不同"的噪音。 */
+     显式写回 normal 而非 flex-start —— 视觉等价, 但保持与桌面逐字节一致,
+     省得以后对比时又是一堆"看起来相同实则不同"的噪音。 */
   html.vk-fixed .hero-tags,
   html.vk-fixed .hero-btns { justify-content: normal; }
   html.vk-fixed .hero-vis { order: 0; }
-  /* 桌面: width:auto; max-width:260px; max-height:440px
-     860 档改成 max-width:260px 叠加 1080 档的 max-width:220px + max-height:320px,
-     这里必须把三个值都写全, 只写 max-width 会漏掉 max-height。 */
+  /* 桌面: width:auto; max-width:260px; max-height:440px。
+     ⚠️ 三个值都要写全, 只写 max-width 会漏掉 max-height。 */
   html.vk-fixed .hero-vis img { width: auto; max-width: 260px; max-height: 440px; }
-  /* 桌面基础是 300px(1080 档 260 / 860 档 280 / 我上轮误写 340) */
   html.vk-fixed .hero-ring { width: 300px; height: 300px; }
 
   /* ---- 5. 首屏光斑: 还原桌面尺寸 ----
-     900 档把 4 个光斑整体缩小内收(免得糊满手机屏)。缩放方案下不需要,
-     还原成基础值, 否则 1280 画布上光斑会显得只有中间一小团。 */
+     900 档把 4 个光斑整体缩小内收, 缩放方案下不需要 ——
+     不还原的话 1280 画布上光斑会只有中间一小团。 */
   html.vk-fixed .hero::before { width: 620px; height: 620px; right: -140px; top: -180px; }
   html.vk-fixed .aurora-b1 { width: 560px; height: 560px; left: -120px; top: -110px; }
   html.vk-fixed .aurora-b2 { width: 480px; height: 480px; right: -90px; top: 150px; }
   html.vk-fixed .aurora-b3 { width: 460px; height: 460px; left: 32%; bottom: -70px; }
 
-  /* ---- 5. ★ 流体字号: 全部钉死成桌面上限 ----
-     全站有 7 处 clamp(a, Nvw, b) 流体字号(vw 认视口宽, 不认容器宽)。
-     窄屏下视口只有 375~430px ⇒ 全部取到下限, 比桌面小一大截,
-     整体缩完就会"标题比桌面版明显瘦小", 与"等比缩小"的预期不符。
-     统一钉成 clamp 的上限值 = 1281px 桌面下的实际取值。
-       来源: L314 h1 / L335 hero-sub / L465 sec-head h2 / L466 sec-head p
-             L489 split-txt h3 / L490 split-txt > p / L535 narrow .lead / L969 cta h2
+  /* ---- 5b. ★ 流体字号: 全部钉死成桌面上限 ----
+     全站 8 处 clamp(a, Nvw, b) 流体字号(vw 认视口宽不认容器宽)。
+     窄屏视口只有 375~430px ⇒ 全部取到下限, 比桌面小一大截, 缩完就"明显瘦小"。
+     统一钉成 clamp 上限值 = 1281px 桌面下的实际取值。
+       h1 / hero-sub / sec-head h2 / sec-head p / split-txt h3 / split-txt > p
+       / narrow .lead / cta h2
      ⚠️ 以后新增 clamp 字号, 必须在这里补一条, 否则又会"缩完偏小"。 */
   html.vk-fixed .sec-head h2 { font-size: 40px; }
   html.vk-fixed .sec-head p { font-size: 17.5px; }
@@ -1294,8 +1074,7 @@ a { color: inherit; text-decoration: none; }
 
   /* ---- 6. 通用栅格: 全部还原桌面列数 ----
      ⚠️ 一律用 minmax(0, 1fr) 而非 1fr: 栅格默认 min-width:auto,
-        子项里的不换行内容(如 h1 的 AI&nbsp;效率)会把列撑宽导致整行溢出。
-        这条是本项目踩过的坑, 桌面基础样式里也是这么写的。 */
+        子项里的不换行内容(如 h1 的 AI&nbsp;效率)会把列撑宽导致整行溢出。 */
   html.vk-fixed .grd-4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   html.vk-fixed .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   html.vk-fixed .split { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 64px; }
@@ -1313,13 +1092,10 @@ a { color: inherit; text-decoration: none; }
   html.vk-fixed .gh-btn { width: auto; flex-shrink: 0; justify-content: normal; }
 
   /* ---- 7. 轮播: 还原桌面尺寸与位移 ----
-     ⚠️⚠️ 这里**不要**自己编数字。轮播的尺寸与位移是联动的:
+     ⚠️⚠️ 这里**不要**自己编数字。轮播尺寸与位移是联动的:
          露出宽 = 位移 + (W·sx − W)/2, 且组宽 = W + 2·露出 必须 ≤ 视口。
-         各档历史值都是按这个公式算的, 缩放方案下唯一正确的做法是
-         **原样还原桌面基础值**(L634/L662/L700-718), 让 1280 画布内的构图
-         保持与桌面完全一致, 再由 scale() 统一缩小。
-         (上一版这里手写了 height:700px / width:1016px, 全是错的 ——
-          既把 max-width 当成了卡宽, 又和 --vis/--sx 对不上。) */
+         缩放方案下唯一正确的做法是**原样还原桌面基础值**,
+         让 1280 画布内的构图与桌面完全一致, 再由 scale() 统一缩小。 */
   html.vk-fixed .car-stage {
     max-width: 1016px; height: 322px;
     --vis: 162px; --sx: .85;
@@ -1333,13 +1109,14 @@ a { color: inherit; text-decoration: none; }
   html.vk-fixed .car-body p { font-size: 13.8px; line-height: 1.7; }
   html.vk-fixed .car-tag { padding: 5px 12px; font-size: 12px; }
   html.vk-fixed .car-more { font-size: 13px; }
+  /* T = vis − W·sx/2 = 162 − 620×.85/2 = 102 ⇒ calc(-50% + 102px), 等比缩放 */
   html.vk-fixed .car-card[data-off="-1"] { transform: translateX(calc(-50% + 102px)) scale(.85); }
   html.vk-fixed .car-card[data-off="1"]  { transform: translateX(calc(50% - 102px))  scale(.85); }
   html.vk-fixed .car-card[data-off="-2"] { transform: translateX(calc(-50% + 330px)) scale(.78); }
   html.vk-fixed .car-card[data-off="2"]  { transform: translateX(calc(50% - 330px))  scale(.78); }
 
   /* ---- 8. 滚动出现动画 ----
-     窄屏一屏看到的是"缩小后的整页", IntersectionObserver 在缩放容器里
-     可触发区域会变窄, 容易让人误以为"内容没加载"。窄屏直接全部置为已进入。 */
+     窄屏一屏看到的是"缩小后的整页", 缩放容器里 IntersectionObserver 可触发区域
+     会变窄, 容易让人误以为"内容没加载"。窄屏直接全部置为已进入。 */
   html.vk-fixed .rv { opacity: 1; transform: none; }
 }
