@@ -1,0 +1,14 @@
+import os
+from building import *
+
+cwd = GetCurrentDir()
+sifli_sdk = os.getenv('SIFLI_SDK')
+path = [cwd]
+if sifli_sdk:
+    path.append(os.path.join(sifli_sdk, 'middleware', 'dfu'))
+
+# Add source code
+src = Glob('*.c')
+group = DefineGroup('Applications', src, CPPPATH = path, depend = [''])
+
+Return('group')

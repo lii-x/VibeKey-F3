@@ -1,0 +1,147 @@
+config ASIC
+    bool
+    default y
+
+menu "[VibeKey-F3] Board Config"
+    menuconfig BSP_USING_KEYS
+        bool "Enable KEYs Support"
+        default n
+        if BSP_USING_KEYS
+        
+            menuconfig BSP_USING_KEY_C1
+                bool "Use KEY C1 (Center key 1)"
+                default n
+                if BSP_USING_KEY_C1
+                    config BSP_KEY_C1_PIN
+                        int "KEY_C1 pin number"
+                        default 99
+                    config BSP_KEY_C1_ACTIVE_HIGH
+                        bool "Level is high if key is pressed"
+                        default n
+                endif
+
+            menuconfig BSP_USING_KEY_C2
+                bool "Use KEY C2 (Center key 2)"
+                default n
+                if BSP_USING_KEY_C2
+                    config BSP_KEY_C2_PIN
+                        int "KEY_C2 pin number"
+                        default 99
+                    config BSP_KEY_C2_ACTIVE_HIGH
+                        bool "Level is high if key is pressed"
+                        default n
+                endif
+            menuconfig BSP_USING_KEY_C3
+                bool "Use KEY C3 (Center key 3)"
+                default n
+                if BSP_USING_KEY_C3
+                    config BSP_KEY_C3_PIN
+                        int "KEY_C3 pin number"
+                        default 99
+                    config BSP_KEY_C3_ACTIVE_HIGH
+                        bool "Level is high if key is pressed"
+                        default n
+                endif
+            
+            menuconfig BSP_USING_KEY_L1
+                bool "Use KEY L1 (Left side key 1)"
+                default n
+                if BSP_USING_KEY_L1
+                    config BSP_KEY_L1_PIN
+                        int "KEY_L1 pin number"
+                        default 99
+                    config BSP_KEY_L1_ACTIVE_HIGH
+                        bool "Level is high if key is pressed"
+                        default n
+                endif
+
+            menuconfig BSP_USING_KEY_L2
+                bool "Use KEY L2 (Left side key 2)"
+                default n
+                if BSP_USING_KEY_L2
+                    config BSP_KEY_L2_PIN
+                        int "KEY_L2 pin number"
+                        default 99
+                    config BSP_KEY_L2_ACTIVE_HIGH
+                        bool "Level is high if key is pressed"
+                        default n
+                endif
+
+            menuconfig BSP_USING_KEY_L3
+                bool "Use KEY L3 (Left side key 3)"
+                default n
+                if BSP_USING_KEY_L3
+                    config BSP_KEY_L3_PIN
+                        int "KEY_L3 pin number"
+                        default 99
+                    config BSP_KEY_L3_ACTIVE_HIGH
+                        bool "Level is high if key is pressed"
+                        default n
+                endif
+
+            menuconfig BSP_USING_EC_KEY
+                bool "Use EC KEY"
+                default n
+                if BSP_USING_EC_KEY
+                    config BSP_EC_KEY_PIN
+                        int "EC KEY pin number"
+                        default 99
+                    config BSP_EC_KEY_ACTIVE_HIGH
+                        bool "Level is high if key is pressed"
+                        default n
+                endif
+
+    endif  # BSP_USING_KEYS
+
+    menu "LEDs Configuration"
+        config BSP_LED1_PIN
+            int "LED1 pin number"
+            default 99
+        config BSP_LED1_ACTIVE_HIGH_ENABLE
+            bool "Level is high if LED is on"
+            default y
+        config BSP_LED1_ACTIVE
+            int
+            default 1 if BSP_LED1_ACTIVE_HIGH_ENABLE
+            default 0
+        
+        config BSP_LED2_PIN
+            int "LED2 pin number"
+            default 99
+        config BSP_LED2_ACTIVE_HIGH_ENABLE
+            bool "Level is high if LED is on"
+            default n
+        config BSP_LED2_ACTIVE
+            int
+            default 1 if BSP_LED2_ACTIVE_HIGH_ENABLE
+            default 0
+
+        config BSP_LED3_PIN
+            int "LED3 pin number"
+            default 99
+        config BSP_LED3_ACTIVE_HIGH_ENABLE
+            bool "Level is high if LED is on"
+            default y
+        config BSP_LED3_ACTIVE
+            int
+            default 1 if BSP_LED3_ACTIVE_HIGH_ENABLE
+            default 0
+        
+        config BSP_LED4_PIN
+            int "LED4 pin number"
+            default 99
+        config BSP_LED4_ACTIVE_HIGH_ENABLE
+            bool "Level is high if LED is on"
+            default n
+        config BSP_LED4_ACTIVE
+            int
+            default 1 if BSP_LED4_ACTIVE_HIGH_ENABLE
+            default 0
+
+    endmenu #"LEDs Configuration"
+
+    config BT_DEVICE_NAME
+        string "Bluetooth device name"
+        default "VibeKey-F3"
+
+endmenu #"[VibeKey-F3] Board Config"

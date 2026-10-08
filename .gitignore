@@ -4,12 +4,25 @@
 #  注：固件与上位机的**真机产物**（.bin）走 Gitee Release 附件分发，不入库。
 # ============================================================================
 
-# ---- 固件源码：整体不入库（2026-10-03 起）----
-# 仓库已转公开，固件源码（含引脚表、SDK 授权点等内部信息）不宜公开。
-# 用 `git rm -r --cached Firmware` 只从索引移除，**本地文件全部保留**，
-# 继续在本地正常改固件；GitHub 上只留 Firmware/.gitkeep 占位保住目录结构。
-Firmware/**
-!Firmware/.gitkeep
+# ---- 固件源码：已入库（2026-10-09 起）----
+# ★ 决策变更留痕：2026-10-03 ~ 10-08 期间这里是 `Firmware/**` 整体排除，
+#   理由是"仓库已转公开，固件源码（含引脚表、SDK 授权点等内部信息）不宜公开"。
+#   用户 2026-10-09 明确要求把固件源码一并提交公开，与官网既有表述
+#   「VibeKey-F3 的网页上位机与固件资料均已公开」对齐，故改为入库。
+#   ⚠️ 已知后果（用户已确认）：会公开 boards/ 下的引脚表(bsp_pinmux.c)
+#      与 flash 分区表(ptab.json)；且一旦推送即进入 git 历史，事后难以真正撤回。
+# ⚠️ SDK 本身不在仓库内（位于仓库外的 A:\OpenSiFli\SiFli-SDK），
+#    只有构建时生成的 project/build_*/sifli_sdk 副本，那些属于产物、已忽略。
+#
+# 仍然排除的固件相关路径：
+#   · Firmware/project/build_*/   —— scons 构建产物（.o/.elf/.map/.hex/.bin，占 86MB）
+#   · Firmware/project/.sconsign.dblite —— scons 依赖数据库（8MB 纯缓存）
+#   · Firmware/.workbuddy/        —— 本地工作目录（27 篇日志 + .bak 备份）
+#   这四条分别由下方"构建输出目录""scons 中间产物"段落，以及全局 `.workbuddy/` 覆盖；
+#   这里再显式写一遍是为了"看得见"——免得日后有人只扫这一段就以为源码里没有产物。
+Firmware/project/build_*/
+Firmware/project/.sconsign.dblite
+Firmware/.workbuddy/
 
 # ---- 内部工具/工作目录：整体不入库（2026-10-03 起）----
 # tools/ —— Gitee Release 打包脚本，属内部发布链，不随公开仓库分发
