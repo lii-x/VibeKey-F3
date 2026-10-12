@@ -125,11 +125,23 @@ static uint8_t *hid_gatts_get_cbk(uint8_t conn_idx, uint8_t idx, uint16_t *len)
     return ret;
 }
 
+static void ble_hid_kb_send_held(void);   /* 前向声明: 供 CCCD 订阅回调做重同步 */
+
 static uint8_t hid_gatts_set_cbk(uint8_t conn_idx, sibles_set_cbk_t *para)
 {
     switch (para->idx) {
     case HID_IDX_KB_REPORT_NTF_CFG:
         g_hid_env.kb_ntf_enabled = *(para->value);
+        /* ★ 2026-10-12: 主机订阅键盘通知(重连/首次)后【按当前按住集合重同步】一次。
+         * 场景: 长按式语音(按住=ALT down, 松开=ALT up) —— 若 BLE 在按住期间掉线,
+         * "松开"发不出去, 电脑会一直以为 ALT 按着 ⇒ 语音输入掐不掉 + ALT 卡住。
+         * 断连期间 press/release 仍维护 g_kb_held(见下), 故此处重建的即是【当前真实状态】:
+         *   · 已松开 ⇒ 报告为空 ⇒ 电脑收到 ALT up ⇒ 语音停止 ✓
+         *   · 仍按着 ⇒ 报告含 ALT ⇒ 语音继续 ✓
+         * ⚠️ 必须用 send_held 重建, 不能重发 last_kbd_report —— 后者在断连期间
+         *    (keyboard_send 早退)并未更新, 是过期状态。 */
+        if (g_hid_env.kb_ntf_enabled)
+            ble_hid_kb_send_held();
         break;
     case HID_IDX_MS_REPORT_NTF_CFG:
         g_hid_env.ms_ntf_enabled = *(para->value);
@@ -218,13 +230,59 @@ static void ble_hid_kb_clear_held(void)
     }
 }
 
+/* ⚠️ kb_held_dump() 的定义必须放在 KB_TX_LOG 宏【之后】(见下方 keyboard_send 前),
+ * 否则 #if KB_TX_LOG 看不到宏 -> 整段被静默编译掉(这个坑本文件已踩两次)。 */
+
+/* ⚠️ 2026-10-12 临时诊断开关: 打印每一次键盘报告的【实际内容】与【被丢弃的原因】。
+ * 起因: 用户"单击 C1 一次, 语音却自己断了"，而从 `[KB] tx rsp` 数不出真实发送条数
+ * (该日志只在写成功时出现, 发失败/被跳过不留痕) ⇒ 无法判断电脑到底收到几次 ALT。
+ *   1 = 开启(每次按键打 1~2 行; 调试完请改回 0, 否则打字会刷屏)
+ *   0 = 关闭
+ * ⚠️ 必须定义在 ble_hid_keyboard_send() 定义之前, 否则 #if 看不到宏会静默编译掉。 */
+#define KB_TX_LOG 1
+
+#if KB_TX_LOG
+/* ★ 2026-10-12 临时诊断: 打印"当前按住集合"快照。
+ * 用途: 用户报"C3 改键后多按几次就没值" —— 症状指向【集合被逐渐占满】
+ * (HID_HELD_MAX=8 满了之后 `if (empty < 0) return;` 会静默丢弃所有按键)。
+ * 看 `total=` 是否随按键次数单调上升即可判定; 方括号里列出每个占位项,
+ * 能直接看出是哪一对 (modifier,keycode) 没被释放、以及它的 ref 是否在涨。
+ * 另两个关键标记: press-FULL = 集合满导致按下被丢弃; rel-MISS = 松开没找到对应项。 */
+static void kb_held_dump(const char *tag)
+{
+    int n = 0;
+    rt_kprintf("[KB] held@%s:", tag);
+    for (int i = 0; i < HID_HELD_MAX; i++) {
+        if (g_kb_held[i].ref > 0) {
+            rt_kprintf(" [%d]m=%02x k=%02x r=%d", i,
+                       g_kb_held[i].modifier, g_kb_held[i].keycode, g_kb_held[i].ref);
+            n++;
+        }
+    }
+    rt_kprintf(" total=%d/%d\n", n, HID_HELD_MAX);
+}
+#else
+#define kb_held_dump(tag) ((void)0)
+#endif
+
 static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len)
 {
-    if (!g_hid_env.is_connected || !g_hid_env.kb_ntf_enabled) return;
+    if (!g_hid_env.is_connected || !g_hid_env.kb_ntf_enabled) {
+#if KB_TX_LOG
+        /* 被丢弃也要留痕: 否则"没发出去"和"发了没回执"在日志上完全一样 */
+        rt_kprintf("[KB] TX-SKIP mod=0x%02x (conn=%d ntf=%d)\n",
+                   modifier, g_hid_env.is_connected, g_hid_env.kb_ntf_enabled);
+#endif
+        return;
+    }
     ble_hid_wait_tx_pkt();   /* 通话中 TX 池易满: 等归还再发, 防静默丢包 */
     uint8_t report[8]; report[0] = modifier; report[1] = 0x00;
     for (int i = 0; i < 6; i++) report[i + 2] = (i < len) ? keys[i] : 0x00;
     memcpy(g_hid_env.last_kbd_report, report, sizeof(report));
+#if KB_TX_LOG
+    rt_kprintf("[KB] TX mod=0x%02x keys=%02x %02x %02x %02x %02x %02x\n",
+               report[0], report[2], report[3], report[4], report[5], report[6], report[7]);
+#endif
     sibles_value_t value = { .hdl = g_hid_env.hid_handle, .idx = HID_IDX_KB_REPORT_VAL, .len = sizeof(report), .value = report };
     sibles_write_value(g_hid_env.conn_idx, &value);
     ble_hid_kb_arm_retry();   /* 进入确认窗口: 未收到 RSP 则周期补发(见下) */
@@ -244,6 +302,17 @@ static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len)
  * ble_hid_flush_pending() 一次性补发最后状态(射频释放必送达)。 */
 #define KB_TX_RETRY_MS 300
 #define KB_TX_RETRY_MAX 4
+/* ⚠️⚠️ 2026-10-12 临时测试开关（用户要求："先不补发，正常按几次就发几次"）:
+ *   1 = 关闭键盘报告冗余补发 —— 每次按键/松开只发 1 条报告, 不再补 KB_TX_RETRY_MAX-1 次。
+ *   0 = 恢复原行为（原始 1 次 + 每 300ms 补发, 共 4 次）。
+ * 测试完把这里改回 0 即可, 其余代码无需改动。
+ * 代价提醒: 关掉后单条报告若在空口丢失 = "这次按键没生效"(无重试兜底)。
+ * 注意 SCO(语音)期间本来就跳过补发, 所以本开关主要影响【非 SCO 时点】——
+ * 而"按 C1 启动语音"那一下恰在最需要送达的时刻, 测试时请留意是否偶发不触发。 */
+#define KB_TX_RETRY_DISABLED 1
+
+/* 临时诊断开关 KB_TX_LOG 定义在 ble_hid_keyboard_send() 之前(约文件上方),
+ * 必须早于使用点, 否则 #if 看不到宏会整段编译掉。 */
 static uint8_t g_kb_retry_left = 0;
 static rt_timer_t g_kb_retry_timer = RT_NULL;
 
@@ -278,6 +347,10 @@ static void ble_hid_kb_arm_retry(void)
                                            RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
         if (!g_kb_retry_timer) return;
     }
+    if (KB_TX_RETRY_DISABLED) {
+        g_kb_retry_left = 0;   /* 测试开关: 不补发, 一次按键 = 一条报告 */
+        return;
+    }
     g_kb_retry_left = KB_TX_RETRY_MAX - 1;   /* 原始提交已发 1 次, 冗余补发 MAX-1 次 */
     rt_timer_stop(g_kb_retry_timer);
     rt_timer_start(g_kb_retry_timer);
@@ -295,7 +368,13 @@ void ble_hid_kb_tx_reset(void)
 {
     g_kb_retry_left = 0;
     if (g_kb_retry_timer) rt_timer_stop(g_kb_retry_timer);
-    ble_hid_kb_clear_held();   /* 08-27: 断连清按住集合, 防重连后残留 */
+    /* ★ 2026-10-12: 【不再】清 g_kb_held!
+     * 原实现 "08-27: 断连清按住集合, 防重连后残留" 会引入一个更糟的后果:
+     * 设备把自己也"忘了" —— 长按式按键(如 C1=ALT)在断连期间用户松开时,
+     * release_key 因集合已被清空而找不到项, 重连后也无从补发 "ALT up",
+     * 电脑端修饰键永久卡住、语音输入掐不掉(实测场景)。
+     * 改为: 断连保留集合(press/release 在断连期间仍维护它, 见其实现),
+     * 重连/订阅后由 hid_gatts_set_cbk 按当前集合重建下发, 天然自愈。 */
 }
 
 /* SCO(语音)断开后补发最后 HID 状态：通话中射频被 SCO 抢占, 键盘 up/鼠标按钮
@@ -385,9 +464,9 @@ void ble_hid_mouse_scroll_down(void)
 
 void ble_hid_keyboard_press_key(uint8_t modifier, uint8_t keycode)
 {
-    if (!g_hid_env.is_connected) return;
-    /* keycode 0 + modifier 0 = 完全无键, 丢弃; 但 keycode 0 + modifier≠0 是合法
-     * "纯修饰键"(如 C1 默认 LCtrl+LShift+LWin), 必须保留, 否则 C1 不发任何报告 */
+    /* ★ 2026-10-12: 【不再】因未连接而直接 return —— 断连期间仍须维护按住集合,
+     * 否则重连后无法判断该补发哪些键(长按式按键会永久卡在主机侧)。
+     * 真正的发送由 ble_hid_keyboard_send() 内部按 is_connected/kb_ntf_enabled 保护。 */
     if (modifier == 0 && keycode == 0) return;
 
     /* 已按住则引用计数+1(状态未变, 仍重发一次确保对端一致), 否则找空槽填入 */
@@ -397,22 +476,31 @@ void ble_hid_keyboard_press_key(uint8_t modifier, uint8_t keycode)
             && g_kb_held[i].keycode == keycode) {
             g_kb_held[i].ref++;
             ble_hid_kb_send_held();
+            kb_held_dump("press+ref");
             return;
         }
         if (empty < 0 && g_kb_held[i].ref == 0) empty = i;
     }
-    if (empty < 0) return;   /* 集合已满(>8), 丢弃本次按下 */
+    if (empty < 0) {
+        /* ⚠️⚠️ 集合已满 ⇒ 本次按下被静默丢弃。用户报的"C3 多按几次就没值"
+         * 若走到这里, 就是集合被泄漏占满(注意 "press-FULL" 这行)。 */
+        kb_held_dump("press-FULL");
+        return;
+    }
     g_kb_held[empty].modifier = modifier;
     g_kb_held[empty].keycode  = keycode;
     g_kb_held[empty].ref      = 1;
     ble_hid_kb_send_held();
+    kb_held_dump("press");
 }
 
 /* 释放单个键: 从集合移除(引用计数归零才真正移除)并发送剩余完整报告。
  * 这样 C2+C3 同时按下时松开 C2, 不会误释放仍按着的 C3。 */
 void ble_hid_keyboard_release_key(uint8_t modifier, uint8_t keycode)
 {
-    if (!g_hid_env.is_connected) return;
+    /* ★ 2026-10-12: 同 press_key —— 断连期间也要把"松开"记进集合(不发送),
+     * 这样重连后重同步才能正确地把 ALT up 补发给电脑。 */
+    int exact = 0;   /* 是否真的找到并释放了对应项(诊断用, 见 kb_held_dump) */
     for (int i = 0; i < HID_HELD_MAX; i++) {
         if (g_kb_held[i].ref > 0 && g_kb_held[i].modifier == modifier
             && g_kb_held[i].keycode == keycode) {
@@ -422,10 +510,15 @@ void ble_hid_keyboard_release_key(uint8_t modifier, uint8_t keycode)
                 g_kb_held[i].modifier = 0;
                 g_kb_held[i].keycode  = 0;
             }
+            exact = 1;
             break;
         }
     }
     ble_hid_kb_send_held();   /* 发送当前剩余(可能为空)的完整报告 */
+    /* "rel-MISS" = 松开时【没找到】对应的按住项 ⇒ 按下/松开这一对的
+     * (modifier,keycode) 不一致 ⇒ 该项会永久留在集合里(ref 只增不减) ⇒
+     * 几次之后集合占满, 所有键盘键失效。这就是"C3 没值"最可能的形态。 */
+    kb_held_dump(exact ? "rel" : "rel-MISS");
 }
 
 void ble_hid_keyboard_release(void)

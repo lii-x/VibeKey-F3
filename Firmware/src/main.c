@@ -2692,7 +2692,24 @@ int main(void)
                          * 控制流程 1~2s)本身会扰动链路, 撞上按完键继续移动的
                          * 鼠标 → "短按 C1 鼠标就一卡一卡"(08-26 实测定案)。 */
                         extern volatile uint16_t g_ble_cur_interval;
-                        if (g_ble_cur_interval > 20)   /* >25ms 才需要收紧 */
+                        /* ⚠️ 必须同时要求"空中鼠标活跃"(2026-10-12 定案: 待机 +0.3mA 的根因)
+                         * 本条的用途 = "语音中 sco_quiet 把 BLE 拉宽到 40~80ms, C1 松开时
+                         * 提前收紧, 让语音结束后鼠标立刻跟手"。这只在【活跃】(鼠标真在用)
+                         * 时才成立 —— 因为活跃态之后必然会走 active→idle, 由
+                         * air_mouse_set_active(0) → ble_app_conn_param_relax_idle()
+                         * 把连接参数放回宽间隔。
+                         * 但【空闲态】BLE 本来就是宽间隔(relax 16~32 = 20~40ms), 同样满足
+                         * `>20` ⇒ 空闲时按 C1 语音会被误收紧到 15ms; 而空闲态【不会再走
+                         * active→idle 转换】(IDLE 分支的唤醒受 g_key2_active 门控, 而"进入
+                         * 空闲"时刚好把 g_key2_active 清 0) ⇒ relax_idle() 永不触发
+                         * ⇒ BLE 被永久钉在 15ms。
+                         * 实测取证(apw dump 新增的 LINK 行):
+                         *   语音前 ble_interval=30(37.5ms) → 语音后 ble_interval=12(15ms),
+                         *   射频唤醒频率 26.7→66.7 次/秒, 电流 1.4-1.5 → 1.7-1.8mA,
+                         *   且与 HDIV/bandgap/eSCO 全部无关(均已逐一证伪)。
+                         * 加 air_mouse_is_active() 门控即消除这个不对称: 活跃时照旧收紧,
+                         * 空闲时不动(BLE 保持宽间隔)。 */
+                        if (g_ble_cur_interval > 20 && air_mouse_is_active())
                             ble_app_conn_param_tighten();
                     }
                     /* 08-27 多键修复: 释放单键(用与按下相同的 modifier),

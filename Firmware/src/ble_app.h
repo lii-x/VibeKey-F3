@@ -57,6 +57,7 @@ void ble_app_exit_sniff_for_call(void);
  * main.c 的 mouse_send_thread 据此自适应发送节拍(max(10ms, 间隔ms+2ms)),
  * 语音期 sco_quiet 宽间隔下不超发不丢帧(08-26)。 */
 extern volatile uint16_t g_ble_cur_interval;
+extern volatile uint16_t g_ble_cur_supvto;   /* 监督超时 ×10ms (reason=8 断连的直接变量) */
 
 /* HFP(经典蓝牙免提)链路连接状态查询(power.c RC 重校门控用) */
 uint8_t ble_app_hfp_connected(void);
