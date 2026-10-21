@@ -18,5 +18,8 @@ void ble_led_cfg_reply(uint8_t conn_idx, const uint8_t *data, uint16_t len);
 #define LED_STATE_BUSY    1
 #define LED_STATE_DONE    2
 #define LED_STATE_ERROR   3
+/* 10-21: 蓝灯(手动测试用)。蓝灯物理上就是 LED1(PA5) —— 按 bt_slot.h 的归属约定
+ * LED1 属 bt_slot(充电指示/鼠标故障闪烁), 本服务只占 LED2/3/4, 故此态是【借用】。 */
+#define LED_STATE_BLUE    4
 
 #endif

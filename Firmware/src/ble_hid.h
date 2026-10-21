@@ -29,6 +29,13 @@ void ble_hid_mouse_scroll_up(void);
 void ble_hid_mouse_scroll_down(void);
 void ble_hid_keyboard_press_key(uint8_t modifier, uint8_t keycode);
 void ble_hid_keyboard_release_key(uint8_t modifier, uint8_t keycode);
+
+/* ★ 2026-10-12: 按"物理键源"索引的版本(推荐新代码使用)。
+ * src 由调用方给(一般用按键索引: 0..2=C1..C3, 3..5=L1..L3, 6=EC)。
+ * 与 press_key/release_key 的区别: 幂等且按源区分 —— 丢事件能自愈, 且
+ * "两个不同物理键映射到同一 (modifier,keycode)"时互不影响。 */
+void ble_hid_keyboard_press_src(uint8_t src, uint8_t modifier, uint8_t keycode);
+void ble_hid_keyboard_release_src(uint8_t src);
 void ble_hid_keyboard_release(void);
 /* 08-27 多键修复: press/release_key 各自增删"按住集合"中的一个键并发送完整报告,
  * 支持同时按下多个键(如 C2+C3); release() 为兼容接口, 释放全部(断连清理用)。 */

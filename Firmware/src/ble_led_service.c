@@ -142,6 +142,16 @@ static void led_timer_tick(void *param)
      *   让位; 08-29 充电收敛到 LED1 后忘了同步删, 变成"无冲突却仍拦截" ——
      *   插电时 app 推送的 state 被静默吞掉: GATT 回调照常打 [LED SVC] state=N,
      *   但定时器每次提前 return, LED2/3/4 永远不会被点亮。 */
+    /* ★ 2026-10-21 蓝灯态借用 LED1(PA5)。按 bt_slot.h 的归属约定: LED1 属 bt_slot
+     * (充电指示 / 鼠标故障闪烁), 本文件只占 LED2/3/4。手动测试"蓝灯"必须借 LED1:
+     *   · 进入蓝灯态: 直接点亮(充电中本就亮, 无副作用);
+     *   · 离开蓝灯态: 仅在【未充电 && 无故障闪烁】时才熄灭, 不抢占 bt_slot 的用途。
+     * 注意 led_status() 走原始电平; LED 为高电平点亮(BSP_LED*_ACTIVE=1),
+     * 故熄灭要写 !BSP_LED1_ACTIVE(与 led_init 一致)。 */
+    if (g_led_state != LED_STATE_BLUE
+        && !bt_multi_charge_active() && !bt_multi_mouse_error_active())
+        led_status(BSP_LED1_PIN, !BSP_LED1_ACTIVE);
+
     switch (g_led_state)
     {
     case LED_STATE_BUSY:    //忙碌
@@ -160,6 +170,11 @@ static void led_timer_tick(void *param)
         //led_apply_color(COLOR_RED);
         led_status_mutex(BSP_LED4_PIN,1);
         /* 持续亮灯，无需 50ms 刷新。停定时器省功耗，下次 set_state 恢复。*/
+        rt_timer_stop(&g_led_timer);
+        break;
+    case LED_STATE_BLUE:    //蓝灯(借用 LED1/PA5; led_status_mutex 顺带清掉黄绿红)
+        led_status_mutex(BSP_LED1_PIN, 1);
+        /* 与黄/绿/红一样是持续亮灯, 无需 50ms 刷新。*/
         rt_timer_stop(&g_led_timer);
         break;
     default:
@@ -184,9 +199,11 @@ static uint8_t led_gatts_set_cbk(uint8_t conn_idx, sibles_set_cbk_t *para)
 {
     if (para->idx == LED_CHAR_VAL && para->len >= 1) {
         uint8_t state = para->value[0];
-        // 0/1/2/3 为 LED 状态机（WAITING 已移除，不再接受）
+        // 0/1/2/3/4 为 LED 状态机（WAITING 已移除，不再接受）
+        // ★ 10-21: 新增 LED_STATE_BLUE(4)。此处是白名单, 漏加会导致蓝灯命令被静默丢弃。
         if (state == LED_STATE_OFF || state == LED_STATE_BUSY
-            || state == LED_STATE_DONE || state == LED_STATE_ERROR) {
+            || state == LED_STATE_DONE || state == LED_STATE_ERROR
+            || state == LED_STATE_BLUE) {
             ble_led_set_state(state);
             rt_kprintf("[LED SVC] state=%d\n", state);
         }

@@ -38,6 +38,17 @@ volatile uint8_t g_sco_active = 0;
  * 都不超发不丢帧(08-26 根治, 取代事件驱动的慢节拍标志)。 */
 volatile uint16_t g_ble_cur_interval = 40;
 
+/* 当前 BLE 监督超时(×10ms)。2026-10-12 新增: 这是 `reason=8(conn timeout)` 断连的
+ * 直接变量 —— `sco_quiet` 把它放宽到 3200(32s, 规范上限)以容忍 SCO 抢射频;
+ * 若该协商未被手机确认, 链路会一直用旧的短超时, 被 SCO 饿过 32s 就断。
+ * 此前只跟踪 con_interval、超时完全没观测 ⇒ 断连根因不可见。 */
+volatile uint16_t g_ble_cur_supvto = 0;
+
+/* ★ 2026-10-12: 本次语音是否已经切过 sco_quiet(给 SCO 让路)。
+ * 两个触发点(VF active 提前切 + SCO_CONNECTED 兜底)应只协商一次 ——
+ * 重复发起 LL 参数协商本身会扰动链路。在"语音结束 / BLE 断连"时清零。 */
+static uint8_t g_sco_quiet_on = 0;
+
 /* VF(语音识别)会话进行中: 由 BT_NOTIFY_HF_VOICE_RECOG_STATUS_CHANGE 事件维护.
  * 用于区分"语音助手会话"与"正常通话" —— 只有 VF 会话才允许强制拆 SCO
  * 兜底结束语音(否则会把正常通话拆断). */
@@ -50,11 +61,18 @@ static uint8_t g_vf_retry_left = 0;   /* >0: 下一轮再试 BVRA=0; ==0: 再下
 static rt_timer_t g_vf_retry_timer = RT_NULL;
 static rt_timer_t g_esco_idle_timer = RT_NULL;   /* HFP 连上无通话, 延迟拆空闲 eSCO */
 static void esco_idle_teardown_cb(void *param);   /* 前向声明(定义见文件后部) */
+static void esco_idle_teardown_schedule(void);    /* 前向声明(定义见文件后部) */
+static void ble_app_voice_end_pm_restore(void);   /* 前向声明(定义见文件后部) */
 
-/* 语音(SCO)活跃期间 BLE 断开: 延迟重启广播, 避免广播与 SCO 抢同一射频.
- * 见文件后部定义(ble_app_wakeup_advertise 之后). */
-static void sco_adv_defer_start(void);
-static void sco_adv_defer_cancel(void);
+/* 2026-10-12: 旧的"语音中 BLE 断开 → 延迟广播 + 30s 兜底定时器"机制已【整体移除】。
+ * 两处原因:
+ *   ① 语义错: 语音开关是 C1 → BLE HID 发 ALT 键 → 电脑输入法。BLE 一掉 ALT 就发不出去,
+ *      用户【被彻底锁死】(停不了语音、SCO 干挂、Active ~3mA), 本地再按 C1 也没用
+ *      (HFP 的 AT+BVRA=0 停的是手机端 VF, 与电脑输入法无关)。⇒ 必须立即恢复广播。
+ *   ② 实现错: 该兜底挂在【软定时器】上, 而"BLE RF 活动会饿死 soft timer 线程"
+ *      (本文件 ble_boot_timeout_thread 的注释早写明)。实测 30s 兜底从未触发,
+ *      广播拖到 191s 后才恢复 ⇒ 一次掉线被放大成 ~3 分钟高功耗。
+ * 现在统一走 BLE_GAP_DISCONNECTED_IND 里的【立即】ble_app_wakeup_advertise()。 */
 
 /* 编码器启停（连接时启、断连即停，避免 1ms 轮询定时器常驻阻断 HPSYS 深睡） */
 extern void enc_start(void);
@@ -854,7 +872,14 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
         case BT_NOTIFY_COMMON_SCO_DISCONNECTED: // SCO断开完成事件
             LOG_I("[APP] HFP HF audio_disconnected");
             LOG_I("[HFP][DIAG] SCO_DISCONNECTED -> g_sco_active=0 (SCO down: ACL free to Sniff, expect ~1.5mA)");
+            /* ★ 先取旧值再清零(2026-10-12 死循环教训): 本事件有两个来源, 必须区分:
+             *   ① 真实语音会话结束 —— g_sco_active 原为 1, 需要重新武装 eSCO 拆除;
+             *   ② 我们自己拆"挂空 eSCO"引发的断开 —— 此时 g_sco_active 已是 0。
+             * 曾无条件在此武装 ⇒ 拆 eSCO → << Audio disconnect → 本事件 → 再武装,
+             * 自我喂养成死循环(实测每 ~22s 一轮、共 11 轮, 链路被反复顶成 Active)。 */
+            uint8_t sco_was_active = g_sco_active;
             g_sco_active = 0;   /* 通话结束：允许 RC 周期重校定时器恢复 */
+            g_sco_quiet_on = 0; /* 语音结束: 解除"sco_quiet 已切", 下次语音重新协商 */
             g_vf_active = 0;    /* SCO 断开, VF 会话必然结束 */
             g_vf_retry_left = 0;             /* 语音已结束, 停 BVRA=0 复查/拆 SCO 兜底 */
             if (g_vf_retry_timer) rt_timer_stop(g_vf_retry_timer);
@@ -864,14 +889,39 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             ble_hid_flush_pending();
             bt_addr_convert_to_bts((bd_addr_t *)g_hid_env.peer_addr, &g_sniff_bd);
             hfp_request_sniff_delayed(100);
+            /* ★ 语音结束后重新武装一次"挂空 eSCO"拆除(2026-10-12 实测定案):
+             * 语音结束时栈把 eSCO 从 0x7(音频中)退回 0x5
+             * (日志 `HF device_sco_state new_sate 0x 5, old_state 0x 7`), 重新生成
+             * 那条"挂空 eSCO"(栈在 HFP 建立时自动 open 的) —— 它占经典蓝牙时隙,
+             * 使 BR/EDR 反复弹 Active/Sniff(电流 1.4↔3.0 横跳), 且 ACL 语音后要
+             * **268~331 秒**才回得到 sniff(三版日志均复现)。
+             * ⚠️ 必须用 sco_was_active 门控(见上方取值处): 拆除动作自身会引发一次
+             * SCO_DISCONNECTED, 无条件武装会死循环 —— 已实测踩过。
+             * 安全: 若 2.5s 内又开语音, 回调触发时 g_sco_active==1 会 SKIP, 不误拆通话 eSCO。 */
+            if (sco_was_active)
+                esco_idle_teardown_schedule();
+            /* ★ 语音结束后恢复空闲 WFI 分频(2026-10-12 定案, 待机 +0.3mA 的根因):
+             * `pm_scenario_start(AUDIO)` 把 DWCFGR.HDIV 设 1；而 `pm_scenario_stop(AUDIO)`
+             * 在 SF32LB52X 上【固定设 12】(bf0_pm.c:3323)，并不恢复空闲值 60。
+             * 二者写的是同一个寄存器字段(`bf0_hal_rcc.c:2509 SetDeepWFIDiv` → DWCFGR.HDIV),
+             * 也正是 `apw dump` 打印的 HDIV ⇒ 语法/寄存器双向闭环。
+             * 换算(据 main.c 自身注释): div 12 ≈ 20MHz、div 60 = 4MHz(base 240MHz)。
+             * main.c 顶部原文"使 50ms 周期内 ~96% 空闲进 LIGHT(WFI 4MHz)" ⇒ 4MHz 才是设计空闲态。
+             * ⇒ 语音后 HCPU 在 LIGHT/WFI 期间跑 20MHz 而非 4MHz(5 倍) ⇒ 实测待机 1.4-1.5 → 1.7-1.8mA。
+             * 实测取证: 语音前 DWCFGR=0x0000903c(HDIV=60) → 语音后 0x0000900c(HDIV=12), 且复现。
+             * ⚠️ `apw dump` 其余各项(3A/run_mode/FORCE_HP/codec/REFGEN/LPSYS_LDO)全干净,
+             *    极易误判成 BT 侧问题(本工程已在这上面走过弯路)。
+             * USB 在线时 main.c:104 有意持 12(CDC 时延敏感)，不可恢复；仅离线时恢复。
+             * (拔线路径 main.c:122 已设 60，本条补的是"语音结束且 USB 一直离线"这条没人管的路径。) */
+            ble_app_voice_end_pm_restore();
             /* 按当前活动状态恢复 BLE 参数: 活跃→tighten(7.5~15ms 跟手),
              * 空闲→relax(20~40ms 省电). 不能无条件 relax——活跃态鼠标被降
              * 到 25Hz 会掉帧(SDK 更新解决 SCO 共存后此问题凸显). */
             ble_app_conn_param_by_activity();
-            /* 语音结束: 若 BLE 在语音中断开(处于延迟广播), 电脑刚结束语音最
-             * 有空回连 → 立即恢复广播(取消 30s 兜底定时器). BLE 未断时
-             * wakeup_advertise 内部有 is_connected 保护, 无副作用. */
-            sco_adv_defer_cancel();
+            /* 语音结束: 若 BLE 在语音中断开, 电脑刚结束语音最有空回连 → 恢复广播.
+             * (2026-10-12: BLE 断开时已改为【立即】广播, 此处只是幂等补一次;
+             *  原先的 sco_adv_defer_cancel 随延迟广播机制一并移除。)
+             * BLE 未断时 wakeup_advertise 内部有 is_connected 保护, 无副作用. */
             if (!g_hid_env.is_connected) {
                 LOG_I("[BLE] SCO ended, restore advertise for re-connect");
                 ble_app_wakeup_advertise();
@@ -923,16 +973,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             /* 防御: HFP 连上无通话, 2.5s 后拆掉空闲 eSCO(见 esco_idle_teardown_cb),
              * 让 BR/EDR 稳定进 Sniff(消除 Active/Sniff 横跳). 排在 sniff 请求(2s)
              * 之后, 确保先请求 sniff 再拆 eSCO, 避免 eSCO 残留阻挡 sniff 生效. */
-            if (!g_esco_idle_timer) {
-                g_esco_idle_timer = rt_timer_create("esco_idle",
-                    esco_idle_teardown_cb, RT_NULL,
-                    rt_tick_from_millisecond(ESCO_IDLE_TEARDOWN_MS),
-                    RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
-            }
-            if (g_esco_idle_timer) {
-                rt_timer_stop(g_esco_idle_timer);
-                rt_timer_start(g_esco_idle_timer);
-            }
+            esco_idle_teardown_schedule();
             break;
         case BT_NOTIFY_HF_PROFILE_DISCONNECTED: // HFP免提配置文件断开完成事件
             LOG_I("[APP] HFP disconnected");
@@ -965,12 +1006,15 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
                  * 静放一会才正常"的根因, 08-26)。发送节拍由 main.c 按
                  * g_ble_cur_interval 自适应, 此处无需另行通知。 */
                 if (sco_was_active) {
+                    /* 与 SCO_DISCONNECTED 路径同一收尾: 语音结束恢复空闲 WFI 分频。
+                     * 通话中 HFP 直接掉线时 SCO_DISCONNECTED 可能不派发, 需在此兜底,
+                     * 否则 pm_scenario_stop 留在 HDIV=12 无人恢复。 */
+                    ble_app_voice_end_pm_restore();
                     ble_app_conn_param_by_activity();
                 }
                 /* HFP/SCO 断开兜底(08-26): SCO 依附经典 ACL, HFP 断开则通话必
-                 * 已结束 —— 若语音中 BLE 断开处于延迟广播, 现在恢复(电脑有空
-                 * 回连). 与 SCO_DISCONNECTED 路径二选一, 谁先到谁恢复. */
-                sco_adv_defer_cancel();
+                 * 已结束 —— 若语音中 BLE 断开, 现在恢复(电脑有空回连).
+                 * 与 SCO_DISCONNECTED 路径二选一, 谁先到谁恢复. */
                 if (!g_hid_env.is_connected) {
                     LOG_I("[BLE] HFP down, restore advertise for re-connect");
                     ble_app_wakeup_advertise();
@@ -1052,6 +1096,16 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             if (info && info->payload_len >= 1) {
                 g_vf_active = (info->payload[0] != 0);
                 LOG_I("[HFP] VF %s", g_vf_active ? "active" : "inactive");
+                /* ★ 2026-10-12: VF 变 active = 语音真的开始了 ⇒ 【立即】给 SCO 让路。
+                 * 实测: sco_quiet 原先只在 SCO_CONNECTED 才请求, 而"VF active → SCO 建好"
+                 * 隔了 8.5s、参数协商生效又 4.6s ⇒ 语音开头 ~13s BLE 一直跑 37.5ms 抢射频
+                 * ⇒ SCO 上行被饿 ⇒ `msbc uplink full` 刷屏 ⇒ **麦克风没声音**(实测症状)。
+                 * 用 VF active(而不是"按下 C1")作触发点: 前者只在真正进入语音时才来, 不会
+                 * 像 08-26 那版"C1 按下预切"那样误伤鼠标(main.c:2612 记载已撤)。 */
+                if (g_vf_active)
+                    ble_app_conn_param_sco_quiet();
+                else
+                    g_sco_quiet_on = 0;   /* 本次语音结束, 允许下次重新协商 */
             }
             break;
         }
@@ -1328,40 +1382,8 @@ void ble_app_wakeup_advertise(void)
     adv_grace_start(rt_tick_from_millisecond(ADV_GRACE_WINDOW_MS));
 }
 
-/* 语音(SCO)活跃期间 BLE 断开的广播策略 (08-26):
- * SCO 是周期实时流, 广播/扫描类射频活动会与它争抢 2.4GHz 时隙 → 加剧
- * "msbc rx errcnt 100%" 收错; 且电脑接收器 SCO 期间本就没空回连 BLE。
- * 因此语音中 BLE 断开【不立即广播】, 等 SCO 结束(电脑刚空出来, 最有空
- * 回连)由 SCO_DISCONNECTED/HFP_DISCONNECTED 立即广播; 本定时器仅作兜底
- * (30s): 防 SCO 断开事件丢失导致广播永不重启 —— 语音一般远短于 30s,
- * 若超时语音仍在, 恢复广播的代价(短暂共存)远小于永久静默。 */
-#define SCO_ADV_DEFER_MS 30000
-static rt_timer_t g_sco_adv_defer_timer = RT_NULL;
-static void sco_adv_defer_cb(void *param)
-{
-    g_sco_adv_defer_timer = RT_NULL;
-    if (!g_hid_env.is_connected) {
-        LOG_I("[BLE] SCO-adv defer timeout(%dms), restoring advertise", SCO_ADV_DEFER_MS);
-        ble_app_wakeup_advertise();
-    }
-}
-static void sco_adv_defer_start(void)
-{
-    if (!g_sco_adv_defer_timer) {
-        g_sco_adv_defer_timer = rt_timer_create("sco_adv", sco_adv_defer_cb, RT_NULL,
-            rt_tick_from_millisecond(SCO_ADV_DEFER_MS),
-            RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
-    }
-    if (g_sco_adv_defer_timer) rt_timer_start(g_sco_adv_defer_timer);
-}
-static void sco_adv_defer_cancel(void)
-{
-    if (g_sco_adv_defer_timer) {
-        rt_timer_stop(g_sco_adv_defer_timer);
-        rt_timer_delete(g_sco_adv_defer_timer);
-        g_sco_adv_defer_timer = RT_NULL;
-    }
-}
+/* (2026-10-12) 原"语音中 BLE 断开延迟广播 + 30s 软定时器兜底"实现已在此删除,
+ * 改为 BLE_GAP_DISCONNECTED_IND 里立即 ble_app_wakeup_advertise()。理由见文件前部注释。 */
 
 #ifdef FINSH_USING_MSH
 #include <finsh.h>
@@ -1372,6 +1394,36 @@ static int adv_start(void)
     return 0;
 }
 MSH_CMD_EXPORT(adv_start, restart BLE advertising (for testing))
+
+/* ★ 2026-10-12: 手动拆一次"挂空 eSCO"，用于语音后 A/B 测电流（一步定生死）。
+ *
+ * 背景：语音后 +0.3mA 排查到目前——HDIV 修好无效、bandgap(apw bg)无效、
+ * `apw diff` 证明 HCPU 侧所有**使能位**语音后全是关的(10 个变化项全是分频/音量/
+ * 延时选择等纯配置位，无害) ⇒ **问题不在 HCPU 可见的音频寄存器里，在 LCPU/控制器侧**。
+ *
+ * 首要假设(最早的判断，中途被一个弱证据误否，现重新启用)：
+ *   语音结束时栈把 eSCO 从 0x7(音频中)退回 0x5
+ *   (日志 `HF device_sco_state new_sate 0x 5, old_state 0x 7`)，重新生成一条
+ *   "挂空 eSCO"(栈在 HFP 建立时自动 open 的那条) —— 它占经典蓝牙时隙，
+ *   既让 ACL 语音后 **268s** 才回到 sniff(两次日志均实测到)，也让小核持续醒着。
+ *   与 +0.3mA 的关联：`power.c:1581` 判据 "lcpu_sleep=0 ⇒ 电流必在 mA 级"，
+ *   而 `PMUC.LPSYS_LDO/SWR.RDY` 语音前稳定 0、语音后偏 1(=LP 域在供电)，
+ *   正是 `power.c:1447` 记录的"语音残留"签名。
+ *
+ * 用法：语音后电流 1.7-1.8mA 时敲 `hfp_teardown`，看电流是否掉回 1.4-1.5mA。
+ *   · 掉了 ⇒ 实锤。接着把 re-arm 接回 SCO_DISCONNECTED，**必须带 sco_was_active 门控**
+ *          （否则拆除动作自身引发的 SCO_DISCONNECTED 会再武装 → 自反馈死循环，已踩过）。
+ *   · 没掉 ⇒ eSCO 排除，转向 LCPU 侧(用 lpstat 连续观察 lcpu_sleep)。 */
+static int hfp_teardown(void)
+{
+    int ret;
+    rt_kprintf("[HFP] manual teardown: g_hfp_connected=%d g_sco_active=%d g_vf_active=%d\n",
+               g_hfp_connected, g_sco_active, g_vf_active);
+    ret = bt_interface_audio_switch(1);   /* 1 = disconnect audio(eSCO) */
+    rt_kprintf("[HFP] bt_interface_audio_switch(1) ret=%d (0=submitted)\n", ret);
+    return 0;
+}
+MSH_CMD_EXPORT(hfp_teardown, tear down HFP audio(eSCO) once - A/B current test);
 #endif
 
 /* HFP timer（定义见文件前部：hfp_connect_timer_cb / hfp_*_schedule） */
@@ -1470,6 +1522,9 @@ void ble_app_conn_param_by_activity(void)
 void ble_app_conn_param_sco_quiet(void)
 {
     if (!g_hid_env.is_connected) return;
+    /* ★ 2026-10-12: 一次语音只协商一次(见 g_sco_quiet_on 注释)。 */
+    if (g_sco_quiet_on) return;
+    g_sco_quiet_on = 1;
     /* 通话中 BLE 拉长到 40~80ms(空事件, 占射频极短)给 SCO 让路; latency 0
      * 保证挂断后鼠标恢复跟手; timeout 3200(32s 规范上限)容忍低频期被 SCO
      * 挤占的事件缺口, 防 reason 8 断连, 通话结束参数恢复后自动回正常。 */
@@ -1570,7 +1625,19 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         {
             ble_gap_update_conn_param_ind_t *pind = (ble_gap_update_conn_param_ind_t *)data;
             if (pind && pind->con_interval)
+            {
                 g_ble_cur_interval = pind->con_interval;
+                g_ble_cur_supvto = pind->sup_to;
+                /* 打出来。判读要点: 语音中 `[BLE] conn param SCO-quiet` 之后若**没有**
+                 * 本行, 说明 40~80ms/32s 那组参数没被手机确认 ⇒ 链路仍在用旧短超时
+                 * ⇒ 长语音(>32s)必被 SCO 饿断(reason=8)。实测第一段 52s 语音正是如此。 */
+                LOG_I("[BLE] conn param applied: interval=%u(%u.%02ums) latency=%u sup_to=%u(%u.%02us)",
+                      pind->con_interval,
+                      (unsigned)(pind->con_interval * 5 / 4), (unsigned)(pind->con_interval * 5 % 4 * 25),
+                      pind->con_latency,
+                      pind->sup_to,
+                      (unsigned)(pind->sup_to / 100), (unsigned)(pind->sup_to % 100));
+            }
         }
         /* 设备重启后手机回连 BLE: 连接→加密→MTU→服务发现→参数协商(~13s)
          * 期间手机无暇响应 BR/EDR page(实测设备主动连撞上 → ACL 建立被拖
@@ -1589,6 +1656,7 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         break;
     }
     case BLE_GAP_DISCONNECTED_IND: {  // BLE GAP 连接断开事件
+        g_sco_quiet_on = 0;   /* ★ 断连后该标志失效: 重连是新链路, 需重新为语音让路 */
         /* 诊断(08-26): 打印断开 reason 区分"本地超时"vs"主机主动断".
          * 语音(SCO)期间 reason 8(Connection Timeout) = 32s 内主机侧未发任何
          * BLE 包(电脑接收器 SCO 期共存调度断供); reason 19(Remote User
@@ -1640,16 +1708,20 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         /* 断连后保持广播 ADV_GRACE_WINDOW_MS 供已配对手机静默回连；
          * is_auto_restart=0，SDK 不再自动重启，故此处手动重启广播并开窗口，
          * 窗口超时未回连则由 adv_grace_timeout_cb 停广播进深睡。
-         * ⚠️ 语音(SCO)活跃时【不立即广播】: 广播会与 SCO 抢同一射频(加剧
-         * msbc rx errcnt), 且电脑 SCO 期间无暇回连 —— 由 sco_adv_defer
-         * 兜底, 等 SCO_DISCONNECTED/HFP_DISCONNECTED 立即广播(电脑刚结束
-         * 语音最有空回连). */
+         * ⚠️ 2026-10-12 变更: 语音(SCO)活跃时**也立即广播**(原来会延迟到 SCO 结束)。
+         * 原因见下面分支内注释 —— 语音开关走 BLE HID 的 ALT 键, 掉线即用户被锁死。 */
         if (g_standby_teardown) {
             LOG_I("[BLE] disconnected for standby, skip advertise");
-        } else if (g_sco_active) {
-            LOG_I("[BLE] SCO active, defer advertise until SCO ends (30s fallback)");
-            sco_adv_defer_start();
         } else {
+            /* ★ 2026-10-12: 语音(SCO)中掉线也必须【立即】广播, 不再延迟。
+             * 语音开关是 C1 → BLE HID 的 ALT 键 → 电脑输入法: BLE 一掉 ALT 就发不出去,
+             * 用户被彻底锁死(停不了语音 / SCO 干挂 / Active ~3mA), 本地按 C1 也无效
+             * (HFP 的 AT+BVRA=0 停的是手机端 VF, 与电脑输入法无关)。
+             * ⇒ 唯一出路是尽快重连, 因此广播优先级高于"避免与 SCO 抢射频"。
+             * 实测教训: 旧方案的 30s 软定时器兜底从未触发(软定时器被 BLE RF 活动饿死),
+             * 广播拖了 191s 才回来, 把一次掉线放大成 ~3 分钟高功耗。 */
+            if (g_sco_active)
+                LOG_I("[BLE] SCO active, advertise immediately (voice stop needs BLE HID ALT)");
             ble_app_wakeup_advertise();
         }
         break;
@@ -1704,6 +1776,33 @@ static void vf_retry_timer_cb(void *param)
     }
 }
 
+/* 语音(SCO)结束后的 HCPU 侧 PM 收尾: 恢复空闲 WFI 分频档位。
+ * 完整根因说明见调用处(BT_NOTIFY_COMMON_SCO_DISCONNECTED)的注释。 */
+static void ble_app_voice_end_pm_restore(void)
+{
+    extern int usb_on;   /* main.c:50 全局量; power.c 亦以此判 USB 在线 */
+    if (usb_on)
+        return;          /* USB 在线: main.c:104 有意持 div 12(CDC 时延敏感), 不可动 */
+    HAL_RCC_HCPU_SetDeepWFIDiv(60, 0, 1);   /* 与 power_init / usb_stop 一致的空闲值(4MHz 档) */
+}
+
+/* 武装空闲 eSCO 拆除定时器(创建/重启 2.5s 一次性软定时器)。
+ * 调用点: ① HFP 首次连接(BT_NOTIFY_HF_PROFILE_CONNECTED)
+ *         ② 每次【真实】语音结束(BT_NOTIFY_COMMON_SCO_DISCONNECTED, sco_was_active 门控)。 */
+static void esco_idle_teardown_schedule(void)
+{
+    if (!g_esco_idle_timer) {
+        g_esco_idle_timer = rt_timer_create("esco_idle",
+            esco_idle_teardown_cb, RT_NULL,
+            rt_tick_from_millisecond(ESCO_IDLE_TEARDOWN_MS),
+            RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
+    }
+    if (g_esco_idle_timer) {
+        rt_timer_stop(g_esco_idle_timer);
+        rt_timer_start(g_esco_idle_timer);
+    }
+}
+
 /* HFP 连上后【无通话】防御性拆"空闲 eSCO": 栈在 HFP 建立时自动 open 一条 eSCO
  * (日志 HF device_sco_state→0x5) 但不派发 SCO_CONNECTED(g_sco_active=0, 无音频流),
  * 这条"挂空"的 eSCO 占经典蓝牙时隙 → BR/EDR 反复弹 Active/Sniff(电流 1.7~2.5 横跳).
@@ -1754,6 +1853,16 @@ void ble_app_hfp_deactivate_vf(void)
     if (!g_hfp_connected) return;
     bt_interface_voice_recog(0);
     LOG_I("[HFP] send BVRA=0 (deactivate voice recognition)");
+    /* ★ 2026-10-12: BLE 已断时不再走 BVRA 重试(要 2s+18s 才有结果), 直接强拆 SCO 止损。
+     * 理由: 语音开关在【电脑输入法】侧(C1 发 ALT 走 BLE), BLE 断 = 用户已被锁死,
+     * 手机端 VF 停不停都救不回用户控制权; 此刻唯一该做的是别再让 ACL 停在 Active
+     * 白烧 ~3mA(实测语音中 BLE 掉线后 Active 烧了 ~3 分钟)。 */
+    if (!g_hid_env.is_connected) {
+        LOG_I("[HFP] BLE down -> skip BVRA retry, force SCO disconnect now");
+        g_vf_retry_left = 0;
+        bt_interface_audio_switch(1);
+        return;
+    }
     g_vf_retry_left = 1;   /* 1 次 BVRA=0 重试, 之后拆 SCO */
     if (!g_vf_retry_timer) {
         /* 必须 SOFT_TIMER: 回调里调 bt_interface_voice_recog → SDK 内部

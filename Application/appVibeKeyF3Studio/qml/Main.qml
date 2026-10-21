@@ -5702,12 +5702,14 @@ ScrollView {
                                         }
                                         Item { Layout.fillWidth: true }
                                     }
-                                    /* 第 2 行：状态灯分组标题 + 四个按钮 */
+                                    /* 第 2 行：状态灯分组标题 + 五个按钮（黄/绿/红/蓝/关） */
                                     RowLayout { spacing: 8
                                         Text { text: "LED1/LED2/LED3"; font.pointSize: 11; color: "#888" }
                                         Item { Layout.fillWidth: true }
-                                        // 状态灯（原黄/绿/红/关灯）—— 走 ble_led_service→rgb_led_set_color，
+                                        // 状态灯（黄/绿/红/蓝/关灯）—— 走 ble_led_service→rgb_led_set_color，
                                         // **不受固件 15% 限幅影响**，10-04 用户明确要求"状态灯先不动"。
+                                        // 10-21 新增蓝灯(state=4)：固件侧借用 LED1(PA5, 与充电指示共用)，
+                                        // 见 ble_led_service.c 的归属约定注释。
                                         Rectangle { width: 50; height: 28; radius: 14; color: t1Ma.pressed ? "#e6f5ec" : "transparent"; border.color: "#FFAA00"; border.width: 1
                                             Text { anchors.centerIn: parent; text: "黄灯"; font.pointSize: 10; color: "#FFAA00" }
                                             MouseArea { id: t1Ma; anchors.fill: parent; onClicked: lightMonitor.sendState(1) }
@@ -5719,6 +5721,10 @@ ScrollView {
                                         Rectangle { width: 50; height: 28; radius: 14; color: t3Ma.pressed ? "#e6f5ec" : "transparent"; border.color: "#FF0000"; border.width: 1
                                             Text { anchors.centerIn: parent; text: "红灯"; font.pointSize: 10; color: "#FF0000" }
                                             MouseArea { id: t3Ma; anchors.fill: parent; onClicked: lightMonitor.sendState(3) }
+                                        }
+                                        Rectangle { width: 50; height: 28; radius: 14; color: t5Ma.pressed ? "#e6f5ec" : "transparent"; border.color: "#0080FF"; border.width: 1
+                                            Text { anchors.centerIn: parent; text: "蓝灯"; font.pointSize: 10; color: "#0080FF" }
+                                            MouseArea { id: t5Ma; anchors.fill: parent; onClicked: lightMonitor.sendState(4) }
                                         }
                                         Rectangle { width: 50; height: 28; radius: 14; color: t4Ma.pressed ? "#e6f5ec" : "transparent"; border.color: "#888"; border.width: 1
                                             Text { anchors.centerIn: parent; text: "关灯"; font.pointSize: 10; color: "#888" }
