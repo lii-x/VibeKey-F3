@@ -247,7 +247,7 @@ static void ble_hid_kb_clear_held(void)
  *   1 = 开启(每次按键打 1~2 行; 调试完请改回 0, 否则打字会刷屏)
  *   0 = 关闭
  * ⚠️ 必须定义在 ble_hid_keyboard_send() 定义之前, 否则 #if 看不到宏会静默编译掉。 */
-#define KB_TX_LOG 1
+#define KB_TX_LOG 0   /* 0 = 发版行为: 不打按键日志 */
 
 #if KB_TX_LOG
 /* ★ 2026-10-12 临时诊断: 打印"当前按住集合"快照(按物理键源)。
@@ -317,7 +317,7 @@ static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len)
  * 代价提醒: 关掉后单条报告若在空口丢失 = "这次按键没生效"(无重试兜底)。
  * 注意 SCO(语音)期间本来就跳过补发, 所以本开关主要影响【非 SCO 时点】——
  * 而"按 C1 启动语音"那一下恰在最需要送达的时刻, 测试时请留意是否偶发不触发。 */
-#define KB_TX_RETRY_DISABLED 1
+#define KB_TX_RETRY_DISABLED 0   /* 0 = 发版行为: 保留冗余补发(1 原始 + 3 补发) */
 
 /* 临时诊断开关 KB_TX_LOG 定义在 ble_hid_keyboard_send() 之前(约文件上方),
  * 必须早于使用点, 否则 #if 看不到宏会整段编译掉。 */

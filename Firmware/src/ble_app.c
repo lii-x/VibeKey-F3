@@ -84,6 +84,14 @@ extern void enc_stop(void);
     static const char *local_name = "VibeKey-F3";
 #endif
 
+/* ★ 2026-10-21 用户要求: 【经典蓝牙(BR/EDR)名改为空白】。
+ * 只影响经典链路那条记录; BLE 名仍用 local_name(VibeKey-F3) 保持不变 ——
+ * 上位机/网页配置工具靠 BLE 名识别设备, 不能一起改。
+ * 用【单个空格】而不是空串: len=0 在部分协议栈/主机会被当成"名字尚未就绪",
+ * 回退去显示 MAC 或 (unknown); 单个空格能稳定显示成一行空白。
+ * 副作用(有意): 主机上原本"经典 + BLE 各一条同名记录"的两行, 现在能区分开了。 */
+static const char *bt_classic_name = " ";
+
 /* 设备类别(COD, Class of Device)：
  * 用户要求恢复默认图标 → 改回基线 0x200000(Object Transfer)。
  * ⚠️ 代价(08-07 实测): 安卓不当音频设备 → 不自动连 BR/EDR HFP, 对设备
@@ -725,8 +733,10 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
         switch (msg->event_id) {
         case BT_NOTIFY_COMMON_BT_STACK_READY:   // bt蓝牙协议栈准备就绪事件
             g_br_ready = 1;
-            bt_interface_set_local_name(strlen(local_name), (void *)local_name);
-            LOG_I("[HID] BT stack ready, name=%s", local_name);
+            /* 经典蓝牙名 = 空白(与 BLE 名解耦), 见 bt_classic_name 的注释 */
+            bt_interface_set_local_name(strlen(bt_classic_name), (void *)bt_classic_name);
+            LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
+                  bt_classic_name, local_name);
             /* 链路策略：入向 lp_in=0x0005(role switch+sniff) 保留——PC 主动连时
              * 设备可 role switch 成 master 省功耗；出向 lp_out=0x0004 禁用 role switch，
              * 设备主动发起 ACL 时拒绝手机的 role switch 请求、保持 master，

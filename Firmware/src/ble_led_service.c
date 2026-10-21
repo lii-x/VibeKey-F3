@@ -29,19 +29,21 @@
 #define CFG_CHAR_UUID_16   0xFF03
 #define CFG_RSP_UUID_16    0xFF04
 
+/* ★ 2026-10-21: 已【移除】0xFF02 IMU 诊断特征（原 LED_DIAG_DECL / VAL / CCCD 三项）。
+ * 它是 09-01 的调试用快照通道，生产不需要，而且会把 IMU 原始数据暴露在空口上。
+ * 移除后属性总数 11 -> 8，后面各项索引整体前移 3 —— 因为下面的 att_db 用的是
+ * 指定初始化器（[NAME] = ...），表结构与枚举自动保持一致，无需手改任何索引。
+ * 客户端是按 UUID 发现特征的（不缓存 handle），所以移除不影响 0xFF01/0xFF03/0xFF04。 */
 enum {
     LED_SVC_IDX,      // 0 - 服务声明索引
     LED_CHAR_DECL,    // 1 - 特征声明索引
     LED_CHAR_VAL,     // 2 - 特征值索引
-    LED_DIAG_DECL,    // 3 - 诊断特征声明(09-01, IMU 诊断工具保留)
-    LED_DIAG_VAL,     // 4 - 诊断特征值 0xFF02: 写任意字节 -> notify 一帧 16B 快照
-    LED_DIAG_CCCD,    // 5 - 诊断特征 CCCD (0x2902, notify 使能)
-    LED_CFG_DECL,     // 6 - 配置命令特征声明(09-03, BLE 改建键配置)
-    LED_CFG_VAL,      // 7 - 配置命令特征值 0xFF03: 写 CONF 命令帧
-    LED_CFG_RSP_DECL, // 8 - 配置回包特征声明
-    LED_CFG_RSP_VAL,  // 9 - 配置回包特征值 0xFF04: notify 响应帧
-    LED_CFG_RSP_CCCD, // 10 - 配置回包特征 CCCD (0x2902, notify 使能)
-    LED_ATT_NB        // 11 - 属性总数
+    LED_CFG_DECL,     // 3 - 配置命令特征声明(09-03, BLE 改建键配置)
+    LED_CFG_VAL,      // 4 - 配置命令特征值 0xFF03: 写 CONF 命令帧
+    LED_CFG_RSP_DECL, // 5 - 配置回包特征声明
+    LED_CFG_RSP_VAL,  // 6 - 配置回包特征值 0xFF04: notify 响应帧
+    LED_CFG_RSP_CCCD, // 7 - 配置回包特征 CCCD (0x2902, notify 使能)
+    LED_ATT_NB        // 8 - 属性总数
 };
 
 /* 16-bit 服务：用 struct attm_desc（非 _128），uuid 字段为 16-bit 值。
@@ -67,19 +69,6 @@ static struct attm_desc led_att_db[LED_ATT_NB] = {
     /* Characteristic value - write only. 16-bit vendor UUID 0xFF01 */
     [LED_CHAR_VAL] = {
         LED_CHAR_UUID_16, PERM(WRITE_REQ, ENABLE) | PERM(WRITE_COMMAND, ENABLE), 0, 64
-    },
-    /* 09-01 诊断特征(IMU 诊断工具): 0xFF02 可写(触发一帧 notify 快照) + NTF。
-     * 上位机先订阅 CCCD, 再写任意字节, 固件回发 16B imu_diag_fill() 快照。 */
-    [LED_DIAG_DECL] = {
-        ATT_DECL_CHARACTERISTIC, PERM(RD, ENABLE), 0, 0
-    },
-    [LED_DIAG_VAL] = {
-        0xFF02, PERM(WRITE_REQ, ENABLE) | PERM(WRITE_COMMAND, ENABLE) | PERM(NTF, ENABLE),
-        PERM(RI, ENABLE), 16
-    },
-    [LED_DIAG_CCCD] = {
-        ATT_DESC_CLIENT_CHAR_CFG, PERM(RD, ENABLE) | PERM(WRITE_REQ, ENABLE),
-        PERM(RI, ENABLE), 2
     },
     /* 09-03 配置命令特征(0xFF03): PC 写一条完整 CONF 命令帧 —— 与 USB CDC 的
      * 线上格式完全一致: [4B CONF_MAGIC][1B cmd][1B slot][2B data_len][payload]
@@ -207,18 +196,6 @@ static uint8_t led_gatts_set_cbk(uint8_t conn_idx, sibles_set_cbk_t *para)
             ble_led_set_state(state);
             rt_kprintf("[LED SVC] state=%d\n", state);
         }
-    }
-    /* 09-01 (保留, IMU 诊断工具): 0xFF02 诊断特征 —— 写任意字节触发一帧 notify 快照(16B) */
-    else if (para->idx == LED_DIAG_VAL) {
-        extern void imu_diag_fill(uint8_t buf[16]);
-        static uint8_t diag_buf[16];
-        imu_diag_fill(diag_buf);
-        sibles_value_t value;
-        value.hdl  = g_led_svc_handle;
-        value.idx  = LED_DIAG_VAL;
-        value.len  = sizeof(diag_buf);
-        value.value = diag_buf;
-        sibles_write_value(conn_idx, &value);
     }
     /* 09-03 (BLE 改建键配置): 0xFF03 命令特征 —— PC 写一条 CONF 命令帧。
      * GATT 回调线程不能直接做 flash 写(与 USB ISR 同款陷阱: mutex 断言),
