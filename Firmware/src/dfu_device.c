@@ -29,9 +29,13 @@
 
 #define OTA_MAGIC   0x4F544100
 #define CONF_MAGIC  0x434F4E46
-#define OTA_TARGET_ADDR 0x12320000  /* = DFU_DOWNLOAD_REGION 起点(ptab: 0x12000000 + 0x320000)，8MB Flash 重排后地址 */
-#define OTA_REGION_END  0x12620000  /* = DFU_DOWNLOAD_REGION 终点(ptab: 0x12320000 + 0x300000); OTA 镜像(含 8 字节头)不得越过, 否则擦写会抹掉 KVDB 区 */
-#define OTA_BODY_MAX_SIZE (2 * 1024 * 1024)  /* 与 bootloader(main.c:325) 对 fw_size 的硬上限对齐; 超过则 bootloader 直接忽略不安装; DFU_DOWNLOAD 区 3MB 可容纳 */
+/* ★ 2026-10-21: Flash 布局由 8MB 压缩到 4MB(见 boards/sf32lb52-vibekey/ptab.json)。
+ * 新布局(base 0x12000000): ftab 0x000000/32K · bootloader 0x010000/64K ·
+ *   应用 0x020000/1.5MB · DFU 0x1A0000/1.5MB · KVDB_DFU 0x320000/16K · KVDB_BLE 0x324000/16K。
+ * 整表止于 0x328000(≈3.16MB), 4MB 芯片尚余约 0.86MB。 */
+#define OTA_TARGET_ADDR 0x121A0000  /* = DFU_DOWNLOAD_REGION 起点(ptab: 0x12000000 + 0x1A0000) */
+#define OTA_REGION_END  0x12320000  /* = 起点 + 0x180000(1.5MB); OTA 镜像(含 8 字节头 + 4 字节 CRC)不得越过, 否则擦写会抹掉 KVDB 区 */
+#define OTA_BODY_MAX_SIZE (0x180000 - 0x1000)  /* = DFU 区(1.5MB) - 1 扇区余量; 与 bootloader 对 fw_size 的上限保持一致 */
 
 #define CONF_CMD_READ  0x01
 #define CONF_CMD_WRITE 0x02

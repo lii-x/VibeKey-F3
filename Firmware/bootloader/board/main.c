@@ -322,7 +322,10 @@ void boot_images_help()
             uint32_t fw_size = 0;
             g_flash_read(DFU_DOWNLOAD_REGION_START_ADDR + 4, (const int8_t *)&fw_size, 4);
 
-            if (fw_size > 0 && fw_size < 2 * 1024 * 1024)
+            /* 4MB 布局(2026-10-21): 应用区与 DFU 区均为 1.5MB(见 boards/sf32lb52-vibekey/ptab.json),
+             * 故镜像体上限 = 1.5MB - 1 扇区余量, 与 app 侧 dfu_device.c 的 OTA_BODY_MAX_SIZE 保持一致。
+             * 超过则忽略不安装(不写 flash, 继续走正常启动) —— 防止把运行区写残。 */
+            if (fw_size > 0 && fw_size <= (0x180000 - 0x1000))
             {
                 uint32_t target = HCPU_FLASH_CODE_START_ADDR;
                 uint32_t sect_size = 4096;
