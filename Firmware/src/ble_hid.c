@@ -135,7 +135,7 @@ static uint8_t hid_gatts_set_cbk(uint8_t conn_idx, sibles_set_cbk_t *para)
         /* ★ 2026-10-12: 主机订阅键盘通知(重连/首次)后【按当前按住集合重同步】一次。
          * 场景: 长按式语音(按住=ALT down, 松开=ALT up) —— 若 BLE 在按住期间掉线,
          * "松开"发不出去, 电脑会一直以为 ALT 按着 ⇒ 语音输入掐不掉 + ALT 卡住。
-         * 断连期间 press/release 仍维护 g_kb_held(见下), 故此处重建的即是【当前真实状态】:
+         * 断连期间 press/release 仍维护按住集合(见下), 故此处重建的即是【当前真实状态】:
          *   · 已松开 ⇒ 报告为空 ⇒ 电脑收到 ALT up ⇒ 语音停止 ✓
          *   · 仍按着 ⇒ 报告含 ALT ⇒ 语音继续 ✓
          * ⚠️ 必须用 send_held 重建, 不能重发 last_kbd_report —— 后者在断连期间
@@ -191,31 +191,39 @@ static void ble_hid_wait_tx_pkt(void)
 static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len);
 static void ble_hid_kb_arm_retry(void);   /* 前置声明: 被 ble_hid_keyboard_send 调用 */
 
-/* ===== 多键同时按下支持 (08-27 修复互斥) =====
- * 维护"当前按住的 HID 键集合": 每个元素记录该键的 (modifier, keycode) 与
- * 引用计数。按下时加入(已存在则 ref++), 释放时 ref--(归零才移除),
- * 每次变化都从集合重建【完整】6 键报告发送 —— 这样同时按 C2+C3 会发
- * [C2, C3, 0, 0, 0, 0], 而非后按覆盖先按(旧实现每次只发单键 → 互斥假象)。
- * 引用计数处理"同一键被多来源按下"的边界情况; HID 协议最多 6 键, 集合留 8
- * 余量, 超 6 键时按顺序截断(标准 NKRO 行为)。 */
-#define HID_HELD_MAX 8
-typedef struct { uint8_t modifier; uint8_t keycode; int ref; } hid_held_t;
-static hid_held_t g_kb_held[HID_HELD_MAX] = {0};
+/* ===== 多键同时按下支持 (08-27 初版; 2026-10-12 改为"按物理键源") =====
+ * 维护"当前按住的 HID 键集合", 每次变化都从集合重建【完整】6 键报告发送 ——
+ * 这样同时按 C2+C3 会发 [C2, C3, 0, 0, 0, 0], 而非后按覆盖先按。
+ *
+ * ★ 2026-10-12 重构: 原实现按 (modifier,keycode) 记【引用计数】, 依赖"按下/松开
+ *   严格配对"。但按键事件邮箱在狂按时会丢事件(main.c:2003 注释自述"邮箱满时丢弃"),
+ *   丢一次"松开"就永久多算一次 ⇒ 该项 ref 永远 >0 ⇒ 报告里永远含该键 ⇒ 主机认为
+ *   它一直按着、状态不再变化 ⇒ **"电脑收不到数据"**(实测 k=0x0f 卡在 r=5), 只能重启。
+ *   改为按【物理按键源】记"是否按下"(布尔, 幂等):
+ *     · 幂等 —— 同一源重复按下只是重发报告, 不存在累加;
+ *     · 自愈 —— 任何一次丢事件都会在下一次按/松时被纠正, 不会永久失配;
+ *     · 多键同码仍正确 —— 不同源各占一项, 松开一个不影响另一个(08-27 的诉求);
+ *     · 代价 —— 同码需【不同源】才区分; 旧接口(按码自动选槽)在"两个不同物理键
+ *       映射到同一码"时会共用一项(见 ble_hid_keyboard_press_key 注释)。
+ *   src 由调用方指定(一般用按键索引), 见 ble_hid.h。 */
+#define KB_SRC_MAX 12
+typedef struct { uint8_t modifier; uint8_t keycode; uint8_t down; } kb_src_t;
+static kb_src_t g_kb_src[KB_SRC_MAX];
 
-/* 从集合重建并发送完整键盘报告(所有当前按住的键 + OR 后的 modifier) */
+/* 从集合重建并发送完整键盘报告(所有当前按下的键 + OR 后的 modifier) */
 static void ble_hid_kb_send_held(void)
 {
     uint8_t modifier = 0;
     uint8_t keys[6] = {0};
     int n = 0;
-    /* 遍历全部按住项: modifier 一律 OR 进报告; 仅 keycode≠0 的填入 6 键数组。
+    /* 遍历全部按下项: modifier 一律 OR 进报告; 仅 keycode≠0 的填入 6 键数组。
      * 这样"纯修饰键"(如 C1 默认 LCtrl+LShift+LWin, keycode=0)也能生效——其
      * modifier 仍被上报, 主机据此识别 Win/Ctrl 等组合(08-27 修复误杀纯修饰键)。 */
-    for (int i = 0; i < HID_HELD_MAX; i++) {
-        if (g_kb_held[i].ref <= 0) continue;
-        modifier |= g_kb_held[i].modifier;
-        if (g_kb_held[i].keycode != 0 && n < 6)
-            keys[n++] = g_kb_held[i].keycode;
+    for (int i = 0; i < KB_SRC_MAX; i++) {
+        if (!g_kb_src[i].down) continue;
+        modifier |= g_kb_src[i].modifier;
+        if (g_kb_src[i].keycode != 0 && n < 6)
+            keys[n++] = g_kb_src[i].keycode;
     }
     ble_hid_keyboard_send(modifier, keys, 6);
 }
@@ -223,10 +231,10 @@ static void ble_hid_kb_send_held(void)
 /* 清空按住集合(断连/全释放时调用) */
 static void ble_hid_kb_clear_held(void)
 {
-    for (int i = 0; i < HID_HELD_MAX; i++) {
-        g_kb_held[i].ref = 0;
-        g_kb_held[i].modifier = 0;
-        g_kb_held[i].keycode = 0;
+    for (int i = 0; i < KB_SRC_MAX; i++) {
+        g_kb_src[i].modifier = 0;
+        g_kb_src[i].keycode = 0;
+        g_kb_src[i].down = 0;
     }
 }
 
@@ -242,24 +250,24 @@ static void ble_hid_kb_clear_held(void)
 #define KB_TX_LOG 1
 
 #if KB_TX_LOG
-/* ★ 2026-10-12 临时诊断: 打印"当前按住集合"快照。
- * 用途: 用户报"C3 改键后多按几次就没值" —— 症状指向【集合被逐渐占满】
- * (HID_HELD_MAX=8 满了之后 `if (empty < 0) return;` 会静默丢弃所有按键)。
- * 看 `total=` 是否随按键次数单调上升即可判定; 方括号里列出每个占位项,
- * 能直接看出是哪一对 (modifier,keycode) 没被释放、以及它的 ref 是否在涨。
+/* ★ 2026-10-12 临时诊断: 打印"当前按住集合"快照(按物理键源)。
+ * 用途: 用户报"多按几次后电脑收不到数据" —— 实测为集合里某项永久停留
+ * (旧引用计数模型下 k=0x0f 卡在 r=5) ⇒ 报告恒含该键 ⇒ 主机认为它一直
+ * 按着、状态不再变化 ⇒ 无按键输出。
+ * 判读: `total=` 应随按/松回到 0; 若非 0 则说明有键被卡住, 方括号里的
+ * `[src]m=.. k=..` 直接指出是哪个源、哪个键码。
  * 另两个关键标记: press-FULL = 集合满导致按下被丢弃; rel-MISS = 松开没找到对应项。 */
 static void kb_held_dump(const char *tag)
 {
     int n = 0;
     rt_kprintf("[KB] held@%s:", tag);
-    for (int i = 0; i < HID_HELD_MAX; i++) {
-        if (g_kb_held[i].ref > 0) {
-            rt_kprintf(" [%d]m=%02x k=%02x r=%d", i,
-                       g_kb_held[i].modifier, g_kb_held[i].keycode, g_kb_held[i].ref);
+    for (int i = 0; i < KB_SRC_MAX; i++) {
+        if (g_kb_src[i].down) {
+            rt_kprintf(" [%d]m=%02x k=%02x", i, g_kb_src[i].modifier, g_kb_src[i].keycode);
             n++;
         }
     }
-    rt_kprintf(" total=%d/%d\n", n, HID_HELD_MAX);
+    rt_kprintf(" total=%d/%d\n", n, KB_SRC_MAX);
 }
 #else
 #define kb_held_dump(tag) ((void)0)
@@ -368,7 +376,7 @@ void ble_hid_kb_tx_reset(void)
 {
     g_kb_retry_left = 0;
     if (g_kb_retry_timer) rt_timer_stop(g_kb_retry_timer);
-    /* ★ 2026-10-12: 【不再】清 g_kb_held!
+    /* ★ 2026-10-12: 【不再】清按住集合!
      * 原实现 "08-27: 断连清按住集合, 防重连后残留" 会引入一个更糟的后果:
      * 设备把自己也"忘了" —— 长按式按键(如 C1=ALT)在断连期间用户松开时,
      * release_key 因集合已被清空而找不到项, 重连后也无从补发 "ALT up",
@@ -462,6 +470,36 @@ void ble_hid_mouse_scroll_down(void)
     ble_hid_mouse_scroll(-1);
 }
 
+/* ===== 键盘按下/释放 =====
+ * 两条接口:
+ *   press_src/release_src —— 按【物理键源】索引(推荐): 幂等、可自愈、同码不同键
+ *                            互不影响。src 由调用方给(一般用按键索引)。
+ *   press_key/release_key —— 兼容旧调用(只给 modifier/keycode): 自动选槽(同码且
+ *                            已按下则复用该槽, 否则取空闲槽)。同样幂等 ⇒ 丢事件
+ *                            也能自愈; ⚠️ 但"两个不同物理键映射到同一
+ *                            (modifier,keycode)"时会共用一项, 松开其一会把另一个
+ *                            也放掉 —— 这类配置请改用 press_src/release_src。 */
+void ble_hid_keyboard_press_src(uint8_t src, uint8_t modifier, uint8_t keycode)
+{
+    if (src >= KB_SRC_MAX) return;
+    if (modifier == 0 && keycode == 0) return;
+    /* 幂等: 已按下也只是重发报告, 不累加 —— 丢事件不会永久失配 */
+    g_kb_src[src].modifier = modifier;
+    g_kb_src[src].keycode  = keycode;
+    g_kb_src[src].down     = 1;
+    ble_hid_kb_send_held();
+    kb_held_dump("press");
+}
+
+void ble_hid_keyboard_release_src(uint8_t src)
+{
+    if (src >= KB_SRC_MAX) return;
+    int was = g_kb_src[src].down;
+    g_kb_src[src].down = 0;   /* 幂等: 本来没按也无妨 */
+    ble_hid_kb_send_held();
+    kb_held_dump(was ? "rel" : "rel-MISS");
+}
+
 void ble_hid_keyboard_press_key(uint8_t modifier, uint8_t keycode)
 {
     /* ★ 2026-10-12: 【不再】因未连接而直接 return —— 断连期间仍须维护按住集合,
@@ -469,27 +507,22 @@ void ble_hid_keyboard_press_key(uint8_t modifier, uint8_t keycode)
      * 真正的发送由 ble_hid_keyboard_send() 内部按 is_connected/kb_ntf_enabled 保护。 */
     if (modifier == 0 && keycode == 0) return;
 
-    /* 已按住则引用计数+1(状态未变, 仍重发一次确保对端一致), 否则找空槽填入 */
-    int empty = -1;
-    for (int i = 0; i < HID_HELD_MAX; i++) {
-        if (g_kb_held[i].ref > 0 && g_kb_held[i].modifier == modifier
-            && g_kb_held[i].keycode == keycode) {
-            g_kb_held[i].ref++;
-            ble_hid_kb_send_held();
-            kb_held_dump("press+ref");
-            return;
-        }
-        if (empty < 0 && g_kb_held[i].ref == 0) empty = i;
+    int slot = -1;
+    for (int i = 0; i < KB_SRC_MAX; i++) {
+        if (!g_kb_src[i].down) continue;
+        if (g_kb_src[i].modifier == modifier && g_kb_src[i].keycode == keycode) { slot = i; break; }
     }
-    if (empty < 0) {
-        /* ⚠️⚠️ 集合已满 ⇒ 本次按下被静默丢弃。用户报的"C3 多按几次就没值"
-         * 若走到这里, 就是集合被泄漏占满(注意 "press-FULL" 这行)。 */
+    if (slot < 0)
+        for (int i = 0; i < KB_SRC_MAX; i++)
+            if (!g_kb_src[i].down) { slot = i; break; }
+    if (slot < 0) {
+        /* 全部槽都被占(KB_SRC_MAX 个键同时按住): 丢弃本次按下 */
         kb_held_dump("press-FULL");
         return;
     }
-    g_kb_held[empty].modifier = modifier;
-    g_kb_held[empty].keycode  = keycode;
-    g_kb_held[empty].ref      = 1;
+    g_kb_src[slot].modifier = modifier;
+    g_kb_src[slot].keycode  = keycode;
+    g_kb_src[slot].down     = 1;   /* 幂等, 不再引用计数 */
     ble_hid_kb_send_held();
     kb_held_dump("press");
 }
@@ -500,25 +533,20 @@ void ble_hid_keyboard_release_key(uint8_t modifier, uint8_t keycode)
 {
     /* ★ 2026-10-12: 同 press_key —— 断连期间也要把"松开"记进集合(不发送),
      * 这样重连后重同步才能正确地把 ALT up 补发给电脑。 */
-    int exact = 0;   /* 是否真的找到并释放了对应项(诊断用, 见 kb_held_dump) */
-    for (int i = 0; i < HID_HELD_MAX; i++) {
-        if (g_kb_held[i].ref > 0 && g_kb_held[i].modifier == modifier
-            && g_kb_held[i].keycode == keycode) {
-            g_kb_held[i].ref--;
-            if (g_kb_held[i].ref <= 0) {
-                g_kb_held[i].ref = 0;
-                g_kb_held[i].modifier = 0;
-                g_kb_held[i].keycode  = 0;
-            }
-            exact = 1;
+    int hit = 0;
+    for (int i = 0; i < KB_SRC_MAX; i++) {
+        if (g_kb_src[i].down && g_kb_src[i].modifier == modifier
+            && g_kb_src[i].keycode == keycode) {
+            g_kb_src[i].down = 0;
+            hit = 1;
             break;
         }
     }
     ble_hid_kb_send_held();   /* 发送当前剩余(可能为空)的完整报告 */
-    /* "rel-MISS" = 松开时【没找到】对应的按住项 ⇒ 按下/松开这一对的
-     * (modifier,keycode) 不一致 ⇒ 该项会永久留在集合里(ref 只增不减) ⇒
-     * 几次之后集合占满, 所有键盘键失效。这就是"C3 没值"最可能的形态。 */
-    kb_held_dump(exact ? "rel" : "rel-MISS");
+    /* "rel-MISS" = 松开时没找到对应项。★ 在【幂等】模型下这已不再致命:
+     * 下一次按下/松开会把状态纠正过来(旧引用计数模型下它会永久失配, 那正是
+     * "电脑收不到数据"的成因)。保留该标记只为观察事件是否成对。 */
+    kb_held_dump(hit ? "rel" : "rel-MISS");
 }
 
 void ble_hid_keyboard_release(void)
