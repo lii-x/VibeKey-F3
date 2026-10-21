@@ -613,9 +613,8 @@ static bool  g_g3_valid = false;
 
 static float   g_flat_mix = 0.0f;   /* 09-01: 已废弃(mix 切换移除), 保留声明防误引用 */
 
-/* --- BLE 诊断快照 (09-01, 用户要求保留 IMU 诊断工具): 供 0xFF02 特征 notify 读取 --- */
-static int32_t g_diag_gyro[3] = {0, 0, 0};   /* 原始角速度 (mdps) */
-static float   g_diag_sx = 0.0f, g_diag_sy = 0.0f; /* 滚转补偿输出 (mdps 级) */
+/* 09-01 的 BLE 0xFF02 诊断快照已于 2026-10-21 随该特征一并移除（生产不暴露 IMU 原始数据）。
+ * 原先这里还有 g_diag_gyro/g_diag_sx/g_diag_sy 三个快照变量，已删除。 */
 
 /* ===========================================================================
  * 连接态空闲低功耗状态机 (A/C/B 三步优化)
@@ -1717,12 +1716,7 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
     }
 #endif
 
-    /* 09-01 BLE 诊断快照: 每帧更新, 供 0xFF02 特征 notify 读取 */
-    g_diag_gyro[0] = gyro_mdps.x;
-    g_diag_gyro[1] = gyro_mdps.y;
-    g_diag_gyro[2] = gyro_mdps.z;
-    g_diag_sx = sx;
-    g_diag_sy = sy;
+    /* 09-01 BLE 诊断快照(0xFF02)已移除, 此处原为每帧更新 g_diag_gyro/g_diag_sx/sy, 一并删除 */
 
     if (!g_active_x) {
         if (sx >  MOUSE_DZ_ENTER || sx < -MOUSE_DZ_ENTER) g_active_x = true;
@@ -1781,25 +1775,7 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
     }
 }
 
-/* 09-01 (保留, IMU 诊断工具): BLE 0xFF02 诊断特征快照。16 字节 LE:
- *   [0..5]  g3 三轴 ×1000 (int16)   3D 重力方向(设备坐标, 指向地心)
- *   [6..11] 原始角速度三轴 (int16 mdps)
- *   [12..13] sx 滚转补偿输出 (int16)
- *   [14..15] sy 滚转补偿输出 (int16)
- * 供上位机 IMU 诊断工具实时读取。 */
-void imu_diag_fill(uint8_t buf[16])
-{
-    int16_t v[8];
-    v[0] = (int16_t)(g_g3x * 1000.0f);
-    v[1] = (int16_t)(g_g3y * 1000.0f);
-    v[2] = (int16_t)(g_g3z * 1000.0f);
-    v[3] = (int16_t)g_diag_gyro[0];
-    v[4] = (int16_t)g_diag_gyro[1];
-    v[5] = (int16_t)g_diag_gyro[2];
-    v[6] = (int16_t)g_diag_sx;
-    v[7] = (int16_t)g_diag_sy;
-    memcpy(buf, v, sizeof(v));
-}
+/* 09-01 的 imu_diag_fill()（BL E 0xFF02 诊断特征快照）已于 2026-10-21 随该特征移除。 */
 
 
 /*==============================================================================

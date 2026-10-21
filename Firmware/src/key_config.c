@@ -15,7 +15,7 @@ extern volatile uint8_t g_key2_active;
 /* 每蓝牙槽位一份独立键配置(08-27): g_key_config[0..2] = 槽1..3 */
 static key_config_storage_t g_key_config[KEY_CONFIG_SLOT_NUM];
 
-/* 槽位 flash 地址(0-based): 槽0=旧地址(继承旧配置), 槽1/2 跳过 BT_SLOT(0x12629000) */
+/* 槽位 flash 地址(0-based): 槽0=基址(0x12328000), 槽1/2 跳过 BT_SLOT(0x12329000) 那一页 */
 static uint32_t key_config_slot_addr(uint8_t slot)
 {
     if (slot == 0) return KEY_CONFIG_FLASH_ADDR;
