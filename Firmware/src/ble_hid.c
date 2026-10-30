@@ -275,6 +275,22 @@ static void kb_held_dump(const char *tag)
 
 static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len)
 {
+    /* ★ 10-31 经典 HID 路由: 经典 ACL 在就优先走经典。
+     * 原因: SCO(语音)期间 BLE 空口被饿死, 报告提交成功(tx rsp=0)但主机收不到;
+     *       经典 ACL 与 SCO 同一套时隙调度, 不受影响。
+     * BLE 保留为回退: 经典没连上时仍按老路发。 */
+    {
+        /* ★ 10-31 修正: 不再用 HFP 状态当门槛。
+         * 实测 HID 的中断通道可能在 HFP 未连时就已经建好(HFP 与 HID 是两条
+         * 独立 L2CAP), 用 HFP 判断会误判为"经典不可用"→ 退回 BLE,
+         * 而 BLE HID 已关闭 → 报告被静默丢弃(表现为"按键完全没反应")。
+         * 现在直接尝试经典发送: 真有未连, SDK 会自己打
+         * "[U-L]hid is not connect,can't send data" 并丢弃, 不会出错。 */
+        extern void classic_hid_send_keyboard(unsigned char, const unsigned char *, unsigned char);
+        rt_kprintf("[KB] -> classic (mod=0x%02x)\n", modifier);
+        classic_hid_send_keyboard(modifier, keys, len);
+        return;
+    }
     if (!g_hid_env.is_connected || !g_hid_env.kb_ntf_enabled) {
 #if KB_TX_LOG
         /* 被丢弃也要留痕: 否则"没发出去"和"发了没回执"在日志上完全一样 */
@@ -412,6 +428,9 @@ void ble_hid_flush_pending(void)
 
 static void ble_hid_mouse_send(int8_t dx, int8_t dy, uint8_t buttons)
 {
+    /* ⚠️ 10-31 鼠标暂仍走 BLE：
+     * 经典侧只有键盘描述符(两条一起注册会被主机拒绝)，鼠标报告发过去也无效。
+     * 等复合描述符(键盘+鼠标合并在一条 SDP 记录里)做完再切。 */
     if (!g_hid_env.is_connected) return;
     if (!g_hid_env.ms_ntf_enabled) {
         rt_kprintf("[BLE HID] MS send skipped (ntf=0)\n");
@@ -453,6 +472,7 @@ void ble_hid_mouse_button(uint8_t button)
 
 static void ble_hid_mouse_scroll(int8_t wheel)
 {
+    /* ⚠️ 10-31 滚轮同样暂走 BLE，理由同上 */
     if (!g_hid_env.is_connected || !g_hid_env.ms_ntf_enabled) return;
     ble_hid_wait_tx_pkt();   /* 通话中 TX 池易满: 等归还再发, 防静默丢包 */
     uint8_t report[5] = {0, 0, 0, 0, (uint8_t)wheel};
@@ -590,12 +610,24 @@ static void ble_hid_do_init(void)
     svc.num_entry = HID_ATT_NB;
     svc.sec_lvl = PERM(SVC_AUTH, NO_AUTH) | PERM(SVC_UUID_LEN, UUID_16);
     svc.uuid = ATT_SVC_HID;
+    /* ★ 10-31 实验: 关闭 BLE HID 服务, 只保留经典 HID。
+     * 假设: 电脑同时看到 BLE HID + 经典 HID 两套, HID 栈可能因此拒绝为经典
+     *       建立【中断通道】(日志 interrupt_cid=0x0000), 导致经典发不出数据。
+     * 注意 BAS(电量) 等其它 BLE 服务保持不动。
+     * 要恢复 BLE HID: 把下面的 0 改成 1。 */
+#if 1   /* 10-31: 恢复 BLE HID 服务 —— 电脑靠它维持 BLE 连接, 否则会主动断开(reason 19)。
+         * 注意: 报告只走经典(见 ble_hid_keyboard_send 的路由), 这里的 BLE HID
+         * 仅用于"占住连接", 不会造成重复输入。 */
     g_hid_env.hid_handle = sibles_register_svc(&svc);
     if (g_hid_env.hid_handle)
     {
         sibles_register_cbk(g_hid_env.hid_handle, hid_gatts_get_cbk, hid_gatts_set_cbk);
         rt_kprintf("[BLE HID] HID service registered\n");
     }
+#else
+    g_hid_env.hid_handle = NULL;
+    rt_kprintf("[BLE HID] HID service DISABLED (classic HID only)\n");
+#endif
     svc.att_db = (struct attm_desc *)bas_att_db;
     svc.num_entry = BAS_ATT_NB;
     svc.uuid = ATT_SVC_BATTERY_SERVICE;

@@ -737,6 +737,8 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             bt_interface_set_local_name(strlen(bt_classic_name), (void *)bt_classic_name);
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
                   bt_classic_name, local_name);
+            /* 10-31: 蓝牙栈就绪 ⇒ 使能经典 HID(键盘+鼠标+多媒体) */
+            { extern void classic_hid_open(void); classic_hid_open(); }
             /* 链路策略：入向 lp_in=0x0005(role switch+sniff) 保留——PC 主动连时
              * 设备可 role switch 成 master 省功耗；出向 lp_out=0x0004 禁用 role switch，
              * 设备主动发起 ACL 时拒绝手机的 role switch 请求、保持 master，
@@ -945,6 +947,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
         switch (msg->event_id) {
         case BT_NOTIFY_HF_PROFILE_CONNECTED:    // HFP免提配置文件连接完成事件
             LOG_I("[APP] HFP connected");
+            { extern void classic_hid_set_ready(unsigned char); classic_hid_set_ready(1); }   /* 10-31: 经典 ACL 就绪 */
             g_hfp_connected = 1;
             /* 三设备切换指示: HFP 建立成功, 熄灭模式指示(青闪结束) */
             extern void bt_multi_on_hfp_state(uint8_t hfp_on);
@@ -987,6 +990,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             break;
         case BT_NOTIFY_HF_PROFILE_DISCONNECTED: // HFP免提配置文件断开完成事件
             LOG_I("[APP] HFP disconnected");
+            { extern void classic_hid_set_ready(unsigned char); classic_hid_set_ready(0); }   /* 10-31: 经典 ACL 断开 */
             /* ⚠️ 区分【连接尝试失败】与【已连接后断开】(08-07 死循环定案)：
              * 连接失败时 SDK 同样发本事件, 但 g_hfp_connected==0(从未成功)。
              * 实测日志: 设备主动连 → 手机拒(res 0x0C Limited Resources 或
