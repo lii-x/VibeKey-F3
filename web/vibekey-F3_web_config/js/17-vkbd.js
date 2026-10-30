@@ -97,6 +97,18 @@ function vkbdSyncTargets() {
   _vkbdPath = want;
   return ts;
 }
+/* 10-30 修复: 把写入目标当前的修饰键读进 _vkbdMods。
+   原实现只在 vkbdClose/vkbdWrite 里清零, 从不与目标同步 —— 后果:
+     ① 打开面板时显示的是"上次残留"或"未选", 与对话框里的实际值对不上
+        (实测截图: 对话框 RAlt, 虚拟键盘显示 LCtrl+LShift);
+     ② 用户以为修饰键还在, 直接点字母键 ⇒ vkbdWrite 用 _vkbdMods=0 写入,
+        把原来的修饰键**清掉了** ⇒ 表现为"修饰键改不了/总被改回"。
+   同步后: 面板反映真实值, 点字母键不会误清。 */
+function vkbdSyncModsFromTarget() {
+  const k = _vkbdPath ? getBlock(_vkbdPath) : null;
+  _vkbdMods = (k && k.action === 'keyboard') ? (k.modifier & 0xff) : 0;
+  paintVkbdMods();
+}
 function vkbdBuildPanel() {
   const panel = document.getElementById('vkbd');
   if (!panel) return;
@@ -108,6 +120,7 @@ function vkbdBuildPanel() {
   vkbdSyncTargets();
 
   vkbdBuildMods();
+  vkbdSyncModsFromTarget();   /* 10-30: 面板显示目标当前的真实修饰键 */
   rows.innerHTML = VKBD_ROWS.map(r => '<div class="vkbd-row">' + r.map(k => {
     /* 三元组 [名字, 位/HID码, 1] = 修饰键帽; 二元组 [名字, HID码] = 普通键。
        修饰键帽的位是**逐个写死**的(见 VKBD_ROWS 注释), 不用名字查表。 */
@@ -164,15 +177,23 @@ function paintVkbdMods() {
   document.querySelectorAll('#vkbd .vkbd-mod').forEach(b => {
     b.classList.toggle('on', !!(Number(b.dataset.bit) & _vkbdMods));
   });
+  /* 10-30: 有选中修饰键时把「仅修饰键」按钮点亮 —— 光靠一句提示不够,
+     用户找不到那个按钮(实测反馈"感觉没改一样")。 */
+  const only = document.getElementById('vkbdModsOnly');
+  if (only) only.classList.toggle('on', !!_vkbdMods);
   const prev = document.getElementById('vkbdPrev');
   if (prev) {
     /* 用 MODIFIERS(全 8 位, 带 LCtrl/RAlt 这类全名)而不是 VKBD_MODS_L/R:
        顶部只显示当前那 4 个, 但已选中的可能来自另一只手(行内键帽), 预览要能全量报出。 */
     const names = MODIFIERS.filter(m => m.bit & _vkbdMods).map(m => m.label);
+    /* 10-30 修正提示: 原来只说"再点一个字母", 完全没提「仅修饰键」——
+       想设 RAlt 这种"纯修饰键"(出厂 C1 的语音键就是)的用户会卡在这里,
+       以为"选了修饰键却改不了"。 */
     prev.textContent = names.length
-      ? '已选修饰键：' + names.join('+') + ' → 再点一个字母/数字键完成'
-      : '未选修饰键：直接点字母/数字键即为单键（也可先点 Shift/Ctrl/Alt/Win；'
-        + '顶部可切左右手，行内键帽按位置区分）';
+      ? '已选修饰键：' + names.join('+') + ' → 点字母/数字组成组合键；'
+        + '若只要修饰键本身（例如用 RAlt 当语音键），请点左下角「仅修饰键」'
+      : '未选修饰键：直接点字母/数字即为单键；也可先点 Shift/Ctrl/Alt/Win。'
+        + '只想设一个纯修饰键 → 选中后点左下角「仅修饰键」';
   }
 }
 /* 顶部修饰键条切左右手。已点选的修饰位**不清零** —— 用户常是"左手 Ctrl + 右手 Alt"
@@ -211,6 +232,27 @@ function vkbdWrite(hid, label) {
   refreshSummaries();
   paintVkbdMods();
 }
+/* 10-30 新增: 点修饰键时【立刻】把当前修饰键写进目标块。
+   原设计是"选修饰键→再点字母/仅修饰键"才写, 导致用户点修饰键时
+   「键盘组合」一直显示"未设置", 以为没生效(实测反馈)。
+   这里刻意**不清 _vkbdMods**: 用户接着点字母就能组成组合键;
+   也不调用 renderModal(会重建弹窗, 把虚拟键盘的选中态冲掉)。
+   主键码保留目标原有的 —— 若原来是 LCtrl+A, 再点 Shift 会变成 LCtrl+LShift+A。 */
+function vkbdLiveApply() {
+  const path = _vkbdPath;
+  if (!path) return;
+  const k = getBlock(path);
+  if (!k) return;
+  const hid = (k.action === 'keyboard') ? (k.keycode || 0) : 0;
+  k.action = 'keyboard';
+  k.modifier = _vkbdMods & 0xff;
+  k.keycode = hid;
+  paintBlockRows();
+  paintShortcutBoxes();
+  paintGestureCards();
+  if (path === 'shake_key') paintShakeUi();
+  refreshSummaries();
+}
 function vkbdClear() {
   const path = _vkbdPath;
   if (!path) return;
@@ -232,9 +274,10 @@ document.addEventListener('click', (e) => {
   if (!btn) return;
   e.preventDefault();
   const bit = Number(btn.dataset.bit);
-  if (bit) {                       // 修饰键: 切换位, 不写入
+  if (bit) {                       // 修饰键: 切换位 + 立即同步到「键盘组合」框
     _vkbdMods ^= bit;
     paintVkbdMods();
+    vkbdLiveApply();               /* 10-30: 点一下就写进去, 不再等字母键 */
     return;
   }
   if (btn.dataset.hid) vkbdWrite(Number(btn.dataset.hid), btn.dataset.label);
@@ -244,6 +287,7 @@ document.addEventListener('change', (e) => {
   const sel = e.target;
   if (sel && sel.id === 'vkbdTarget') {
     _vkbdPath = sel.value;
+    vkbdSyncModsFromTarget();   /* 10-30: 换目标后修饰键也要跟着换 */
     log('虚拟键盘写入目标 → ' + ((getMeta(sel.value) || {}).label || sel.value || '无'));
   }
 });

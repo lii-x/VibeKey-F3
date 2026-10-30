@@ -104,3 +104,13 @@
 }
 .vkbd-btn:hover { background: var(--q-hover-bg); color: var(--q-title); }
 .vkbd-hint { margin-left: auto; font-size: 11px; color: var(--q-text-3); }
+
+/* 10-30: 选中修饰键后，「仅修饰键」按钮点亮 —— 提示"设纯修饰键要先选它"的同时
+   给一个可见的落点。颜色沿用主色 green，与 .vkbd-mod.on 保持一致的语义。 */
+#vkbdModsOnly.on {
+  background: #e8f5e9;
+  border-color: #2e9e4f;
+  color: #1b6e37;
+  font-weight: 600;
+  box-shadow: 0 0 0 2px rgba(46, 158, 79, .18);
+}
