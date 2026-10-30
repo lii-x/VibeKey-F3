@@ -1535,12 +1535,15 @@ void ble_app_conn_param_sco_quiet(void)
     /* ★ 2026-10-12: 一次语音只协商一次(见 g_sco_quiet_on 注释)。 */
     if (g_sco_quiet_on) return;
     g_sco_quiet_on = 1;
-    /* 通话中 BLE 拉长到 40~80ms(空事件, 占射频极短)给 SCO 让路; latency 0
-     * 保证挂断后鼠标恢复跟手; timeout 3200(32s 规范上限)容忍低频期被 SCO
-     * 挤占的事件缺口, 防 reason 8 断连, 通话结束参数恢复后自动回正常。 */
+    /* 10-30 实验: 通话期间不再拉长到 40~80ms, 改为与【空闲态一致】(20~40ms)。
+     * 依据: 实测主机根本不按 32~64 下发, applied 一直是 24(30ms) —— 也就是说
+     * "拉长给 SCO 让路"这个意图从未真正生效, 而 30ms 又对 HID 更友好。
+     * 索性直接对齐空闲参数, 让代码与实际行为一致; timeout 仍保留 3200(32s),
+     * 它才是真正生效、且防止 reason 8 断连的那一项。
+     * ★ 要恢复原值就把 16,32 改回 32,64。 */
     ble_gap_update_conn_param(BLE_GAP_CREATE_UPDATE_CONN_PARA(
-        g_hid_env.conn_idx, 32, 64, 0, 3200));
-    LOG_I("[BLE] conn param SCO-quiet (40~80ms, yield to voice, to 32s)");
+        g_hid_env.conn_idx, 16, 32, 0, 3200));
+    LOG_I("[BLE] conn param SCO-quiet (20~40ms 同空闲, to 32s)");
 }
 
 static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, uint32_t context)
