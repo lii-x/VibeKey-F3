@@ -46,7 +46,7 @@
 
 /* 设备身份信息（App 端握手据此确认是 VibeKey-F3）。版本号随发布 bump。 */
 #define VIBEKEY_MODEL      "VibeKey-F3"
-#define VIBEKEY_FW_VERSION "1.1.3"
+#define VIBEKEY_FW_VERSION "1.1.6"
 
 #ifdef CONFIG_USBDEV_ADVANCE_DESC
 
