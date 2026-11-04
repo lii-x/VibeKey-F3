@@ -113,7 +113,10 @@ a { color: inherit; text-decoration: none; }
 /* ⚠️ 抽屉专用项(在线改键 / GitHub)在桌面端必须隐藏, 否则会挤进 .nav-links
    被 overflow:hidden 裁掉一半。桌面端由 .nav-app / .nav-gh 承担这两件事。 */
 .nav-links a.nav-menu-app,
-.nav-links a.nav-menu-gh { display: none; }
+.nav-links a.nav-menu-gh,
+.nav-links a.nav-menu-buy { display: none; }
+/* 抽屉里"图标 + 文字"那一套图标: 桌面导航仍是纯文字, 必须隐藏 */
+.nav-links a .nav-ic { display: none; }
 .nav-links a:hover { color: var(--blue); }
 .nav-cta {
   flex-shrink: 0;
@@ -967,35 +970,42 @@ html, body { height: 100%; overflow: hidden; }
     box-shadow: 0 20px 40px rgba(11, 42, 91, .12);
   }
   .nav-links.open { transform: translateX(0); opacity: 1; pointer-events: auto; }
+  /* ---- 抽屉条目: 五项统一成同一套"卡片" ----
+     原来混着两套: 使用说明/开源硬件是"纯文字 + 底部细分隔线"(像列表项),
+     在线配置/立即购买是实心按钮, GitHub 又是裸图标文字 —— 三种形态放一起很散。
+     现在统一: 等高(14px 内边距)、同圆角(12px)、同字号(16px)、图标 + 文字居中、间隔 10px。
+     层次只靠底色区分: 次要项白底描边 / 主转化实心色块。 */
   .nav-links a,
   .nav-links a[data-opt] {
-    display: block; flex-shrink: 1;
-    padding: 15px 18px; border-radius: 12px;
-    font-size: 16px; font-weight: 600; color: var(--navy);
-    border-bottom: 1px solid var(--line); border-radius: 0;
-  }
-  .nav-links a:active { background: var(--blue-l); }
-  /* 「在线配置」在抽屉里做成醒目的主按钮 */
-  .nav-links a.nav-menu-app {
-    display: flex; align-items: center; justify-content: center; gap: 6px;
-    margin-top: 18px; padding: 15px 18px;
-    border: none; border-radius: 12px; text-align: center;
-    background: var(--blue); color: #fff; font-weight: 700;
-  }
-  .nav-links a.nav-menu-app:active { background: var(--blue-d); }
-  /* GitHub 项: 描边样式, 放在主按钮下方作为次级动作 */
-  .nav-links a.nav-menu-gh {
     display: flex; align-items: center; justify-content: center; gap: 8px;
+    flex-shrink: 1;
     margin-top: 10px; padding: 14px 18px;
-    border: 1.5px solid var(--border-strong); border-radius: 12px;
-    text-align: center; color: var(--ink-2); font-weight: 600;
+    border: 1.5px solid var(--line); border-radius: 12px;
+    background: #fff; text-align: center;
+    font-size: 16px; font-weight: 600; color: var(--navy);
   }
-  .nav-links a.nav-menu-gh:active { background: var(--nav-hover); color: var(--navy); }
-  /* 抽屉底部补一个购买入口, 让手机端也能转化 */  .nav-links::after {
-    content: '立即购买'; display: block; margin-top: 12px;
-    padding: 15px 18px; border-radius: 12px; text-align: center;
-    background: var(--orange); color: #fff; font-size: 16px; font-weight: 700;
+  /* 桌面端不显示的图标, 抽屉里才出现 —— 保证五项都是"图标 + 文字"同一形态 */
+  .nav-links a .nav-ic { display: block; flex-shrink: 0; }
+  /* GitHub 项也在桌面隐藏名单里, 同样要把 display 抢回来 */
+  .nav-links a.nav-menu-gh { display: flex; }
+  .nav-links a:active { background: var(--blue-l); border-color: var(--blue); }
+  /* ⚠️ 下面三条必须显式写 display:flex。
+     基础样式里为了桌面端隐藏它们写的是 `.nav-links a.nav-menu-xxx { display:none }`,
+     特异性 (0,2,1) 高于 `.nav-links a`(0,1,1); 媒体查询不提升特异性 ⇒ 不重写就永远不显示。 */
+  /* 主转化 1: 在线配置(蓝) */
+  .nav-links a.nav-menu-app {
+    display: flex; margin-top: 18px;
+    border-color: var(--blue); background: var(--blue); color: #fff; font-weight: 700;
   }
+  .nav-links a.nav-menu-app:active { border-color: var(--blue-d); background: var(--blue-d); }
+  /* 主转化 2: 立即购买(橙)。
+     ⚠️ 必须用真 <a> —— 原来这里是 .nav-links::after 伪元素画的, 伪元素不可交互,
+        点了完全没反应(用户反馈"手机端立即购买跳转不了")。 */
+  .nav-links a.nav-menu-buy {
+    display: flex;
+    border-color: var(--orange); background: var(--orange); color: #fff; font-weight: 700;
+  }
+  .nav-links a.nav-menu-buy:active { border-color: var(--orange); filter: brightness(.94); }
   .nav-cta, .nav-app, .nav-gh { display: none; }
 }
 @media (max-width: 860px) {
@@ -1087,8 +1097,6 @@ html, body { height: 100%; overflow: hidden; }
     padding: 0; border-radius: 0;
     font-size: 14px; font-weight: 500; color: var(--ink-2);
   }
-  /* 抽屉专用的"立即购买"伪元素, 桌面版不要 */
-  html.vk-fixed .nav-links::after { content: none; display: none; }
   /* 抽屉打开时导航补的实底, 桌面版清掉(桌面用 .is-solid 那套毛玻璃) */
   html.vk-fixed .nav:has(.nav-links.open),
   html.vk-fixed .nav.is-drawer { background: transparent; border-bottom-color: transparent; }
