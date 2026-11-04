@@ -270,7 +270,10 @@ html, body { height: 100%; overflow: hidden; }
   box-shadow: 0 2px 10px rgba(10,132,224,.1);
 }
 .hero h1 {
-  font-size: clamp(38px, 5vw, 58px); line-height: 1.18;   /* 10-30: 放大以填充单屏, 原 34/4.4vw/50 显得空 */
+  /* 11-04: 上限 58 -> 52。轮换行最长一句「一颗顶三件 随身 AI 效率小工具」
+   * 约 14.2em 宽, 58px 时需要 ~823px, 而文字栏只有 ~756px ⇒ 必然折行(出现"小工 / 具")。
+   * 52px 时约 738px, 留 ~18px 余量。改字号前请先按这个 em 宽度核算, 别只看观感。 */
+  font-size: clamp(38px, 5vw, 52px); line-height: 1.18;
   font-weight: 800; color: var(--navy); letter-spacing: -.5px;
 }
 /* 两行各自成块: 第二行按词组换行, 避免出现孤字 */
@@ -285,6 +288,9 @@ html, body { height: 100%; overflow: hidden; }
 .hero h1 .rot { position: relative; }
 .hero h1 .rot-i {
   display: block; position: absolute; left: 0; top: 0; width: 100%;
+  /* 11-04: 每句必须【单行】—— 折行后会出现"小工 / 具"这种孤字, 很难看。
+     超出部分允许溢出(右侧还有 56px 列间距兜着), 也不要换行。 */
+  white-space: nowrap;
   opacity: 0; transform: translateY(9px);
   transition: opacity .5s ease, transform .5s ease;
   pointer-events: none;
@@ -1096,7 +1102,7 @@ html, body { height: 100%; overflow: hidden; }
   /* ⚠️⚠️ 关键: 首屏 h1 与副标题是 clamp(..., Nvw, ...) —— vw 只认**视口宽**,
        不认容器宽。1280 画布在 390px 手机上排版时视口仍是 390 ⇒ 取 clamp 下限,
        于是"缩小后"标题明显偏小。修法: 钉死成桌面上限值, 让 vw 彻底不起作用。 */
-  html.vk-fixed .hero h1 { font-size: 50px; line-height: 1.2; }
+  html.vk-fixed .hero h1 { font-size: 52px; line-height: 1.2; }
   html.vk-fixed .hero-sub { font-size: 19px; line-height: 1.7; margin-left: 0; margin-right: 0; }
   /* 桌面基础是 `justify-content: normal`(flex 里等同 flex-start)。
      显式写回 normal 而非 flex-start —— 视觉等价, 但保持与桌面逐字节一致,
