@@ -285,6 +285,9 @@ html, body { height: 100%; overflow: hidden; }
    容器高度由 JS 量最高的一句写死(见 index.html 末尾脚本), 否则切换时高度
    在 0/一行之间跳, 会把下方按钮顶得上下抖。
    .measuring 只用于"量高度": 那一刻让所有短语恢复静态堆叠, 量完即撤。 */
+/* ⚠️ 这里【不要】加 transition: height —— 实测给 .rot 加高度过渡后,
+   切换句子时内联 height 已更新成新值, 但渲染高度卡在旧值不动
+   (inline=50px 而 rect=99), 空白反而一直留着。直接瞬时切换即可。 */
 .hero h1 .rot { position: relative; }
 .hero h1 .rot-i {
   display: block; position: absolute; left: 0; top: 0; width: 100%;
@@ -1187,4 +1190,94 @@ html, body { height: 100%; overflow: hidden; }
      窄屏一屏看到的是"缩小后的整页", 缩放容器里 IntersectionObserver 可触发区域
      会变窄, 容易让人误以为"内容没加载"。窄屏直接全部置为已进入。 */
   html.vk-fixed .rv { opacity: 1; transform: none; }
+}
+
+/* ============================================================
+   移动端布局 (≤900px) —— 2026-11-04
+   ------------------------------------------------------------
+   历史: 2026-10-08 曾定"手机端 = 桌面版整体等比缩小", 明确否掉响应式重排。
+   实测 k≈0.3 时正文 16px 实际只剩 4~5px, 手机上看不清 —— 故改回真正的移动端排版。
+   机制: index.html 顶部脚本在 clientWidth < 900 时【不加 .vk-fixed / --vh-k】、
+        改加 .vk-mobile ⇒ 上面 11 处桌面断点与末尾的 html.vk-fixed 覆盖区全部让位,
+        由本块接管排版。
+   ⚠️ 必须放在文件最末尾: 与前面 max-width:900/1024 等断点同特异性, 后写者胜。
+   ============================================================ */
+@media (max-width: 900px) {
+  /* 1) 解除"锁死一屏高 + 禁止滚动" —— 手机上内容必然超过一屏, 必须能滚 */
+  html, body { height: auto; overflow: visible; }
+  body { overflow-x: hidden; }
+  .vk-scale { width: 100%; height: auto; display: block; transform: none; }
+  .vk-scale-outer { height: auto !important; }
+
+  /* 2) 背景: 去掉"AI 味" —— 蓝色渐变 + 光斑 + 点阵 + 玻璃拟态 是典型的 AI 产品页套路。
+     手机端改成一块干净的浅中性灰纯色: 不做渐变、不留任何装饰层, 让文字和按钮成为主角。 */
+  html, body { background: #F5F7FA; }
+  .hero { background: #F5F7FA; }
+  .hero::before, .hero::after, .aurora-blob, .hero-ring { display: none; }
+  /* 标签原来是"白玻璃"(半透明白 + backdrop-blur), 在纯色底上会糊成一片;
+     改成实白 + 淡描边, 边界清楚、也更像"标签"而不是雾气。 */
+  .hero-tags span {
+    background: #fff;
+    border-color: rgba(11, 42, 91, .10);
+    -webkit-backdrop-filter: none;
+            backdrop-filter: none;
+    box-shadow: 0 1px 2px rgba(11, 42, 91, .05);
+  }
+
+  /* 3) 首屏: 单列纵向堆叠(文字在上, 产品图在下) */
+  .hero { display: block; flex: none; min-height: 0; }
+  .hero-in {
+    display: grid; grid-template-columns: 1fr; gap: 0;
+    padding: calc(var(--nav-h) + 22px) 20px 44px;
+    /* ⚠️ 上面 ≤900 断点给 .hero-in 加了 text-align:center(桌面是左对齐)。
+       手机上统一回【左对齐】, 与桌面一致; 否则标题居中、正文左对齐会显得乱。 */
+    text-align: left;
+  }
+  /* 大屏手机(如 440/430)别把内容拉满整屏: 内容封顶 380, 居中。
+     不封顶时按钮、标签行、正文行宽都会跟着屏幕无限变宽, 观感很散(用户实测反馈"太宽了")。
+     导航同步封顶并把左右内边距对齐成 20, 否则 logo 和正文左边缘会差 4px 看着歪。 */
+  .hero-in, .nav-in { max-width: 420px; margin-inline: auto; }
+  .nav-in { padding: 0 20px; }
+
+  /* 3) 文案字号 */
+  .hero-badge { font-size: 12px; padding: 6px 13px; margin-bottom: 14px; }
+  /* 标题字号: 必须让【最长一句】始终单行放得下。
+     最长句「一颗顶三件 随身 AI 效率小工具」在 52px 时宽 719px ⇒ 需要的字号 ≈ 内容宽 × 0.0723。
+     内容宽 = min(100vw - 40, 380), 用 6.2vw 并封顶 26px 正好覆盖 320~900 全区间;
+     之前写的 clamp(25, 7.4vw, 32) 在 440 机型上会涨到 32px ⇒ 392px > 380 内容宽 ⇒ 换行且只剩"工具"两字。 */
+  .hero h1 { font-size: clamp(22px, 6.2vw, 26px); line-height: 1.26; letter-spacing: -.2px; }
+  /* 万一仍换行(如用户放大系统字号), 用 balance 让两行长度接近, 避免孤字 */
+  .hero h1 .rot-i { white-space: normal; text-wrap: balance; }
+  .hero-sub { margin-top: 14px; font-size: 14.5px; line-height: 1.75; max-width: none; }
+
+  /* 4) 功能标签: 四个排一行 + 保留图标 + 铺满整行宽度。
+     实测(500 宽渲染): 带 16px 图标 + 12.5px 字号需 448px, 手机 350px 放不下;
+     本档(13px 图标 + 10.5px 字号 + 7px 内边距)约 330px, 390/375 机型能一行放下,
+     再用 space-between 把剩余宽度均摊到间隙里, 右端就不再空一截。
+     ⚠️ 320 宽机型(iPhone SE, 可用 280px)仍会换行; 要彻底解决只能缩短文案。 */
+  .hero-tags {
+    gap: 4px; margin-top: 18px;
+    justify-content: space-between;
+  }
+  .hero-tags span {
+    font-size: 10.5px;
+    padding: 5px;
+    gap: 4px;
+    white-space: nowrap;
+  }
+  .hero-tags .tg-ic { width: 11px; height: 11px; display: block; }
+
+  /* 5) 按钮: 竖排铺满, 拇指好点 */
+  .hero-btns { grid-template-columns: 1fr; gap: 10px; margin-top: 22px; }
+  .hero-btns .btn { width: 100%; justify-content: center; padding: 14px 18px; font-size: 15px; }
+  /* 占位按钮矮一点: 别和两个真按钮一样高抢注意力 */
+  .hero-btns .btn-soon { padding: 11px 18px; font-size: 14px; }
+  .hero-doc-row { margin-top: 0; }
+  .hero-doc { padding: 12px 16px; font-size: 14px; }
+
+  /* 6) 产品图: 手机端【不显示】, 只在桌面端展示。
+     竖版 319×875 的实景照在窄屏上怎么摆都不好看: 原样竖着占掉半屏、缩到 190 宽又显小、
+     旋转 90° 横放则机身上的印字会侧躺。整块直接隐藏最干净, 桌面端仍然用原图。 */
+  .hero-vis { display: none; }
+  .hero-ring { display: none; }   /* 装饰环在窄屏会和产品图叠成一团 */
 }

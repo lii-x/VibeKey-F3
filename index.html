@@ -17,7 +17,7 @@
      改动样式后若不加版本号, 浏览器会继续用旧缓存。改样式时同步递增此值。
      改动履历(为什么这么改 / 踩过什么坑)见 docs/web-changelog.md。
      v34: 精简源码注释(historical note 归档到 docs/web-changelog.md)。 -->
-<link rel="stylesheet" href="web/assets/style.css?v=51">
+<link rel="stylesheet" href="web/assets/style.css?v=68">
 </head>
 <body>
 
@@ -49,6 +49,10 @@
 <script>
 (function () {
   var DESIGN_W = 1280;          // 设计稿宽度, 必须与 CSS 的 --max 一致
+  // ★ 11-04: 移动端断点。小于此宽度【不做整体缩放】, 改用真正的移动端排版
+  //   (@media max-width:900px, 见 style.css 末尾)。
+  //   原因: 1280 设计稿缩到 390 宽 ⇒ k≈0.3, 正文 16px 实际只剩 4~5px, 手机上完全没法看。
+  var MOBILE_W = 900;
   var html = document.documentElement;
 
   // ⚠️ 判据(clientWidth < DESIGN_W)与 CSS 覆盖区阈值(1400px)必须错开:
@@ -60,12 +64,14 @@
   //   会让内容比可用区宽 15px → 出现横向滚动条 → 又改变可用宽 ⇒ 抖动。
   function apply() {
     var vw = html.clientWidth;   // 真实可用宽(已排除纵向滚动条)
-    if (vw < DESIGN_W) {
+    // 移动端: 不做缩放, 交给 CSS 的 @media (max-width:900px) 重排
+    html.classList.toggle('vk-mobile', vw < MOBILE_W);
+    if (vw >= MOBILE_W && vw < DESIGN_W) {
       var k = vw / DESIGN_W;
       html.classList.add('vk-fixed');
       html.style.setProperty('--vh-k', k);
     } else {
-      // 桌面端: 完全恢复原生响应式, 不留任何缩放痕迹
+      // 桌面端 / 移动端: 完全恢复原生响应式, 不留任何缩放痕迹
       html.classList.remove('vk-fixed');
       html.style.removeProperty('--vh-k');
     }
@@ -668,26 +674,26 @@
   var reduce = window.matchMedia &&
                window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  // 量高度: 临时让容器不可见(不闪), 把所有短语改成静态堆叠量最高的一句,
-  // 写完 height 再撤掉 —— 纯读操作, 不会引起重排闪烁。
-  function fit() {
-    rot.style.visibility = 'hidden';
-    rot.classList.add('measuring');
-    var maxH = 0;
-    for (var i = 0; i < items.length; i++) {
-      if (items[i].offsetHeight > maxH) maxH = items[i].offsetHeight;
-    }
-    rot.classList.remove('measuring');
-    rot.style.height = maxH + 'px';
-    rot.style.visibility = '';
+  // ⚠️ idx 必须先声明: applyHeight() 里要用, 而 fit() 在下面就会调用
+  var idx = 0;
+
+  // 高度按【当前这一句】走, 而不是所有句子的最大值。
+  // 原因: 手机端同一句可能 1 行、也可能 2 行, 按最大值预留时,
+  // 短句(1 行)下面会白留一整行 —— 用户反馈"标题和正文之间太空了"。
+  // .rot-i 是 position:absolute + width:100%, 即使 opacity:0 也能直接量到自身高度,
+  // 不必再走 measuring 那套隐藏/静态堆叠的把戏。
+  function applyHeight() {
+    var h = items[idx].offsetHeight;
+    if (h) rot.style.height = h + 'px';
   }
+  function fit() { applyHeight(); }
   fit();
 
-  var idx = 0;
   function show(n) {
     items[idx].classList.remove('on');
     idx = n;
     items[idx].classList.add('on');
+    applyHeight();          // 跟着这句话的行数调整容器高度(配 .rot 的 height 过渡, 不跳)
   }
   if (!reduce) {
     setInterval(function () { show((idx + 1) % items.length); }, 3400);
