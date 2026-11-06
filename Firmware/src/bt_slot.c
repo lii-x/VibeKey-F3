@@ -293,8 +293,11 @@ static uint8_t g_hfp_live = 0;   /* HFP(经典语音)是否已建立; ble_app.c 
  * hfp_on=0 -> BLE 仍连则青色闪(等 HFP 重建); BLE 未连则由蓝/黄闪管 */
 void bt_multi_on_hfp_state(uint8_t hfp_on)
 {
+    extern int bt_host_linked(void);
     g_hfp_live = hfp_on;
-    if (!g_hid_env.is_connected) return;
+    /* 10-31: 原来用 g_hid_env.is_connected(BLE) 判据 —— 手机只走经典蓝牙，
+     * BLE 永远不连 ⇒ 这里直接 return，HFP 就绪后槽位灯**永远不熄灭**。改判"任一宿主已连"。 */
+    if (!bt_host_linked()) return;
     if (hfp_on)
         bt_multi_led_stop();
     else
@@ -437,8 +440,15 @@ uint8_t bt_multi_get_mode(void) { return g_cur_mode; }
  * 配对成功后 on_paired 记录地址到槽位, 指示灯转青闪/灭。 */
 void bt_multi_start_indication(void)
 {
+    extern int bt_host_linked(void);
+
     if (g_ind_suppress) return;   /* 09-16: 待机拆卸中 —— 不要起闪烁定时器(否则 DEEP 进不去) */
-    if (g_hid_env.is_connected) {
+    /* ★ 10-31 修"按按键槽位灯就闪"：原判据是 g_hid_env.is_connected(BLE)。
+     * 手机只走经典蓝牙，BLE 从不连 ⇒ 每次按键从深睡唤醒都会走
+     * ble_app_wakeup_advertise() → bt_multi_start_indication() → 重开"等回连蓝闪"，
+     * 用户看到的正是"按一下键槽位灯闪一下"。
+     * 改成"任一宿主(BLE/经典)已连就保持熄灭"。 */
+    if (bt_host_linked()) {
         bt_multi_led_stop();
         return;
     }
@@ -610,9 +620,11 @@ void bt_multi_set_white_list(void)
 
 void bt_multi_on_disconnected(void)
 {
+    extern int bt_host_linked(void);
     /* 断连后设备会重新广播等待回连/配对 -> 恢复槽位指示
-     * (连接模式蓝闪 / 配对模式黄闪)。 */
-    if (!g_hid_env.is_connected) {
+     * (连接模式蓝闪 / 配对模式黄闪)。
+     * 10-31: 判据改为"任一宿主是否还连着" —— BLE 断了但经典(手机)还在时不该闪。 */
+    if (!bt_host_linked()) {
         bt_multi_start_indication();
     } else {
         bt_multi_led_stop();

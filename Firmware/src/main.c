@@ -379,7 +379,7 @@ static const char *action_name(button_action_t action)
  *============================================================================*/
 
 /* --- 灵敏度与位移 --- */
-#define MOUSE_MAX_MOVE           100      /* 单次上报最大位移 (HID支持±127) */
+#define MOUSE_MAX_MOVE           127      /* 单次上报最大位移 (HID 报告是 int8, 满量程 ±127) */
 
 /* 三档灵敏度系数：由 KEY L1 设置里的 air_mouse_speed 选择。
  * 中档沿用原有 0.0003 手感，慢档/快档等比缩放。 */
@@ -562,6 +562,14 @@ volatile uint8_t g_key2_active = 0;        /* 空中鼠标使能: 0=关, 1=开 *
 
 static uint8_t mouse_button = 0x00;
 
+/* ★ 10-31 新增：合成点击保护窗口。
+ * 问题：点击(单击/双击/长按动作)是"按下→15ms→松开"两步合成，
+ * 而鼠标发送线程每帧会用【引脚电平】重算并覆盖 mouse_button 再发一帧位移。
+ * 若这 15ms 内正好有一帧位移(空中鼠标零偏漂移时一直有)，就会用 btn=0
+ * 把刚按下的键位冲掉 → 点击被"抢答"成瞬间按下又松开 → 主机端表现为"点了没反应"。
+ * 置位期间线程不再用引脚电平覆盖，保住合成点击的按键位。 */
+static volatile uint8_t g_click_hold = 0;
+
 /* 鼠标按键状态 = 引脚电平直读（上拉输入: 按下=低电平=1, 释放=高电平=0）。
  * 不引入任何"单击/拖拽"阈值门控: 按下即 down、释放即 up, 纯 1:1 状态映射。
  * 发送线程每帧据引脚电平反推按键位; 按下但无移动时由按键事件回调(L2 分支)
@@ -684,6 +692,16 @@ static void gyro_start_settle(int cold)
     g_acc_ring_idx = 0; g_acc_ring_full = false;   /* 加速度净转角窗口重置(重新积累) */
 }
 
+/* 鼠标链路是否可用：BLE 已连(PC 主路径) 或 经典 HID 通道已建(手机主路径)。
+ * ★ 10-31 新增：原来整条鼠标线程只看 g_hid_env.is_connected(BLE)。手机只走经典
+ * 蓝牙、BLE 永远不连 ⇒ 线程恒定空转、IMU 不启动、鼠标完全没反应。 */
+static int mouse_host_ready(void)
+{
+    extern ble_hid_env_t g_hid_env;
+    extern unsigned char classic_hid_linked(void);
+    return g_hid_env.is_connected || classic_hid_linked();
+}
+
 /* 发送线程: 按固定节拍刷新"累积位移".
  * 关键改进(解决掉帧感):
  *  1) 累积值在 IMU 高优先级回调里只加不取; 这里用临界区原子取出,
@@ -701,7 +719,7 @@ static void mouse_send_thread(void *param)
     while (1)
     {
         /* 未连接时 IMU 已断电(air_mouse_stop), 低频轮询允许系统进深睡 */
-        if (!g_hid_env.is_connected) {
+        if (!mouse_host_ready()) {
             rt_thread_mdelay(200);
             continue;
         }
@@ -732,7 +750,7 @@ static void mouse_send_thread(void *param)
          * 08-27 看门狗: 改 2s 超时(原永久阻塞), 超时即检查 IMU 心跳(见下). */
         if (g_mouse_sem)
             rt_sem_take(g_mouse_sem, rt_tick_from_millisecond(2000));
-        if (!g_hid_env.is_connected)
+        if (!mouse_host_ready())
             continue;
 
         /* ---- IMU 看门狗 (08-27 修复"鼠标随机失灵, 仅重连恢复") ----
@@ -771,13 +789,11 @@ static void mouse_send_thread(void *param)
          * 改为 max(10ms, 间隔ms+2ms): 任何参数状态(语音/过渡/收紧/空闲)都不
          * 超发不丢帧, 不依赖参数协商事件/标志, 自动正确。 */
         int flush_ms = MOUSE_FLUSH_MS;
-        {
-            extern volatile uint16_t g_ble_cur_interval;   /* 当前连接间隔×1.25ms, ble_app.c 维护 */
-            int intv_ms = (g_ble_cur_interval * 5 + 3) / 4;  /* ×1.25ms → ms */
-            int need = intv_ms + 2;                            /* 裕量: 每连接事件约 1 帧 */
-            if (need > MOUSE_FLUSH_MS)
-                flush_ms = need;
-        }
+        /* ★ 10-31: 不再跟 BLE 连接间隔挂钩。鼠标报文现在全部走经典 HID
+         * （ble_hid_mouse_send 开头就 return 给 classic_hid_send_mouse），
+         * BLE 的连接间隔/发送池对它已无约束；继续跟着 BLE interval 走
+         * （PC 上 15ms → 节拍被拉到 17ms）只会白白降低帧率、加重"掉帧感"。
+         * 固定 10ms ≈ IMU 104Hz，正好一帧一发。 */
         if (last_send != 0) {
             rt_tick_t gap = rt_tick_get() - last_send;
             if (gap < rt_tick_from_millisecond(flush_ms))
@@ -796,23 +812,10 @@ static void mouse_send_thread(void *param)
         if (dx == 0.0f && dy == 0.0f)
             continue;   /* 信号量堆积(回调释放快于消费), 数据已被前次取走 */
 
-        /* TX 池余量自适应 (防掉帧): BLE 发送池仅 8 包, 由连接事件归还.
-         * 连接间隔若 > 发送节拍(如手机协商成 15ms / SCO 期 100~200ms), 归还
-         * 跟不上消耗 → 池耗尽 → sibles_write_value 返回 0 静默丢帧(HEAD 版
-         * ble_hid_mouse_send 无保护). 这里在取走数据后、发送前等归还(最多
-         * ~20ms)——【绝不能 continue】: 数据已从 pending 取出, continue 会
-         * 丢位移; 且信号量被 IMU 104Hz 堆积时 sem_take 立即返回 → 空转循环,
-         * 移动永久失灵(实测: 语音后移动几次就卡死, 按键却正常). */
-        {
-            extern uint8_t sibles_get_tx_pkts(void);
-            uint8_t tries = 0;
-            while (sibles_get_tx_pkts() <= 1 && tries < 4) {
-                rt_thread_mdelay(5);      /* 等一个连接事件归还(5ms 级) */
-                tries++;
-            }
-            /* 仍不足: 继续发送(池满时 sibles_write_value 返回 0 丢一帧),
-             * 但线程不卡死, 下帧继续 — 优于"永久停发" */
-        }
+        /* ★ 10-31: 整段 TX 池等待已删除。鼠标报文现在全部走经典 HID，
+         * 不再调用 sibles_write_value，BLE 那 8 包发送池跟鼠标无关了。
+         * 保留这段只会在池被其它 BLE 流量占用时每帧白等最多 20ms
+         * （PC 上 BLE 一直连着，等于常态化加延迟）→ 明显加重"掉帧感"。 */
 
         /* 加入上次余数 -> 取整发送 -> 余数留待下帧 */
         dx += rem_x;
@@ -883,7 +886,8 @@ static void mouse_send_thread(void *param)
                     rt_pin_read(BSP_EC_KEY_PIN) == 0)
                     btn |= 0x04;   /* 中键 */
             }
-            mouse_button = btn;
+            if (!g_click_hold)
+                mouse_button = btn;
             ble_hid_mouse_move(mx, my, mouse_button);
         }
     }
@@ -909,6 +913,9 @@ static void air_mouse_set_active(int active, int cold)
             g_light_held = 1;
         }
         ble_app_conn_param_tighten();       /* C: 收紧连接参数(低延迟) */
+        /* ★ 10-31: 退出经典链路 Sniff 并禁止再进 —— 否则每帧报文都要等
+         * 500ms 级的 sniff 锚点，表现就是"掉帧、跟手差"。空闲分支会恢复。 */
+        { extern void ble_app_mouse_sniff_ctl(int); ble_app_mouse_sniff_ctl(1); }
         enc_enter_active();                 /* 编码器恢复 1ms 轮询 */
         rt_kprintf("[AirMouse] -> ACTIVE (gyro on, LIGHT, tight BLE, enc poll)\n");
     } else {
@@ -927,6 +934,8 @@ static void air_mouse_set_active(int active, int cold)
          * 且拿起由本函数 active 分支立刻 tighten 触发协商, 1~2s 内恢复跟手.
          * IMU 降频(陀螺关+12.5Hz)+释放 LIGHT 锁 + BLE 放松 共同承担空闲省电. */
         ble_app_conn_param_relax_idle();
+        /* ★ 10-31: 空闲了，重新允许经典链路进 Sniff 省电（活跃时被禁用）。 */
+        { extern void ble_app_mouse_sniff_ctl(int); ble_app_mouse_sniff_ctl(0); }
         enc_enter_idle();                   /* 编码器停轮询, 改引脚边沿唤醒 */
         /* 记录当前重力方向作为唤醒检测基线 */
         g_idle_acc_base_x = (int32_t)g_acc_x;
@@ -2060,9 +2069,11 @@ static void c_dispatch_gesture(int idx, const key_config_t *k)
         {
         uint8_t bit = (k->keycode >= 0x01 && k->keycode <= 0x04) ? k->keycode : 0x01;
         mouse_button |= bit;
+        g_click_hold = 1;              /* 15ms 内不许位移帧覆盖按键位(见 g_click_hold 注释) */
         ble_hid_mouse_button(mouse_button);
         rt_thread_mdelay(15);
         mouse_button &= (uint8_t)~bit;
+        g_click_hold = 0;
         ble_hid_mouse_button(mouse_button);
         }
     }
@@ -2156,9 +2167,11 @@ static void l_dispatch_gesture(int idx, const key_config_t *k)
         {
             uint8_t bit = (k->keycode >= 0x01 && k->keycode <= 0x04) ? k->keycode : 0x01;
             mouse_button |= bit;
+            g_click_hold = 1;          /* 15ms 内不许位移帧覆盖按键位(见 g_click_hold 注释) */
             ble_hid_mouse_button(mouse_button);
             rt_thread_mdelay(15);
             mouse_button &= (uint8_t)~bit;
+            g_click_hold = 0;
             ble_hid_mouse_button(mouse_button);
         }
     }
@@ -2250,9 +2263,11 @@ static void ec_dispatch_press_gesture(const key_config_t *k)
         {
             uint8_t bit = (k->keycode >= 0x01 && k->keycode <= 0x04) ? k->keycode : 0x01;
             mouse_button |= bit;
+            g_click_hold = 1;          /* 15ms 内不许位移帧覆盖按键位(见 g_click_hold 注释) */
             ble_hid_mouse_button(mouse_button);
             rt_thread_mdelay(15);
             mouse_button &= (uint8_t)~bit;
+            g_click_hold = 0;
             ble_hid_mouse_button(mouse_button);
         }
     }

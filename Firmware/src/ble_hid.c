@@ -287,7 +287,12 @@ static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len)
          * 现在直接尝试经典发送: 真有未连, SDK 会自己打
          * "[U-L]hid is not connect,can't send data" 并丢弃, 不会出错。 */
         extern void classic_hid_send_keyboard(unsigned char, const unsigned char *, unsigned char);
-        rt_kprintf("[KB] -> classic (mod=0x%02x)\n", modifier);
+        /* 带上键码: 只看 mod 分不清"发了个空报告"和"发了个真按键"。
+         * 全 0 = 纯释放报文(主机不会有任何动作)，这是判断"按了没反应"的第一手依据。 */
+        rt_kprintf("[KB] -> classic mod=0x%02x n=%d keys=%02x %02x %02x %02x %02x %02x\n",
+                   modifier, len,
+                   len > 0 ? keys[0] : 0, len > 1 ? keys[1] : 0, len > 2 ? keys[2] : 0,
+                   len > 3 ? keys[3] : 0, len > 4 ? keys[4] : 0, len > 5 ? keys[5] : 0);
         classic_hid_send_keyboard(modifier, keys, len);
         return;
     }
@@ -428,9 +433,12 @@ void ble_hid_flush_pending(void)
 
 static void ble_hid_mouse_send(int8_t dx, int8_t dy, uint8_t buttons)
 {
-    /* ⚠️ 10-31 鼠标暂仍走 BLE：
-     * 经典侧只有键盘描述符(两条一起注册会被主机拒绝)，鼠标报告发过去也无效。
-     * 等复合描述符(键盘+鼠标合并在一条 SDP 记录里)做完再切。 */
+    /* ★ 10-31 鼠标也走经典：复合描述符已包含鼠标(Report ID 3) */
+    {
+        extern void classic_hid_send_mouse(unsigned char, short, short, signed char);
+        classic_hid_send_mouse(buttons, dx, dy, 0);
+        return;
+    }
     if (!g_hid_env.is_connected) return;
     if (!g_hid_env.ms_ntf_enabled) {
         rt_kprintf("[BLE HID] MS send skipped (ntf=0)\n");
@@ -449,7 +457,10 @@ static void ble_hid_mouse_send(int8_t dx, int8_t dy, uint8_t buttons)
 
 void ble_hid_mouse_move(int16_t dx, int16_t dy, uint8_t button)
 {
-    if (!g_hid_env.is_connected) return;
+    /* ★ 10-31: 判据补上"经典 HID 已连" —— 手机只走经典，BLE 永远不连，
+     * 原来这里直接 return 会导致手机端鼠标位移全部丢弃。 */
+    extern unsigned char classic_hid_linked(void);
+    if (!g_hid_env.is_connected && !classic_hid_linked()) return;
 
     if (dx > 127) dx = 127;
     else if (dx < -127) dx = -127;
@@ -466,13 +477,22 @@ void ble_hid_mouse_move(int16_t dx, int16_t dy, uint8_t button)
 // buttons:left == 0x01,right == 0x02, middle == 0x04, release == 0x00
 void ble_hid_mouse_button(uint8_t button)
 {
-    if (!g_hid_env.is_connected)return;
+    extern unsigned char classic_hid_linked(void);
+    /* 诊断(10-31): 分清"按键事件压根没进来"还是"进来了但报文没发出去" */
+    rt_kprintf("[MS] btn=0x%02x\n", button);
+    if (!g_hid_env.is_connected && !classic_hid_linked()) return;   /* 同 mouse_move：经典链路也算已连 */
     ble_hid_mouse_send(0, 0,button);
 }
 
 static void ble_hid_mouse_scroll(int8_t wheel)
 {
-    /* ⚠️ 10-31 滚轮同样暂走 BLE，理由同上 */
+    rt_kprintf("[MS] wheel=%d\n", wheel);   /* 诊断(10-31): 滚轮事件是否到达 */
+    /* ★ 10-31 滚轮也走经典 */
+    {
+        extern void classic_hid_send_mouse(unsigned char, short, short, signed char);
+        classic_hid_send_mouse(0, 0, 0, wheel);
+        return;
+    }
     if (!g_hid_env.is_connected || !g_hid_env.ms_ntf_enabled) return;
     ble_hid_wait_tx_pkt();   /* 通话中 TX 池易满: 等归还再发, 防静默丢包 */
     uint8_t report[5] = {0, 0, 0, 0, (uint8_t)wheel};
