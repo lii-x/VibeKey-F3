@@ -379,3 +379,87 @@ static int apw(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT(apw, audio(SCO) power tuning: dump|aec|ns|agc|3a|freq|wfi|hp|snap|diff|bg);
+
+/* ============================================================================
+ * 麦克风 ADC 增益可调（11-13，排查"滋滋"底噪用）
+ * ============================================================================
+ * SDK 里 `get_mic_volume()` 是 __weak 默认返回 12dB，本工程此前没有覆盖。
+ * 这里提供强符号覆盖 + 运行时命令，用来判断底噪到底来自模拟前端还是后级：
+ *   micvol 0   → 重拨一次 → 底噪明显变小 ⇒ 模拟侧(麦克风自噪/前端增益过高)
+ *   micvol 0   → 底噪几乎不变 ⇒ ADC 之后(数字域/供电串扰/蓝牙链路)
+ * 范围: SF32LB52x 的 ADC 路径音量 -60 ~ +30 dB。
+ * ⚠️ 音量在 ADC 打开时配置，改完要**重新建立通话**才生效。
+ * ========================================================================== */
+/* ⚠️ 不能自己定义 get_mic_volume() —— SDK 的 drv_audprc.c 里它是**强符号**，
+ * 再定义一个会 multiple definition 链接失败（已踩过）。
+ * 它的真实取值来自该文件里的全局 `g_adc_volume`（默认 12），直接改这个变量即可。 */
+extern int8_t g_adc_volume;
+
+int cmd_micvol(int argc, char **argv)
+{
+    if (argc > 1)
+    {
+        int v = atoi(argv[1]);
+        if (v < -60) v = -60;
+        if (v > 30)  v = 30;
+        g_adc_volume = (int8_t)v;
+    }
+    rt_kprintf("[MIC] ADC gain = %d dB (range -60~30), apply on next call\n", g_adc_volume);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_micvol, micvol, set mic ADC gain dB range -60~30);
+
+/* ============================================================================
+ * 麦克风链路默认值（11-13）
+ * ============================================================================
+ * 器件：WMM7037AT2-4/TR（韦尔 WILLSEMI）
+ *   灵敏度 -42 dBV/Pa（偏低）、**SNR 仅 59 dB(A)**、DC 输出 0.76V、200Ω
+ * ⇒ 等效输入噪声 = 94 - 59 = **35 dB(A) SPL**，与安静房间背景（30~35 dB SPL）相当，
+ *   所以只要通话开着就能听到"沙沙"。这是**器件的物理下限**，软件消不掉。
+ *
+ * 能做的只有把增益降下来、让底噪的绝对电平变小；响度损失由 AGC 补：
+ *   ADC 12dB → **3dB**（底噪降 9dB）
+ *   AGC 18dB → **22dB**（补回语音响度）
+ * 唯一根治办法是换 SNR ≥ 65dB 的麦克风（且这颗已停产）。
+ *
+ * 运行时可用 `micvol <dB>` 现场调整，立即生效（下次通话）。
+ * ========================================================================== */
+extern int8_t  g_adc_volume;
+extern int16_t g_ul_agc_compression_gain_db;
+
+void vk_mic_apply_defaults(void)
+{
+    /* ★ 11-13 回退：之前把 ADC 12→3dB、AGC 18→22dB，实测**电流声反而更大**
+     * （AGC 多给 4dB 把底噪一起抬了），且降模拟增益只是让信号更弱、
+     * 逼 AGC 用数字增益去补，反而放大 ADC 量化噪声 —— 对 SNR 是负优化。
+     * ⇒ 恢复原值 12dB / 18dB。噪声问题不再靠增益解决，见下面的结论。 */
+    g_adc_volume = 12;
+    g_ul_agc_compression_gain_db = 18;
+    rt_kprintf("[MIC] defaults: ADC=%ddB AGC=%ddB\n",
+               g_adc_volume, g_ul_agc_compression_gain_db);
+}
+
+/* ============================================================================
+ * wbs —— 宽带语音(mSBC)开关（11-13，排查"声音一段一段"用）
+ * ============================================================================
+ * 现象：音质差 + 声音断断续续 + 电流声，且日志出现过
+ *       `msbc packet: total 252 rx error 252`（100% 包错误）。
+ * 这是**链路误码**的典型表现，不是麦克风问题。
+ *
+ * mSBC(16kHz) 与 CVSD(8kHz) 在空中都是 64kbps，但 **mSBC 几乎没有冗余、
+ * 对丢包极其敏感**；CVSD 用差分编码，丢一点还能"糊"过去。
+ * ⇒ 关掉 WBS 退回 CVSD：
+ *     断断续续**消失**（只是音质变闷）⇒ 链路余量不足，问题在射频/天线
+ *     仍然断断续续                      ⇒ 不是编码问题，继续查射频或干扰
+ * 通话中改可能不生效，建议改完重新拨号。
+ * ========================================================================== */
+int cmd_wbs(int argc, char **argv)
+{
+    extern int bt_interface_set_wbs_status(unsigned char status);
+    static unsigned char wbs_on = 1;
+    if (argc > 1) wbs_on = (argv[1][0] != '0');
+    bt_interface_set_wbs_status(wbs_on);
+    rt_kprintf("[HFP] WBS(mSBC) -> %s  (0=CVSD 更抗丢包但音质闷)\n", wbs_on ? "ON" : "OFF");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_wbs, wbs, toggle wideband speech 0=CVSD 1=mSBC);

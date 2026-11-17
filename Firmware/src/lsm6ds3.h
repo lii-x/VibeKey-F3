@@ -119,16 +119,32 @@ typedef enum {
     LSM_XL_FS_16G = 0x04,  /* ±16g, 灵敏度 0.488 mg/LSB */
 } lsm_xl_fs_t;
 
-/** 陀螺仪量程 */
+/** 陀螺仪量程 —— 位域必须按 **CTRL2_G** 的布局编码：
+ *      CTRL2_G: [7]=0  [6]=FS_125  [5:4]=FS_G[1:0]  [3:0]=ODR_G[3:0]
+ *      FS_G:  00=±250  01=±500  10=±1000  11=±2000
+ *
+ * ⚠️⚠️ 11-12 重大修正：原来这里按 **CTRL1_XL** 的布局（FS 在 [3:2]、每档 0x04）编码，
+ *   而 CTRL2_G 的 FS 在 [5:4] ⇒ 写进 0x04 实际落在 ODR 位上，FS_G 保持 00；
+ *   同时 ODR 用了 XL 的 0x40，bit6 正好是 **FS_125** ⇒ 芯片被设成
+ *   **±125 dps + 104Hz**，而换算仍按 ±500(17.5 mdps/LSB) 处理
+ *   ⇒ **所有角速度读数被放大 4 倍**，实测日志 `CTRL2_G=0x44` 印证（bit6=1）。
+ *   后果：死区门限 900/450 换算成真实值只有 225/112 mdps ⇒ 极小的真实零漂
+ *   就能推动光标 ⇒ 表现为"怎么调都慢慢漂"。
+ *   加速度计 CTRL1_XL 的布局不同（ODR[7:4]、FS[3:2]），那边编码是对的，不要一起改。 */
 typedef enum {
-    LSM_G_FS_125DPS  = 0x02,  /* ±125 dps,  灵敏度  4.375 mdps/LSB */
+    LSM_G_FS_125DPS  = 0x40,  /* ±125 dps,  灵敏度  4.375 mdps/LSB (FS_125=1) */
     LSM_G_FS_250DPS  = 0x00,  /* ±250 dps,  灵敏度  8.75  mdps/LSB */
-    LSM_G_FS_500DPS  = 0x04,  /* ±500 dps,  灵敏度 17.5   mdps/LSB */
-    LSM_G_FS_1000DPS = 0x08,  /* ±1000 dps, 灵敏度 35.0   mdps/LSB */
-    LSM_G_FS_2000DPS = 0x0C,  /* ±2000 dps, 灵敏度 70.0   mdps/LSB */
+    LSM_G_FS_500DPS  = 0x10,  /* ±500 dps,  灵敏度 17.5   mdps/LSB (FS_G=01) */
+    LSM_G_FS_1000DPS = 0x20,  /* ±1000 dps, 灵敏度 35.0   mdps/LSB (FS_G=10) */
+    LSM_G_FS_2000DPS = 0x30,  /* ±2000 dps, 灵敏度 70.0   mdps/LSB (FS_G=11) */
 } lsm_g_fs_t;
 
 /** 输出数据率 (ODR) */
+/** 陀螺仪 ODR —— CTRL2_G 的 [3:0]，与加速度计 CTRL1_XL 的 [7:4] 不同，不能共用 */
+#define LSM_G_ODR_OFF    0x00
+#define LSM_G_ODR_104HZ  0x04
+#define LSM_G_ODR_208HZ  0x05
+
 typedef enum {
     LSM_ODR_OFF   = 0x00,
     LSM_ODR_12HZ  = 0x10,

@@ -1,4 +1,5 @@
 #include "rtthread.h"
+#include <stdlib.h>          /* atoi: stilltest 命令解析秒数 */
 #include "rtdevice.h"
 #include <string.h>
 #include "bf0_hal.h"
@@ -19,6 +20,11 @@
 #include "bt_slot.h"
 #include "drivers/pm.h"          /* pm_policy_t / PM_SLEEP_MODE_xxx (覆盖 SDK 默认 pm_policy) */
 #include "hpsys_rcc.h"          /* HPSYS_RCC_DBGR_FORCE_HP / hwp_hpsys_rcc (WFI 降频管理) */
+
+/* 统一按键发送入口（classic_hid.c）：多媒体使用码走经典 consumer 报告，
+ * 普通按键走 BLE 键盘。见 classic_hid.c 里 hid_key_press 的说明。 */
+extern void hid_key_press(unsigned char mod, unsigned char keycode);
+extern void hid_key_release(unsigned char mod, unsigned char keycode);
 
 /* SF32LB52X 的 DEEP 睡眠隔离 PAD，GPIO 无法唤醒；LIGHT 睡眠不隔离 PAD，GPIO 保留供电。
  * 覆盖 sifli_light_handler 后 GPIO1_IRQn 在 LIGHT 中可唤醒。活跃态默认策略只到 LIGHT：
@@ -383,9 +389,24 @@ static const char *action_name(button_action_t action)
 
 /* 三档灵敏度系数：由 KEY L1 设置里的 air_mouse_speed 选择。
  * 中档沿用原有 0.0003 手感，慢档/快档等比缩放。 */
+/* ★ 11-13: 回落到原始档位（×1）。
+ * 历程：修 CTRL2_G 位域后读数不再虚高 4 倍，曾补 ×4 → 用户"太快" → ×2 → 仍"太快"，
+ * 故直接回到最初的三档数值，不再做补偿；如需更慢，可在 app 里选更低的档位，
+ * 或把这三个数继续等比下调。 */
+/* ★★★ 11-13 重要：增益是【按帧】算的（dx = sx_eff × sens，每帧一次），
+ * 所以 **ODR 翻倍 ⇒ 同样转速下光标速度也翻倍**。
+ * ODR 104→208 之后必须把系数减半才能保持原来的手感。
+ * 这里正好取 104Hz 时那组（用户认可的 0.00015/0.0003/0.0006）的一半。
+ * ⚠️ 以后改 ODR 或改发送周期，都要按比例回调这个表。 */
+/* 11-13: ODR 退回 104Hz ⇒ 增益按比例翻倍，回到用户认可的 104Hz 那组数值。 */
 static const float MOUSE_SENS_TABLE[3] = { 0.00015f, 0.0003f, 0.0006f };
+/* 11-13: 支持运行时覆盖（shell `sens <系数>`），方便现场找到"跟手但不飘"的点。
+ * 0 = 不覆盖，走 app 里的速度档位表。 */
+static volatile float g_sens_override = 0.0f;
+
 static float mouse_sens(void)
 {
+    if (g_sens_override > 0.0f) return g_sens_override;
     uint8_t speed = key_config_get()->air_mouse_speed;
     if (speed >= 3) speed = AIR_MOUSE_SPEED_MEDIUM;
     return MOUSE_SENS_TABLE[speed];
@@ -399,7 +420,7 @@ static float mouse_sens(void)
 #define MOUSE_CALIB_WAIT_STILL  20       /* 等待静止的连续帧数 (~0.19s) */
 #define MOUSE_CALIB_FRAMES      60       /* 校准采样帧数 (~0.58s) */
 #define MOUSE_CALIB_DIFF_THRESH 800      /* 帧间差分阈值 (mdps), 静止时差分<此值 */
-#define MOUSE_CALIB_TIMEOUT_FRAMES 520   /* 等待静止超时(~5s@104Hz): 一直不静止也强制放行,
+#define MOUSE_CALIB_TIMEOUT_FRAMES 260   /* 11-13: 5s→2.5s, 首启别干等 */   /* 等待静止超时(~5s@104Hz): 一直不静止也强制放行,
                                             由运行时自适应(Step2)后台修正 bias, 绝不让鼠标
                                             因校准卡死(08-26 断连重连体验修复) */
 
@@ -414,7 +435,35 @@ static float mouse_sens(void)
 #define MOUSE_BIAS_RATE_LIMIT     250      /* ② 常规收敛去偏速率上限 (mdps): 只吸收残差量级,
                                              慢速有意移动(300~600, 减速瞄准) >250 → 冻结,
                                              避免吸收运动 → 停下后反向回飘 */
-#define MOUSE_BIAS_TRACK_ALPHA_STILL 0.03f /* 常规收敛系数 (三重证据齐, 96ms 确认后) */
+/* ★★★ 11-10: **尚未拿到有效 bias 时**用这个宽门限。
+ * 故障现场：上电时设备被拿在手上(一直在动) → 校准等不到静止 → 超时走
+ * "bias=0 (runtime adapt will fix)"。而 LSM6DS3TR-C 出厂零偏可达 ±2000 mdps，
+ * bias=0 ⇒ 去偏后 |rate| 恒 >250 ⇒ `rate_small` 永远不成立 ⇒ 自适应收敛被永久挡住
+ * ⇒ `idle_still`(|rate|<1000) 也永远不成立 ⇒ **状态机卡在 ACTIVE**：
+ * 陀螺 104Hz + 编码器 1ms 轮询 + BLE 15ms + 持有 LIGHT 锁(禁止 DEEP)。
+ * 实测就是这样白烧了 **484 秒**，直到长时静止路径(alpha 0.01)慢慢把 bias 追回来才掉下去。
+ * ⇒ bias 无效时把门限放宽到覆盖出厂零偏，让它在第一次"差分稳定"时就把零漂学进来
+ *   （alpha 0.03，约 1s 收敛），随后 idle 判定立刻恢复。
+ *   风险仅存在于"首次未校准"的极短窗口：此时 rate 本来就不代表真实角速度，
+ *   且 acc_rotating 仍然挡着旋转，匀速平移的误吸收代价远小于卡死 8 分钟。 */
+/* ★★★ 11-13 关键收敛：2500 → 400。
+ * 2500 是早期为了"bias=0 时能追上 ±2000 出厂零偏"设的，但代价是
+ * **允许把 ≤2.5dps 的真实运动吸收进 bias** —— 日志实测 bias 从 (1627,-3772)
+ * 被拉到 (-7195,6452)（差 9000mdps），手一停光标就狂甩。
+ * 现在有了 flash 持久化 + 激活采样，初始零偏基本是准的，不再需要这么宽的追捕范围。
+ * 收紧到 400 ⇒ 单次可吸收的运动量被限制在 0.4dps 以内，最坏情况也不会造成明显反向漂移。 */
+#define MOUSE_BIAS_RATE_LIMIT_BOOT 400
+/* ★ 11-13: 0.03 → 0.08。
+ * 实测停下来之后 bias 要 ~0.5s 才追上（alpha 0.03 时 15 帧只走了 37%），
+ * 这段时间残差仍在 1000mdps 量级、还能把光标推动 ⇒ 用户感知"停下还要飘一下"。
+ * 提到 0.08 后同样 15 帧能走 70%+，收敛时间压到 ~0.15s。
+ * 风险控制：仍受 rate_small(|rate|<250) + is_still(差分<800) + !acc_rotating 三重门控，
+ * 真实运动不会被吸收。 */
+/* ★ 11-13: 0.08 → 0.12。
+ * 用户反馈"第一次激活会先往一个方向走一段才正常"——那是激活时零偏采样被跳过
+ * (手在动)后，运行时收敛在追零漂的过程。加快一点能明显缩短这段漂移。
+ * 门控不变(rate_small + is_still + !acc_rotating)，真实运动仍不会被吸收。 */
+#define MOUSE_BIAS_TRACK_ALPHA_STILL 0.12f /* 常规收敛系数 (三重证据齐, 96ms 确认后) */
 #define MOUSE_BIAS_TRACK_LONG    0.01f     /* 长时绝对静止强制收敛 (残差>250 时 rate 判据会挡
                                              常规收敛, 此路径保证残差仍能回退) */
 #define MOUSE_STILL_LONG_DIFF    200       /* 长时静止判定差分上限 (mdps): 接近绝对静止
@@ -429,6 +478,10 @@ static float mouse_sens(void)
 #define MOUSE_ACC_ROT_SINSQ    0.00030f  /* 窗口净转角阈值 sin²(1°): 超过=设备在旋转 */
 #define MOUSE_STILL_THRESH       1000     /* 空闲判定角速度阈值 (mdps, 去偏置后, ~1.0dps):
                                             匀速移动时 rate 大不会误判静止 */
+#define MOUSE_STEADY_FRAMES      200      /* 读数持续平稳 ~2s ⇒ 判为零漂并强制收敛
+                                             参考 MOUSE_BIAS_TRACK_ALPHA_STEADY 的说明 */
+#define MOUSE_BIAS_TRACK_ALPHA_STEADY 0.05f /* 长稳态收敛系数: 比常规 0.03 更快,
+                                             2s 后残余 767mdps 约 0.6s 压到 100 以内 */
 #define MOUSE_STILL_FRAMES       10       /* 静止确认帧数 (~96ms) */
 #define MOUSE_STILL_LONG_FRAMES  50       /* 长时绝对静止帧数 (~0.5s): 人手匀速移动必有抖动
                                             打断差分, 差分持续<800 达 0.5s 只有放下/真静止
@@ -437,12 +490,34 @@ static float mouse_sens(void)
 /* --- 双阈值迟滞死区 --- */
 /* 09-01 手感微调: 1200/600 → 900/450 —— 上挥是慢速动作, 原 1.2dps 阈值
  * 把小幅度上挥吞掉(用户反馈"上有点难上"), 适度降低让慢速挥动更易激活。 */
-#define MOUSE_DZ_ENTER           900      /* 进入移动阈值 (mdps, ~0.9dps) */
-#define MOUSE_DZ_EXIT            450      /* 退出移动阈值 (mdps, ~0.45dps) */
+/* ★ 11-13: 900/450 → 1200/600。
+ * 修好量程和姿态放大之后，真实残差只剩几十~几百，但**停止瞬间的余速**仍有 500~1000，
+ * 900 的门限压不住 ⇒ "停下后随机方向溜一小段"。抬高后这类余速直接被死区吃掉，
+ * 代价是慢速动作需要更明显才能起步（配合之前灵敏度 ×2，整体手感仍偏快）。 */
+/* ★ 11-13 二次调整：1200/600 → **1000/500**。
+ * 用户反馈"晃一下慢一拍"。死区是"必须先超过才启动"的门槛：
+ * 1200 意味着要加速到 1.2dps 光标才开始动，起步那 20~30ms 是空白的，
+ * 叠加 EMA 就是"慢半拍"的观感。降到 1000 起步更跟手。
+ * 漂移风险已可控：现在零偏来自 flash + 激活采样，收敛残差通常 <100mdps，
+ * 离 500 的退出门限还有很大余量。 */
+#define MOUSE_DZ_ENTER           1000     /* 进入移动阈值 (mdps, ~1.0dps) */
+#define MOUSE_DZ_EXIT            500      /* 退出移动阈值 (mdps, ~0.5dps) */
 
 /* --- EMA平滑 --- */
 /* 09-01 手感微调: 0.5 → 0.45 —— 上挥幅度波动大(实测 sy -16547↔-6030), 略增平滑减跳变 */
-#define MOUSE_EMA_ALPHA          0.45f    /* 新值权重, 越大越跟手但越抖 */
+/* ★ 11-13: 0.45 → 0.65。
+ * 用户反馈"速度合适了，但有点不跟手/延迟"。平滑是主要的滞后来源之一：
+ * alpha=0.45 时间常数约 2 帧(≈19ms)，且低速时会把每帧的小位移再摊薄，
+ * 叠加定点量化(位移必须攒够 1px 才发)就变成"迟一拍"。
+ * 传感器现在很干净(stilltest span 140)，不需要这么重的平滑。 */
+/* ★ 11-13: 0.8 → 0.9。传感器 stilltest span=140 很干净，可以把权重提到 0.9
+ * （时间常数 ≈1 帧 ≈10ms），进一步降低平滑滞后；若看到光标有细微抖动可退回 0.8。 */
+#define MOUSE_EMA_ALPHA          0.95f    /* 新值权重, 越大越跟手但越抖 */
+
+/* ⚠️⚠️ 11-13: IMU ODR 曾短暂提到 208Hz（降采样延迟 9.6ms→4.8ms），
+ * 但**功耗敏感**，已退回 104Hz；跟手改由加大 EMA(0.45→0.8) 补偿。
+ * 教训：位移增益是**按帧**累加的，ODR 翻倍会让光标速度也翻倍；
+ *       且下面这批"按帧计数"的时间窗也要同步换算。两者都要一起动。 */
 
 /* --- 轴对齐旋转角 (补偿传感器安装偏角) ---
  * IMU 物理安装轴与屏幕 X/Y 轴有夹角, 纯 dx=rate_x/dy=rate_y 会让每个方向走斜线。
@@ -531,7 +606,19 @@ static const float ROT_D = g_rot_tbl[MOUSE_ROT_IDX][3];  /* d: rate_y -> sy */
  * 节拍 = max(MOUSE_FLUSH_MS, 当前连接间隔+2ms): 语音期 sco_quiet 把间隔拉到 40~80ms,
  * 若按 10ms 出包会耗尽 8 包 TX 池(每连接事件才归还) → 丢帧卡顿; 自适应间隔后任何
  * 参数状态都不超发不丢帧 (08-26 根治, 取代此前的事件驱动慢节拍). */
-#define MOUSE_FLUSH_MS           10       /* 正常发送刷新间隔(ms), 连接间隔≤10ms 时使用 */
+/* ★ 11-13: 10 → 6ms。鼠标走经典 HID（无 BLE 连接间隔约束），
+ * 提高出包率可再压 ~4ms 端到端延迟。经典 ACL 的 TX 队列比 BLE 的 8 包池宽松，
+ * 单包只有 6 字节，166Hz 出包压力可控；若实测出现"卡顿/丢帧"再退回 8ms。 */
+#define MOUSE_FLUSH_MS_DEFAULT   6        /* 默认发送刷新间隔(ms)；运行时可 flush <ms> 改 */
+static volatile uint16_t g_mouse_flush_ms = MOUSE_FLUSH_MS_DEFAULT;
+static volatile uint32_t g_hid_send_cnt = 0;      /* 累计发送包数(算实测回报率) */
+
+/* ★★★ 11-13 重要：IMU 回调里的诊断打印会**阻塞数据通路**
+ * `imu_drdy_cb` 是数据就绪回调，里面调 rt_kprintf 是同步串口输出：
+ * 115200 波特率下一条 60 字符的日志约 5ms，[DRIFT]+[OUT] 每次两三条 = 10~15ms，
+ * 也就是每 2 秒卡一次 10ms+，直接把 104Hz 的帧节奏打乱 ⇒ "晃一下慢半拍"。
+ * ⇒ 默认全部关闭，需要排查时用 `mdbg 1` 打开。 */
+static volatile uint8_t g_mouse_dbg = 0;
 
 /* ===========================================================================
  * 陀螺上电/唤醒过渡期 (修复"刚连蓝牙/空闲→活跃时光标跳变"的核心)
@@ -577,10 +664,134 @@ static volatile uint8_t g_click_hold = 0;
 
 /* --- 算法状态 --- */
 static int32_t g_bias_x = 0, g_bias_y = 0, g_bias_z = 0; /* 零漂偏置 (mdps, z 轴 09-01 补: 水平固定映射用) */
+/* ★ 11-12: 本次【激活】后 bias 是否已被重新验证过。
+ * 与 g_bias_valid 的区别：
+ *   g_bias_valid  = "曾经拿到过一个 bias"（跨连接/跨激活保留，用于超时兜底沿用）
+ *   g_bias_trusted= "当前的 bias 与此刻陀螺零漂吻合"（每次陀螺重新上电都要重验）
+ * 为什么必须分开：陀螺零偏随温度/上电状态漂移，实测同一颗芯片
+ *   关机前学到的 bias=(2363,-3984)，重新激活后 raw≈(2975,-4427)
+ *   ⇒ 残差 (612,-443)。而 g_bias_valid 一直是 1 ⇒ 收敛门限只有 250
+ *   ⇒ `rate_small` 永远不成立 ⇒ **bias 再也不会被修正**
+ *   ⇒ 残差 612 mdps > 死区退出阈值 MOUSE_DZ_EXIT(450) ⇒ 光标持续缓慢漂移。
+ * 这正是"激活后不动会慢慢往左飘"的根因（日志 [DRIFT] 里 rate=(483,-351) 就是它）。 */
+/* ★ 11-12: "输出已被死区按住" 的连续帧计数。
+ * 用于一条比 is_still 更宽松的收敛路径：只要上一帧 dx/dy 都被死区判成 0，
+ * 此刻光标就确实没在动，可以放心把当前 rate 吸收进 bias。
+ * 专门对付"停下来之后因温漂残留而在 450~900 滞留区慢慢飘"。 */
+/* ★ 11-12: 连续"读数平稳"(is_still) 的帧数，**不看速率大小**。
+ * 用来区分"真实慢速平移"和"零漂"：两者 sdiff 都很小，但零漂会持续几十秒不变，
+ * 真实平移的方向/速度几百毫秒内就会变。
+ * 超过 MOUSE_STEADY_FRAMES(≈2s) 仍平稳 ⇒ 判为零漂，强制收敛。 */
+static uint16_t g_steady_cnt = 0;
+static uint16_t g_dz_still_cnt = 0;
+static uint8_t g_bias_trusted = 0;
+static uint8_t g_bias_stale = 0;    /* 温度差异大: 值可用但需重采 */
 static uint8_t g_bias_valid = 0;   /* 上次校准的 bias 是否有效(跨连接保留, 08-26):
                                       有效则 BLE 重连后直接进入工作态, 不再等待静止
                                       重新校准 —— 解决"断连重连后拿在手上鼠标用不了"
                                       (校准状态机卡在等静止, 而手在动永远不静止) */
+
+/* ============================================================================
+ * 零偏持久化（11-13）—— 用户建议：把校准得到的 bias 存起来，下次开机直接用
+ * ============================================================================
+ * 为什么要存：陀螺每次上电零偏都不同，开机后第一次激活若采样被跳过(手在动)，
+ * 就只能从 0 或很久以前的值起步 ⇒ 靠运行时收敛追，表现为"先往一个方向走一段"。
+ * 存一份到 flash 后，开机就有合理起点（激活时仍会重新采样修正，因为零偏随温度漂）。
+ *
+ * flash 布局：KEY_CONFIG 占 0x12328000 起 4 页（含 0x12329000 的 BT_SLOT），
+ * 下一张空闲页 0x1232C000 正好空着，用它存一小条记录（4KB 页，只写前几十字节）。
+ * 写入策略：只有变化超过 MOUSE_BIAS_SAVE_DELTA 才擦写，避免频繁激活磨 flash。
+ * ========================================================================== */
+#define MOUSE_BIAS_FLASH_ADDR   0x1232C000u
+#define MOUSE_BIAS_MAGIC        0x4D425331u   /* "MBS1" */
+#define MOUSE_BIAS_SAVE_DELTA   150           /* mdps: 变化小于此值不写 flash */
+#define MOUSE_BIAS_FOLLOW_STEP  2             /* mdps/帧: 慢速跟随步长(≈200mdps/秒) */
+#define MOUSE_BIAS_CAP_RETRY    8             /* 无 bias 时最多重试几轮(每轮≈0.25s) */
+#define MOUSE_BIAS_TEMP_TOL     500           /* 0.01℃: 温度差超过 5℃ 就重新采零偏 */
+
+typedef struct {
+    uint32_t magic;
+    int32_t  bx, by, bz;
+    int32_t  temp_cdeg;     /* 存这份零偏时的芯片温度(0.01℃), 用于判断环境差异 */
+    uint32_t chk;
+} mouse_bias_rec_t;
+
+static int32_t bias_rec_chk(const mouse_bias_rec_t *r)
+{
+    return (int32_t)(r->bx * 31 + r->by * 131 + r->bz * 7 + r->temp_cdeg * 13);
+}
+
+static int32_t bias_rec_last_x = 0x7FFFFFFF, bias_rec_last_y, bias_rec_last_z;
+
+static void mouse_bias_load(void)
+{
+    extern int rt_flash_read(unsigned int addr, unsigned char *buf, unsigned int len);
+    mouse_bias_rec_t r = {0};
+
+    if (rt_flash_read(MOUSE_BIAS_FLASH_ADDR, (unsigned char *)&r, sizeof(r)) != 0) return;
+    if (r.magic != MOUSE_BIAS_MAGIC || r.chk != (uint32_t)bias_rec_chk(&r)) return;
+    /* 零偏合理上限 8000mdps(8dps): 超过必然是吸收了运动, 不认这条记录 */
+    if (r.bx > 8000 || r.bx < -8000 || r.by > 8000 || r.by < -8000 ||
+        r.bz > 8000 || r.bz < -8000) return;
+
+    g_bias_x = r.bx; g_bias_y = r.by; g_bias_z = r.bz;
+    g_bias_valid = 1;      /* 有可用起点 ⇒ air_mouse_start 直接进工作态, 不必等静止校准 */
+    g_bias_trusted = 0;    /* 但这是上次温度下的值, 激活时要重新验证/修正 */
+
+    /* ★★★ 11-14 温度感知：设备出厂后可能被运到温差很大的环境（南方→北方、
+     * 或从仓库到用户手里），而陀螺零偏随温度漂（典型 ±0.01~0.05 dps/℃）。
+     * 拿旧温度下学的零偏直接跑 ⇒ 偏几百 mdps ⇒ 一开机就漂。
+     * ⇒ 温度差超过 MOUSE_BIAS_TEMP_TOL(5℃) 时标记为"待重采"：
+     *   值仍作为起点（比 0 强得多），但下次激活会强制重新采样一次。 */
+    if (r.temp_cdeg != 0) {
+        extern int lsm_read_temp(int32_t *temp_cdeg);
+        int32_t now = 0;
+        if (lsm_read_temp(&now) == 0) {
+            int32_t d = now - r.temp_cdeg;
+            if (d < 0) d = -d;
+            if (d > MOUSE_BIAS_TEMP_TOL) {
+                g_bias_stale = 1;
+                rt_kprintf("[AirMouse] bias from flash is %d.%02dC away (stored %d.%02dC now %d.%02dC), will re-capture\n",
+                           (int)(d / 100), (int)(d % 100),
+                           (int)(r.temp_cdeg / 100), (int)(r.temp_cdeg % 100),
+                           (int)(now / 100), (int)(now % 100));
+            }
+        }
+    }
+    bias_rec_last_x = r.bx; bias_rec_last_y = r.by; bias_rec_last_z = r.bz;
+    rt_kprintf("[AirMouse] bias restored from flash (%d,%d,%d) mdps\n",
+               (int)r.bx, (int)r.by, (int)r.bz);
+}
+
+static void mouse_bias_save(void)
+{
+    extern int rt_flash_write(unsigned int addr, const unsigned char *buf, unsigned int len);
+    extern int rt_flash_erase(unsigned int addr, unsigned int len);
+
+    if (!g_bias_valid) return;
+    int32_t dx = g_bias_x - bias_rec_last_x, dy = g_bias_y - bias_rec_last_y,
+            dz = g_bias_z - bias_rec_last_z;
+    if (dx < 0) dx = -dx; if (dy < 0) dy = -dy; if (dz < 0) dz = -dz;
+    if (dx < MOUSE_BIAS_SAVE_DELTA && dy < MOUSE_BIAS_SAVE_DELTA && dz < MOUSE_BIAS_SAVE_DELTA)
+        return;   /* 变化不大, 不折腾 flash */
+
+    mouse_bias_rec_t r;
+    r.magic = MOUSE_BIAS_MAGIC;
+    r.bx = g_bias_x; r.by = g_bias_y; r.bz = g_bias_z;
+    r.temp_cdeg = 0;
+    {   extern int lsm_read_temp(int32_t *temp_cdeg);
+        int32_t t = 0;
+        if (lsm_read_temp(&t) == 0) r.temp_cdeg = t;
+    }
+    r.chk = (uint32_t)bias_rec_chk(&r);
+
+    rt_flash_erase(MOUSE_BIAS_FLASH_ADDR, 0x1000);
+    if (rt_flash_write(MOUSE_BIAS_FLASH_ADDR, (const unsigned char *)&r, sizeof(r)) == 0) {
+        bias_rec_last_x = r.bx; bias_rec_last_y = r.by; bias_rec_last_z = r.bz;
+        rt_kprintf("[AirMouse] bias saved to flash (%d,%d,%d) mdps\n",
+                   (int)r.bx, (int)r.by, (int)r.bz);
+    }
+}
 static int32_t g_sdiff_x = 0, g_sdiff_y = 0;           /* 帧间差分 EMA 平滑值 (mdps, 抗手抖/毛刺) */
 static int16_t g_acc_ring[MOUSE_ACC_ROT_WIN][3];       /* 加速度环形缓冲(原始mg), 算净转角 */
 static uint8_t g_acc_ring_idx = 0;                     /* 当前写入槽 */
@@ -597,10 +808,53 @@ static uint16_t      g_wait_still_cnt = 0;                 /* 等待静止的连
 static uint16_t      g_wait_still_timeout = 0;             /* 等待静止总超时计数(见 MOUSE_CALIB_TIMEOUT_FRAMES) */
 static int32_t       g_calib_buf_x[MOUSE_CALIB_FRAMES];
 static int32_t       g_calib_buf_y[MOUSE_CALIB_FRAMES];
+/* ★ 11-12: **Z 轴必须一起校准**。
+ * 原来只采 x/y，g_bias_z 永远是 0（或只在运行时 trace 路径里慢慢学）。
+ * 而当前输出变换（MOUSE_ROLL_COMP_EN=1 的全姿态映射）**不含 rate_x，只用 rate_y 和 rate_z**：
+ *     sx ∝ (rate_y·gy3 + rate_z·gz3)/den
+ *     sy ∝ σ·(rate_z·gy3 - rate_y·gz3)/den
+ * ⇒ Z 轴零漂会同时灌进左右和上下两路 ⇒ **斜向漂移（实测就是"左上"）**，
+ *   而且与具体方位（gy3/gz3）有关、与芯片个体无关 ⇒ 换多少颗都会飘，方向还一致。
+ * 这就是"好几颗芯片都往左上飘"的系统性根因。 */
+static int32_t       g_calib_buf_z[MOUSE_CALIB_FRAMES];
 static int32_t       g_last_gyro_x = 0, g_last_gyro_y = 0; /* 上一帧原始值 (差分用) */
 static bool          g_last_gyro_valid = false;            /* 差分是否有上一帧 */
 static bool          g_imu_started = false;             /* IMU是否已启动 */
 static uint16_t      g_gyro_settle = 0;                 /* 陀螺过渡期剩余丢弃帧(0=已稳定) */
+
+/* ★★★ 11-12: 激活瞬间直接采一次零偏（"激活即归零"）。
+ * 为什么需要：陀螺每次上电（从低功耗唤醒）零偏都与上次不同，实测可达几百 mdps。
+ * 旧的流程是"沿用上次 bias + 靠收敛慢慢追"，而收敛要等 is_still 满足 ⇒
+ * 激活后头 1~2 秒必然带着残差输出 = 用户看到的"一激活就往某方向飘，飘一会儿才停"。
+ * 这里在 settle 结束后直接连续采样 N 帧取均值，**一次性 snap 到位**，
+ * 把那段"漂一会儿"的窗口直接抹掉。
+ * 安全性：只有当采样窗口内的极差(最大-最小)足够小(确实静止)才采纳并置 trusted；
+ * 否则丢弃采样，交回原来的收敛逻辑 —— 用户拿着乱甩时激活不会把运动学进 bias。 */
+/* ★ 11-23 调整：用户反馈"激活时手明明静止，还是会先飘一小段再停"。
+ * 原因是 **陀螺上电热瞬态**：刚使能后的零点不是恒定值，而是在 0.3~1s 内缓慢下降，
+ * 直接采前 40 帧 ≈ 把瞬态的一段进了均值，bias 偏高 ⇒ 开头那一小段带残差输出，
+ * 等运行时收敛追上才停（正是"飘一小段就正常"）。
+ * ⇒ 先丢掉 CAP_SKIP 帧等瞬态过去，再采 CAP_FRAMES 帧求均值，整体窗口拉到 ~0.1+0.5s。 */
+/* ★ 11-23 用户明确要求"按下就能移动" ⇒ 采样窗口压到最短。
+ * 只丢 0 帧、采 10 帧(≈96ms)：既能把这一瞬间的零偏大致定住，又不让用户觉得"按键发木"。
+ * 精度不够的部分交给运行时收敛（停位/长稳态两条路径），它们本来就是连续的、
+ * 不会阻塞输出。 */
+#define MOUSE_BIAS_CAP_WINDOW      24      /* 滑动窗口帧数 ≈0.23s */
+/* 11-13: 48 → 26。窗口本身就是 24 帧(≈0.23s)，多等 2 帧就够判断；
+ * 再长只是让"按下到能动"变慢，而用户明确要求"按下就能移动"。 */
+#define MOUSE_BIAS_CAP_MAX_FRAMES  26      /* 最长等待 ≈0.77s */
+#define MOUSE_BIAS_CAP_OK_SPREAD   300     /* 窗内极差 < 该值即判"稳"，取均值定 bias */
+
+/* --- stilltest: 静止噪声测量（见采样处注释） --- */
+static uint16_t      g_stilltest_frames = 0;
+static int32_t       g_still_min[3] = { 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF };
+static int32_t       g_still_max[3] = { -0x7FFFFFFF, -0x7FFFFFFF, -0x7FFFFFFF };
+static int64_t       g_still_sum[3] = { 0, 0, 0 };
+static uint32_t      g_still_n = 0;
+static uint16_t      g_bias_cap_left = 0;              /* 剩余采样帧数(0=不在采样) */
+static uint16_t      g_bias_cap_idx = 0;               /* 环形窗写指针 */
+static uint16_t      g_bias_cap_n = 0;                 /* 窗内已有帧数 */
+static int32_t       g_bias_cap_ring[MOUSE_BIAS_CAP_WINDOW][3];   /* [x,y,z] */
 
 /* --- 滚转补偿状态 (加速度计提取重力方向) --- */
 static float         g_acc_x = 0.0f, g_acc_y = 0.0f;   /* 加速度EMA (mg), 提取重力 */
@@ -690,6 +944,17 @@ static void gyro_start_settle(int cold)
     g_last_gyro_valid = false;  /* 重新积累帧间差分, 防上一活跃期残留值误判静止 */
     g_sdiff_x = 0; g_sdiff_y = 0;   /* 平滑差分基准同样重置 */
     g_acc_ring_idx = 0; g_acc_ring_full = false;   /* 加速度净转角窗口重置(重新积累) */
+
+    /* ★★★ 11-13 设计修正（用户指出）：**手持设备不存在"按下瞬间静止"**。
+     * 原来每次激活都硬性阻塞 0.23s 采零偏，让用户"按下后等一下才能动"，
+     * 而手持时手几乎永远在微动 —— 这个前提本身就不成立。
+     * ⇒ 改成：**只要已经有一份可用 bias（flash 或本次会话上次的），按下就立即响应，
+     *   完全不采样、不阻塞**。零偏的持续修正交给运行时的安全收敛
+     *   （|三轴残差| < 400 且读数稳，也就是"手停下来那一下"）。
+     * 只有**完全没有任何 bias**（首次开机、flash 也没记录）时，才阻塞采一次。 */
+    g_bias_cap_left = (g_bias_valid && !g_bias_stale) ? 0 : MOUSE_BIAS_CAP_MAX_FRAMES;
+    g_bias_cap_idx = 0;
+    g_bias_cap_n = 0;
 }
 
 /* 鼠标链路是否可用：BLE 已连(PC 主路径) 或 经典 HID 通道已建(手机主路径)。
@@ -788,7 +1053,7 @@ static void mouse_send_thread(void *param)
          * 80ms 即耗尽 → 每帧等池(≤30ms)超时丢帧 → "语音结束后一卡一卡"。
          * 改为 max(10ms, 间隔ms+2ms): 任何参数状态(语音/过渡/收紧/空闲)都不
          * 超发不丢帧, 不依赖参数协商事件/标志, 自动正确。 */
-        int flush_ms = MOUSE_FLUSH_MS;
+        int flush_ms = g_mouse_flush_ms;
         /* ★ 10-31: 不再跟 BLE 连接间隔挂钩。鼠标报文现在全部走经典 HID
          * （ble_hid_mouse_send 开头就 return 给 classic_hid_send_mouse），
          * BLE 的连接间隔/发送池对它已无约束；继续跟着 BLE interval 走
@@ -888,7 +1153,10 @@ static void mouse_send_thread(void *param)
             }
             if (!g_click_hold)
                 mouse_button = btn;
+            /* 手机端：链路可能已被主设备拉回 sniff，发报文前先踢一次(内部限流 400ms) */
+            { extern void ble_app_mouse_sniff_kick(void); ble_app_mouse_sniff_kick(); }
             ble_hid_mouse_move(mx, my, mouse_button);
+            g_hid_send_cnt++;          /* 实测回报率统计 */
         }
     }
 }
@@ -907,6 +1175,11 @@ static void air_mouse_set_active(int active, int cold)
         gyro_start_settle(cold);            /* 丢弃随后过渡帧, 抑制上电/唤醒尖峰跳变 */
         g_imu_lp = 0;
         g_idle_cnt = 0;                     /* 重置空闲计数, 避免唤醒后误触空闲 */
+        /* ★ 11-12: 陀螺刚重新上电，零偏与上次可能差几百 mdps。
+         * 保留旧 bias 当起点，但**标记为未验证** ⇒ 收敛门限回到 2500，
+         * 让它用 ~1s 把新零漂学准；收敛到位后自动置回 1，门限收回 250。 */
+        g_bias_trusted = 0;
+        g_dz_still_cnt = 0;
         g_idle_since_tick = 0;              /* 活跃: 清零休眠计时(08-27) */
         if (!g_light_held) {                /* B: 持有 LIGHT 锁, 禁止 DEEP(使用中需响应) */
             rt_pm_request(PM_SLEEP_MODE_LIGHT);
@@ -1298,9 +1571,9 @@ static void shake_thread(void *param)
 
         /* 与 C1/C2/C3 按键处理保持一致: 多媒体键固定 modifier=0x00 */
         uint8_t mod = (sk->action_type == KEY_ACTION_MULTIMEDIA) ? 0x00 : sk->modifier;
-        ble_hid_keyboard_press_key(mod, sk->keycode);
+        hid_key_press(mod, sk->keycode);
         rt_thread_mdelay(SHAKE_KEY_HOLD_MS);
-        ble_hid_keyboard_release_key(mod, sk->keycode);
+        hid_key_release(mod, sk->keycode);
     }
 }
 
@@ -1438,6 +1711,90 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         return;
     }
 
+    /* ★★★ 11-12 激活即归零：settle 结束后连采 N 帧，直接定 bias。
+     * 这一段在"去偏/死区/积分"之前 return，所以采样帧不会输出任何位移。 */
+    /* ★★★ 11-12 自适应"激活即归零"
+     * 固定窗口的问题：陀螺上电后有一段热瞬态（实测这台设备 0.3s 处仍有 700+ mdps 的
+     * 逐帧噪声），固定 10 帧常常采到"正在动"⇒ `bias capture skipped` ⇒ 用回旧 bias
+     * ⇒ 激活后又飘一小段。
+     * 改成【滑动窗口 + 稳定性判据】：
+     *   ① 每帧把 raw 推进 24 帧的环形窗；
+     *   ② 窗内极差 < 300 mdps 即认为"这 24 帧是稳的"，立刻取窗均值定 bias 并结束
+     *      —— 设备安静时 ~230ms 就能结束，按键基本无感；
+     *   ③ 最长等 80 帧(≈0.77s)：仍然不稳就放弃(保留旧 bias)，交给运行时收敛；
+     *   ④ 期间 `return`，不输出位移（否则会把瞬态当移动发出去）。
+     * 这样"安静就快、嘈杂就等"，比固定窗口稳，也比固定窗口快。 */
+    if (g_bias_cap_left > 0) {
+        g_bias_cap_left--;
+        g_bias_cap_ring[g_bias_cap_idx][0] = gyro_mdps.x;
+        g_bias_cap_ring[g_bias_cap_idx][1] = gyro_mdps.y;
+        g_bias_cap_ring[g_bias_cap_idx][2] = gyro_mdps.z;
+        g_bias_cap_idx = (uint16_t)((g_bias_cap_idx + 1) % MOUSE_BIAS_CAP_WINDOW);
+        if (g_bias_cap_n < MOUSE_BIAS_CAP_WINDOW) g_bias_cap_n++;
+
+        int fill_done = (g_bias_cap_n >= MOUSE_BIAS_CAP_WINDOW);
+        int last_chance = (g_bias_cap_left == 0);
+
+        if (fill_done || last_chance) {
+            int32_t lo[3], hi[3];
+            int64_t sum[3] = {0, 0, 0};
+            for (int i = 0; i < 3; i++) { lo[i] = 0x7FFFFFFF; hi[i] = -0x7FFFFFFF; }
+            for (uint16_t i = 0; i < g_bias_cap_n; i++) {
+                for (int j = 0; j < 3; j++) {
+                    int32_t v = g_bias_cap_ring[i][j];
+                    if (v < lo[j]) lo[j] = v;
+                    if (v > hi[j]) hi[j] = v;
+                    sum[j] += v;
+                }
+            }
+            int32_t span_x = hi[0] - lo[0];
+            int32_t span_y = hi[1] - lo[1];
+            int ok = (span_x < MOUSE_BIAS_CAP_OK_SPREAD) &&
+                     (span_y < MOUSE_BIAS_CAP_OK_SPREAD);
+
+            if (ok || (last_chance && span_x < 800 && span_y < 800)) {
+                g_bias_x = (int32_t)(sum[0] / g_bias_cap_n);
+                g_bias_y = (int32_t)(sum[1] / g_bias_cap_n);
+                g_bias_z = (int32_t)(sum[2] / g_bias_cap_n);
+                g_bias_trusted = 1;
+                g_bias_valid = 1;
+                g_bias_stale = 0;
+                g_bias_cap_left = 0;
+                rt_kprintf("[AirMouse] bias captured (%d,%d,%d) span=(%d,%d) n=%u\n",
+                           (int)g_bias_x, (int)g_bias_y, (int)g_bias_z,
+                           (int)span_x, (int)span_y, (unsigned)g_bias_cap_n);
+                mouse_bias_save();   /* 变化够大才写 flash */
+            } else if (last_chance && !g_bias_valid) {
+                /* ★★★ 11-14 关键修复（新板/新芯片"有时一激活就往左上飘"）：
+                 * 没有 bias 时若采样失败就放行，输出用的是 bias=0 ⇒ 三轴零漂
+                 * （尤其 z）全部灌进去 ⇒ 固定方向的斜向漂移（实测就是左上）。
+                 * 而"有没有 bias"取决于按下那 0.25 秒手稳不稳 ⇒ 时好时坏。
+                 * ⇒ 没有 bias 就**不许输出**：重新开始一轮采样，最多重试
+                 * MOUSE_BIAS_CAP_RETRY 次（≈2 秒）。宁可按下去等两秒，
+                 * 也不能拿 bias=0 去驱动光标。
+                 * 有 bias 的情况仍走下面的"跳过"分支（沿用旧值，不阻塞）。 */
+                static uint8_t cap_retry = 0;
+                if (cap_retry < MOUSE_BIAS_CAP_RETRY) {
+                    cap_retry++;
+                    g_bias_cap_left = MOUSE_BIAS_CAP_MAX_FRAMES;
+                    g_bias_cap_idx = 0;
+                    g_bias_cap_n = 0;
+                    rt_kprintf("[AirMouse] no bias yet, retry capture %d/%d\n",
+                               (int)cap_retry, MOUSE_BIAS_CAP_RETRY);
+                } else {
+                    cap_retry = 0;
+                    g_bias_cap_left = 0;
+                    rt_kprintf("[AirMouse] bias capture FAILED, run with bias=0 (expect drift)\n");
+                }
+            } else if (last_chance) {
+                g_bias_cap_left = 0;
+                rt_kprintf("[AirMouse] bias capture skipped span=(%d,%d) n=%u\n",
+                           (int)span_x, (int)span_y, (unsigned)g_bias_cap_n);
+            }
+        }
+        return;   /* 采样期间不输出位移 */
+    }
+
     /* ---- 帧间差分 + EMA 平滑（校准层与运行时共用） ----
      * 单帧差分对手持微颤敏感(腕抖单帧差分常>800mdps), 用约2.5帧窗口EMA平滑:
      * 手抖高频来回分量大幅衰减, 真·慢速单向移动仍保留 → 静止判定对手持鲁棒。
@@ -1466,6 +1823,15 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
      * (单帧差分常>800) 也能通过静止判定 → 手持时校准也能完成, 避免 bias=0 吃
      * 出厂零偏(±2000+ mdps)导致恒定慢漂。另叠加加速度净转角门控(!acc_rotating):
      * 慢速旋转时陀螺差分≈0 会被误判静止, 旋转中采样会把真实运动写进 bias。 */
+    /* ★★★ 11-13: 解决"第一次激活要等一会儿才能动"。
+     * 原来只要校准没完成(CALIB_DONE)，这里直接 return —— 完全不输出光标。
+     * 而校准要先等设备静止(20 帧)才开始采样，等不到就干等 5 秒超时。
+     * 用户拿起设备按激活键时手往往在动 ⇒ 最长要等 5 秒才能动鼠标。
+     * 现在：只要**手上已经有可用 bias**（激活采样或上次会话留下的），就不再拦，
+     * 直接放行让光标立即响应；零偏的后续微调交给运行时收敛。 */
+    if (g_calib_state != CALIB_DONE && g_bias_valid && g_key2_active)
+        g_calib_state = CALIB_DONE;      /* 跳过阻塞，用现有 bias 直接工作 */
+
     if (g_calib_state != CALIB_DONE) {
         bool raw_still = g_last_gyro_valid && !acc_rotating &&
                          (g_sdiff_x < MOUSE_CALIB_DIFF_THRESH) &&
@@ -1511,26 +1877,32 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
             if (g_calib_idx < MOUSE_CALIB_FRAMES) {
                 g_calib_buf_x[g_calib_idx] = gyro_mdps.x;
                 g_calib_buf_y[g_calib_idx] = gyro_mdps.y;
+                g_calib_buf_z[g_calib_idx] = gyro_mdps.z;
                 g_calib_idx++;
                 if (g_calib_idx == MOUSE_CALIB_FRAMES) {
                     /* 排序后取中间50%做均值, 抑制残余抖动 */
                     qsort(g_calib_buf_x, MOUSE_CALIB_FRAMES, sizeof(int32_t), cmp_int32);
                     qsort(g_calib_buf_y, MOUSE_CALIB_FRAMES, sizeof(int32_t), cmp_int32);
-                    int32_t sum_x = 0, sum_y = 0;
+                    qsort(g_calib_buf_z, MOUSE_CALIB_FRAMES, sizeof(int32_t), cmp_int32);
+                    int32_t sum_x = 0, sum_y = 0, sum_z = 0;
                     int start = MOUSE_CALIB_FRAMES / 4;
                     int end   = MOUSE_CALIB_FRAMES * 3 / 4;
                     for (int i = start; i < end; i++) {
                         sum_x += g_calib_buf_x[i];
                         sum_y += g_calib_buf_y[i];
+                        sum_z += g_calib_buf_z[i];
                     }
                     int cnt = end - start;
                     g_bias_x = sum_x / cnt;
                     g_bias_y = sum_y / cnt;
-                    g_bias_valid = 1;   /* 校准完成: bias 有效, 下次重连直接沿用 */
+                    g_bias_z = sum_z / cnt;   /* ★ 11-12: z 也校准(见 g_calib_buf_z 说明) */
+                    g_bias_trusted = 1;       /* 刚校准完, 与当前零漂吻合 */
+                    g_bias_valid = 1;         /* 校准完成: bias 有效, 下次重连直接沿用 */
                     g_calib_state = CALIB_DONE;
-                    rt_kprintf("[AirMouse] calib done bias=(%d,%d) mdps  grav=(%d,%d) mg\n",
-                               (int)g_bias_x, (int)g_bias_y,
+                    rt_kprintf("[AirMouse] calib done bias=(%d,%d,%d) mdps  grav=(%d,%d) mg\n",
+                               (int)g_bias_x, (int)g_bias_y, (int)g_bias_z,
                                (int)g_acc_x, (int)g_acc_y);
+                    mouse_bias_save();   /* 变化够大才写 flash */
                 }
             }
             return;   /* 校准期间不输出 */
@@ -1543,6 +1915,62 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
     /* ---- Step 1: 去偏置 ---- */
     int32_t rate_x = gyro_mdps.x - g_bias_x;   /* mdps */
     int32_t rate_y = gyro_mdps.y - g_bias_y;
+
+    /* ★ 11-12 静止测试(stilltest 命令): 强制保持陀螺开启并统计 raw 的极差。
+     * 作用是把"到底是传感器不稳还是算法跟不上"这件事一次性量出来：
+     *   放在桌上不动 10s，看 span(最大-最小)：
+     *     span < 100  ⇒ 传感器正常，问题在算法
+     *     span > 500  ⇒ 传感器/供电有问题，固件再怎么调都追不上
+     * ⚠️ 平时设备静止 ~5s 就会进 IDLE 关陀螺，数据冻结，根本测不出来 ⇒ 需要这个命令。 */
+    if (g_stilltest_frames > 0) {
+        g_stilltest_frames--;
+        int32_t v[3] = { gyro_mdps.x, gyro_mdps.y, gyro_mdps.z };
+        for (int i = 0; i < 3; i++) {
+            if (v[i] < g_still_min[i]) g_still_min[i] = v[i];
+            if (v[i] > g_still_max[i]) g_still_max[i] = v[i];
+            g_still_sum[i] += v[i];
+        }
+        g_still_n++;
+        if (g_stilltest_frames == 0) {
+            uint32_t n = g_still_n ? g_still_n : 1;
+            rt_kprintf("[STILL] done: n=%u\n", (unsigned)n);
+            for (int i = 0; i < 3; i++) {
+                rt_kprintf("[STILL] %c: min=%d max=%d span=%d mean=%d mdps\n",
+                           'x' + i, (int)g_still_min[i], (int)g_still_max[i],
+                           (int)(g_still_max[i] - g_still_min[i]),
+                           (int)(g_still_sum[i] / (int32_t)n));
+            }
+            rt_kprintf("[STILL] span<100 正常 / >500 判定传感器或供电异常\n");
+        }
+    }
+
+    /* ★ 11-12 漂移诊断: 每 2s 打一次原始零漂/bias/去偏残差/静止判据，
+     * 用来定位"光标一直往一个方向飘"到底卡在哪个门控上：
+     *   raw   —— 陀螺原始读数（静止时这就是零漂本身）
+     *   bias  —— 当前减掉的偏置
+     *   rate  —— 去偏后的残差，>MOUSE_DZ_EXIT(450) 就会继续积分出位移
+     *   sdiff —— 平滑帧间差分，>MOUSE_STILL_DIFF_THRESH(800) 则判为"非静止"，不收敛
+     *   rot   —— 加速度净转角判据，1 时冻结 bias（旋转中不吸收）
+     *   cnt   —— 连续静止帧计数，需 >= MOUSE_STILL_FRAMES(10) 才开始收敛
+     *   v     —— g_bias_valid（0 表示还在用宽门限 2500 追） */
+    {
+        static rt_tick_t dbg_last = 0;
+        rt_tick_t dbg_now = rt_tick_get();
+        if (g_mouse_dbg &&
+            (dbg_last == 0 || (dbg_now - dbg_last) > rt_tick_from_millisecond(2000))) {
+            dbg_last = dbg_now;
+            rt_kprintf("[DRIFT] z: raw=%d bias=%d rate=%d\n",
+                       (int)gyro_mdps.z, (int)g_bias_z, (int)(gyro_mdps.z - g_bias_z));
+            rt_kprintf("[DRIFT] raw=(%d,%d) bias=(%d,%d) rate=(%d,%d) "
+                       "sdiff=(%d,%d) rot=%d cnt=%d steady=%d v=%d t=%d\n",
+                       (int)gyro_mdps.x, (int)gyro_mdps.y,
+                       (int)g_bias_x, (int)g_bias_y,
+                       (int)rate_x, (int)rate_y,
+                       (int)g_sdiff_x, (int)g_sdiff_y,
+                       acc_rotating ? 1 : 0, (int)g_still_cnt, (int)g_steady_cnt,
+                       g_bias_valid ? 1 : 0, g_bias_trusted ? 1 : 0);
+        }
+    }
 
     /* ---- Step 2: 静止检测 + 自适应零漂校准 ----
      * 不论空中鼠标开关, 只要确认静止就缓慢跟踪 bias, 补偿温漂.
@@ -1565,8 +1993,22 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
      */
     bool is_still = (g_sdiff_x < MOUSE_STILL_DIFF_THRESH) &&
                     (g_sdiff_y < MOUSE_STILL_DIFF_THRESH);
-    bool rate_small = (rate_x > -MOUSE_BIAS_RATE_LIMIT && rate_x < MOUSE_BIAS_RATE_LIMIT) &&
-                      (rate_y > -MOUSE_BIAS_RATE_LIMIT && rate_y < MOUSE_BIAS_RATE_LIMIT);
+    /* bias 还没建立时（校准超时走的 bias=0 分支）用宽门限，否则零漂把收敛永久挡住，
+     * 见 MOUSE_BIAS_RATE_LIMIT_BOOT 的说明。拿到 bias 之后回到严格的 250。 */
+    const int32_t rate_lim = g_bias_trusted ? MOUSE_BIAS_RATE_LIMIT
+                                            : MOUSE_BIAS_RATE_LIMIT_BOOT;
+    /* ★★★ 11-13: **Z 轴也必须进门控**（这是"停下后往反方向溜一段"的根因）。
+     * 输出映射（yaw/pitch）用的是 **rate_y 和 rate_z**，压根不含 rate_x；
+     * 而 rate_small 原来只判 x/y ⇒ 纯"扭手腕"(yaw) 时 rate_z 很大、x/y 很小
+     * ⇒ 被当成"静止" ⇒ bias_z 把**真实运动**吸收进去。
+     * 实测日志：`z: raw=157 bias=2598 rate=-2441` —— bias_z 被写到 2598，
+     * 远远超出 raw 本身，正是吸收了一大段 yaw。
+     * 停下后 rate_z = raw - bias 反向一大截 ⇒ 光标朝反方向溜一段才停。
+     * ⇒ 把 z 一并纳入门控（同样上限）。 */
+    int32_t rate_z_chk = gyro_mdps.z - g_bias_z;
+    bool rate_small = (rate_x > -rate_lim && rate_x < rate_lim) &&
+                      (rate_y > -rate_lim && rate_y < rate_lim) &&
+                      (rate_z_chk > -rate_lim && rate_z_chk < rate_lim);
     /* 09-01 修复: 仅【活跃态】(g_imu_lp==0, 陀螺在线)才做 bias 校准。
      * 空闲态陀螺已关闭, gyro_mdps 是无效残留值(实测恒定 -12390 等), 若被
      * is_still(残留差分≈0)误判为静止 → bias 被无效值污染 → 恢复活跃后手停住
@@ -1575,8 +2017,56 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         if (acc_rotating) {
             /* 设备在旋转(含慢速, 差分盲区由速率判据兜底): 冻结 bias, 保护真实运动 */
             g_still_cnt = 0;
+            g_dz_still_cnt = 0;
+            g_steady_cnt = 0;
         } else if (is_still) {
             if (g_still_cnt < 255) g_still_cnt++;
+            /* 平稳计时（不看 rate 大小），用于识别"长时间不变的零漂" */
+            if (g_steady_cnt < 0xFFFF) g_steady_cnt++;
+
+            /* ★★★ 11-12 长稳态强制收敛（用户换机后实测 rate=(767,756) 一直不消）：
+             * 故障现象：读数平稳(sdiff 107/417)，但
+             *   ① rate_small 要求 |rate|<250 —— 767 不满足；
+             *   ② 长时静止路径要求 sdiff < 200 —— 417 不满足；
+             *   ③ 停位路径只在 !is_still 分支里 —— 走不到。
+             * 三条路全堵死 ⇒ bias 永远停在 1448，残差 767mdps 持续输出 = 一直飘。
+             * 判据：读数已经连续 ~2s 平稳。真实的手动平移方向/速度 200ms 级就会变，
+             * 撑不住 2s 恒定 ⇒ 视为零漂，用较大的 alpha 强制追上。 */
+            /* ★★★ 11-13 关键修复：这条"长稳态"路径**原来没有任何速率门控**，
+             * 只要读数连续 2s 平稳就直接吸收。而"平稳"用的是帧间差分(sdiff)，
+             * **匀速转动时差分也很小** ⇒ 用户第一次激活后连贯地挥两秒，
+             * 整段真实运动就被写进 bias（实测 bias 从 (758,-2800) 被拉到 (-6087,5224)，
+             * 差了 6800mdps = 6.8dps，零偏不可能这样漂）⇒ 手一停光标就反向飞。
+             * ⇒ 补上速率门控：只有三轴残差都低于**死区退出阈值**时才允许吸收，
+             *   也就是"此刻光标本来就没在动"，吸收不可能造成反向位移。 */
+            int32_t rz_chk2 = gyro_mdps.z - g_bias_z;
+            bool steady_safe = (gyro_mdps.x - g_bias_x) <  MOUSE_DZ_EXIT &&
+                               (gyro_mdps.x - g_bias_x) > -MOUSE_DZ_EXIT &&
+                               (gyro_mdps.y - g_bias_y) <  MOUSE_DZ_EXIT &&
+                               (gyro_mdps.y - g_bias_y) > -MOUSE_DZ_EXIT &&
+                               rz_chk2 <  MOUSE_DZ_EXIT && rz_chk2 > -MOUSE_DZ_EXIT;
+
+            /* ★★★ 11-13：这条路径**整体停用**。
+             * 它的判据是"帧间差分小"，而匀速转动差分也小 ⇒ 反复把整段运动吸进 bias
+             * （实测两次：bias 被拉 6800 / 9000 mdps）。即使加了 steady_safe 门控，
+             * 只要残差恰好落在 600 以内就会继续吸，属于"慢性中毒"。
+             * 现在零偏来源已经很明确：flash 起点 + 激活采样 + 停位/静止两条安全路径。
+             * 保留代码仅为将来需要时参考，不再参与运行。 */
+            if (0 && g_steady_cnt >= MOUSE_STEADY_FRAMES && steady_safe) {
+                g_bias_x = (int32_t)(g_bias_x * (1.0f - MOUSE_BIAS_TRACK_ALPHA_STEADY)
+                                     + gyro_mdps.x * MOUSE_BIAS_TRACK_ALPHA_STEADY);
+                g_bias_y = (int32_t)(g_bias_y * (1.0f - MOUSE_BIAS_TRACK_ALPHA_STEADY)
+                                     + gyro_mdps.y * MOUSE_BIAS_TRACK_ALPHA_STEADY);
+                g_bias_z = (int32_t)(g_bias_z * (1.0f - MOUSE_BIAS_TRACK_ALPHA_STEADY)
+                                     + gyro_mdps.z * MOUSE_BIAS_TRACK_ALPHA_STEADY);
+                if (!g_bias_trusted) {
+                    g_bias_trusted = 1;
+                    g_bias_valid = 1;
+                    rt_kprintf("[AirMouse] bias converged by steady (2s) -> (%d,%d)\n",
+                               (int)g_bias_x, (int)g_bias_y);
+                }
+            }
+
             if (g_still_cnt >= MOUSE_STILL_FRAMES) {
                 if (rate_small) {
                     /* 常规收敛: 三重证据齐 (差分稳定 + 速率小 + 未旋转) */
@@ -1586,6 +2076,27 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
                                          + gyro_mdps.y * MOUSE_BIAS_TRACK_ALPHA_STILL);
                     g_bias_z = (int32_t)(g_bias_z * (1.0f - MOUSE_BIAS_TRACK_ALPHA_STILL)
                                          + gyro_mdps.z * MOUSE_BIAS_TRACK_ALPHA_STILL);
+                    /* ★★★ 11-12 修复（用户反馈"激活后不动会慢慢往左飘"）：
+                     * `g_bias_valid` 必须在【bias 更新之后】、且残差确实收敛到位时才置 1。
+                     * 昨天(11-10)那版把它放在了更新**之前**，后果是：
+                     *   第 1 帧: !valid ⇒ rate_lim=2500 ⇒ rate_small 成立 ⇒ **立刻置 valid=1**
+                     *            ⇒ bias 只朝零漂走了一步(alpha 0.03, 2000→60)
+                     *   第 2 帧: valid=1 ⇒ rate_lim 回落到 250 ⇒ 残差还有 ~1940
+                     *            ⇒ rate_small=false ⇒ **常规收敛就此永久停住**
+                     * 剩下的残差(~1500mdps) 远大于死区进入门限 MOUSE_DZ_ENTER(900)
+                     * ⇒ 光标持续缓慢漂移，正是用户看到的"往左飘"。
+                     * 现在改为：更新后残差进入 250 以内才认可，范围外的继续用宽门限追。 */
+                    if (!g_bias_trusted) {
+                        int32_t rx = gyro_mdps.x - g_bias_x;
+                        int32_t ry = gyro_mdps.y - g_bias_y;
+                        if (rx > -MOUSE_BIAS_RATE_LIMIT && rx < MOUSE_BIAS_RATE_LIMIT &&
+                            ry > -MOUSE_BIAS_RATE_LIMIT && ry < MOUSE_BIAS_RATE_LIMIT) {
+                            g_bias_trusted = 1;   /* 与当前零漂吻合, 门限收回 250 */
+                            g_bias_valid = 1;     /* 也视为"有可用 bias"(超时兜底沿用) */
+                            rt_kprintf("[AirMouse] bias re-validated (%d,%d) mdps, resid=(%d,%d)\n",
+                                       (int)g_bias_x, (int)g_bias_y, (int)rx, (int)ry);
+                        }
+                    }
                 } else if (g_still_cnt >= MOUSE_STILL_LONG_FRAMES &&
                            g_sdiff_x < MOUSE_STILL_LONG_DIFF &&
                            g_sdiff_y < MOUSE_STILL_LONG_DIFF) {
@@ -1602,9 +2113,78 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
             }
         } else {
             g_still_cnt = 0;   /* 活跃态运动中: 清零静止计数 */
+            g_steady_cnt = 0;  /* 读数不再平稳: 真实运动或干扰, 重新计时 */
+            /* ★★★ 11-12 停位残余收敛（用户反馈"移动中停下来还会慢慢往一个方向飘"）：
+             * 帧间差分不够稳(手持微动 sdiff 常 300~800) 时上面那条路走不到，
+             * 但只要【上一帧两个轴的输出都被死区按住】(dx=dy=0)，此刻光标**确实没动**，
+             * 把当前 rate 吸收进 bias 就不可能吃掉真实运动 —— 这是安全条件。
+             * 为什么会需要它：陀螺零偏随温度漂移，运动期间 tracking 被冻结，
+             * 停下后旧 bias 残留 ~500mdps，正好落在 MOUSE_DZ_EXIT(450)~ENTER(900)
+             * 的滞留区：既进不了移动、也退不出移动 ⇒ 输出 50~100mdps 的微小量
+             * ⇒ 表现为"停下来后缓慢朝一个方向飘"。
+             * 判据用上一帧的 g_active_x/y（本函数比死区计算早，正好是稳定的历史值）。 */
+            if (!g_active_x && !g_active_y) {
+                if (g_dz_still_cnt < 255) g_dz_still_cnt++;
+                if (g_dz_still_cnt >= MOUSE_STILL_FRAMES) {
+                    /* ★ 11-13: 停位用**更大的系数 0.4**。
+                     * 用户反馈"已经停下了，光标还会再动一点点"——
+                     * 那是停手瞬间残差仍在，而 0.12 的系数要 10 多帧(≈100ms)才追平，
+                     * 这段时间刚好够死区外的残余推出一小段位移。
+                     * 这条路径的前提是【两轴输出都被死区按住】(dx=dy=0)，
+                     * 也就是说此刻光标确实没在动，快速吸收**不可能**造成反向位移
+                     * （吸收多少，都只是把"未来会更漂"变成"现在就不漂"）。 */
+                    g_bias_x = (int32_t)(g_bias_x * (1.0f - 0.4f) + gyro_mdps.x * 0.4f);
+                    g_bias_y = (int32_t)(g_bias_y * (1.0f - 0.4f) + gyro_mdps.y * 0.4f);
+                    g_bias_z = (int32_t)(g_bias_z * (1.0f - 0.4f) + gyro_mdps.z * 0.4f);
+                }
+            } else {
+                g_dz_still_cnt = 0;
+            }
         }
     } else {
         g_still_cnt = 0;       /* 空闲态(陀螺关): 不校准, 清零 */
+    }
+
+    /* ============================================================================
+     * ★★★ 11-14 慢速跟随（解决"零偏跳变后 bias 卡住"）
+     * ============================================================================
+     * 背景：零偏会因为温度/握持/供电在两段之间跳到 1500~3000 mdps，
+     * 而收敛门控是 `|残差| < 400` —— 这么大的偏差**整个被挡在门外**，
+     * bias 永远停在旧值 ⇒ 光标朝一个方向持续慢漂（用户实测 sx=-2075 → 约 50px/s）。
+     *
+     * 新思路：不设门控，改成**速率限制的跟随器**：
+     *   每帧最多把 bias 往 raw 挪 MOUSE_BIAS_FOLLOW_STEP(2 mdps)，
+     *   即最多约 200 mdps/秒。
+     * - 修正能力：1500 的偏差约 7.5 秒追平（够用）
+     * - 副作用有界：真实运动期间它也最多吸收 200mdps/秒，
+     *   一次 1~2 秒的挥动只损失 200~400，落在 500 的死区以内 ⇒ 肉眼看不出反向漂移。
+     * 加了 |rate|<2000 的护栏，避免快速挥动时被大量吞掉。
+     * ========================================================================== */
+    /* ★ 11-14 撤除常开跟随器（用户实测：连续操作十几秒会累积吸收 2000+ mdps）。
+     * 原以为"200mdps/秒"的副作用有界，但一整段使用下来照样把运动吃进零偏，
+     * bias 从 (-455,-1365) 被拖到 (-2450,1039) ⇒ 之后就一直漂。
+     * 现在改由 **松手时重新归零** 保证零偏新鲜，这里不再常开跟随。 */
+    if (0 && !acc_rotating) {
+        const int32_t st = MOUSE_BIAS_FOLLOW_STEP;
+        int32_t e;
+        e = gyro_mdps.x - g_bias_x;
+        if (e > -2000 && e < 2000) {
+            if (e > st) g_bias_x += st;
+            else if (e < -st) g_bias_x -= st;
+            else g_bias_x = gyro_mdps.x;
+        }
+        e = gyro_mdps.y - g_bias_y;
+        if (e > -2000 && e < 2000) {
+            if (e > st) g_bias_y += st;
+            else if (e < -st) g_bias_y -= st;
+            else g_bias_y = gyro_mdps.y;
+        }
+        e = gyro_mdps.z - g_bias_z;
+        if (e > -2000 && e < 2000) {
+            if (e > st) g_bias_z += st;
+            else if (e < -st) g_bias_z -= st;
+            else g_bias_z = gyro_mdps.z;
+        }
     }
 
     /* ---- 空闲/活跃状态机 (连接态空闲低功耗 A/C/B) ----
@@ -1645,6 +2225,8 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
              * 短暂停顿不误关陀螺; 未激活保持 ~0.96s 快速省电。
              * 确认空闲后若处于激活态则取消激活标志 —— 自动空闲 = 本次会话结束,
              * 需重新按 L1 激活才再发鼠标(空闲态唤醒也受 g_key2_active 门控)。 */
+            if (g_stilltest_frames > 0)
+                g_idle_cnt = 0;   /* stilltest 期间强制保持活跃, 不让陀螺被关掉 */
             uint16_t idle_enter_frames = g_key2_active ? IDLE_ENTER_FRAMES_ACTIVE : IDLE_ENTER_FRAMES;
             if (g_idle_cnt >= idle_enter_frames) {
                 if (g_key2_active) {
@@ -1701,7 +2283,17 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         float gy3 = g_g3y, gz3 = g_g3z;      /* 单位重力向量(指向地心) Y/Z 分量 */
         float rate_z = (float)(gyro_mdps.z - g_bias_z);
         float den2 = gy3 * gy3 + gz3 * gz3;  /* = 1-gx3² = |p×U|² */
-        float inv  = (den2 > 0.04f) ? inv_sqrt(den2) : 5.0f;   /* den<0.2 钳位 */
+        /* ★ 11-13: 钳位由 5.0 收紧到 3.0（阈值 0.04→0.10）。
+         * den2 = 1-gx3²，光束轴接近垂直时 den2→0，inv 会把**残差噪声一起放大**。
+         * 实测 [OUT] sx=-1746 而输入 rate 只有 ~800 —— 就是这里放大了 2~5 倍，
+         * 把本该被死区按住的残差推过了 900 门限 ⇒ 表现为"有时候飘、有时候不飘"
+         * （取决于握持角度）。收紧后极端角度增益略降，但不会再被噪声顶开死区。 */
+        /* ★ 11-13 二次收紧 3.0 → 1.8。
+         * 实测仍然出现 `rate=(-132,610)` + `z rate=1067` ⇒ `[OUT] sy=7406`（放大 ~7 倍），
+         * 于是 1 dps 的手腕微转就被放大成 4px/帧、约 400px/s 的"随机方向漂移"。
+         * 姿态映射在光束轴接近垂直时数学上是退化的（den→0），继续给高增益只会放大噪声。
+         * 钳到 1.8 后极端角度增益可预期，代价是那个角度下灵敏度偏低。 */
+        float inv  = (den2 > 0.31f) ? inv_sqrt(den2) : 1.8f;   /* den<0.56 钳位 */
         float yaw   = (rate_y * gy3 + rate_z * gz3) * inv;                          /* 屏幕X: +右 */
         float pitch = (float)MOUSE_BEAM_SGN * (rate_z * gy3 - rate_y * gz3) * inv;  /* 屏幕Y: +下 */
         sx = (float)MOUSE_ROLL_SGN_X * MOUSE_ROLL_GAIN * yaw;
@@ -1750,6 +2342,35 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         dy = sy_eff * mouse_sens();   /* 屏幕Y (上下, +下 -上) */
     } else {
         dy = 0.0f;
+    }
+
+    /* ★ 11-13 输出级诊断：前面的 [DRIFT] 只看到"进入死区之前"的 rate，
+     * 判断"为什么还在动"必须看这一步的输出。每 2s 一行：
+     *   sx/sy —— 旋转到屏幕坐标后的角速度（死区就在这两个值上判）
+     *   act   —— 迟滞死区状态（1=正在输出，0=被按住）
+     *   dx/dy —— 本帧真正加到位移累积上的量
+     * 若 act=0 而光标仍在动 ⇒ 问题不在这一层（去查 EMA/累积/发送）；
+     * 若 act=1 且 sx/sy 只有几十 ⇒ 说明死区阈值没生效（配置/量纲问题）。 */
+    {
+        static rt_tick_t out_last = 0;
+        rt_tick_t out_now = rt_tick_get();
+        if (g_mouse_dbg &&
+            (out_last == 0 || (out_now - out_last) > rt_tick_from_millisecond(2000))) {
+            out_last = out_now;
+            static uint32_t last_cnt = 0;
+            static rt_tick_t last_tick = 0;
+            uint32_t cnt = g_hid_send_cnt;
+            rt_tick_t now_t = rt_tick_get();
+            int rate = 0;
+            if (last_tick && now_t != last_tick) {
+                rate = (int)((int64_t)(cnt - last_cnt) * RT_TICK_PER_SECOND /
+                             (int64_t)(now_t - last_tick));
+            }
+            last_cnt = cnt; last_tick = now_t;
+            rt_kprintf("[OUT] sx=%d sy=%d act=(%d,%d) dx=%d dy=%d sens=%.4f rate=%d/s flush=%dms\n",
+                       (int)sx, (int)sy, g_active_x ? 1 : 0, g_active_y ? 1 : 0,
+                       (int)dx, (int)dy, (double)mouse_sens(), rate, (int)g_mouse_flush_ms);
+        }
     }
 
     /* ---- Step 4: 单级 EMA 平滑 (含停位拖尾清零) ----
@@ -1849,7 +2470,14 @@ void air_mouse_start(void)
 
 void air_mouse_stop(void)
 {
-    if (!g_imu_started) return;
+    /* ★ 11-17: 断连时多个事件线程会并发进入，用原子标志串行化。
+     * 否则两个线程都会走到 lsm_deinit()，引发双删崩溃（见 lsm6ds3.c 的说明）。 */
+    static volatile int stop_busy = 0;
+    rt_base_t lvl = rt_hw_interrupt_disable();
+    if (!g_imu_started || stop_busy) { rt_hw_interrupt_enable(lvl); return; }
+    stop_busy = 1;
+    rt_hw_interrupt_enable(lvl);
+
     lsm_deinit();
     g_imu_started = false;
     g_key2_active = 0;
@@ -1875,6 +2503,7 @@ void air_mouse_stop(void)
     rt_kprintf("[AirMouse] IMU stopped (BLE disconnected), LDO3 kept on\n");
 
     rt_kprintf("[AirMouse] IMU stopped (BLE disconnected), IMU LDO off\n");
+    stop_busy = 0;
 }
 
 /* 09-05: EC 编码器旋转的虚拟引脚号(仅走按键 mailbox 到主循环分发, 避免在
@@ -1932,11 +2561,27 @@ static void air_mouse_key_hold(int down)
             rt_kprintf("[AirMouse] HOLD ignored (still calibrating)\n");
         }
     } else {
+        int was_active = g_key2_active;
         g_key2_active = 0;
         /* 关闭时强制释放鼠标按键(补发一次释放报告) */
         mouse_button = 0;
         ble_hid_mouse_button(0);
         rt_kprintf("[AirMouse] HOLD OFF\n");
+
+        /* ★★★ 11-14 最佳校准时机：**松手之后**。
+         * 按下瞬间手必然在动（手持设备无法避免），采样几乎总是失败
+         * （日志里反复出现 `bias capture skipped span=(4427,3552)`）；
+         * 而松手时人刚好做完动作、手会自然停住，陀螺还继续跑 4.8 秒才进 IDLE。
+         * 在这段"鼠标本来就不输出"的窗口里重新采零偏：
+         *   ① 不影响任何操作（本来就不动光标）
+         *   ② 采样条件最好（手停下来了）
+         *   ③ 下一次按下直接用这份新鲜零偏，无需再阻塞等待
+         * 若这段时间手仍在动，滑动窗口的极差判据会自动丢弃，不会污染。 */
+        if (was_active && g_imu_started && !g_imu_lp) {
+            g_bias_cap_left = MOUSE_BIAS_CAP_MAX_FRAMES;
+            g_bias_cap_idx = 0;
+            g_bias_cap_n = 0;
+        }
     }
 }
 
@@ -1988,6 +2633,9 @@ static void enc_event_handler(enc_event_t event, int32_t count)
      * 含校准检查与 L1 完全一致)。邮箱满(狂转)时丢弃 —— 与断连时
      * 滚轮丢弃同级, 不阻塞编码器线程。 */
     if (act == KEY_ACTION_MOUSE) {
+        /* ★ 11-17: 任何按键按下 = 用户明确在用 ⇒ 重置断连回连的次数预算
+         * （这是唯一正确的"用户意图"入口；断连/广播等事件不能清） */
+        { extern void bt_cls_autoconn_user_intent(void); bt_cls_autoconn_user_intent(); }
         rt_mb_send(g_button_event_mb, (vpin << 8) | BUTTON_PRESSED);
         rt_mb_send(g_button_event_mb, (vpin << 8) | BUTTON_RELEASED);
     } else {
@@ -2080,9 +2728,9 @@ static void c_dispatch_gesture(int idx, const key_config_t *k)
     else if (act == KEY_ACTION_KEYBOARD || act == KEY_ACTION_MULTIMEDIA)
     {
         uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : k->modifier;
-        ble_hid_keyboard_press_key(send_mod, k->keycode);
+        hid_key_press(send_mod, k->keycode);
         rt_thread_mdelay(15);
-        ble_hid_keyboard_release_key(send_mod, k->keycode);
+        hid_key_release(send_mod, k->keycode);
     }
 }
 
@@ -2178,9 +2826,9 @@ static void l_dispatch_gesture(int idx, const key_config_t *k)
     else if (act == KEY_ACTION_KEYBOARD || act == KEY_ACTION_MULTIMEDIA)
     {
         uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : k->modifier;
-        ble_hid_keyboard_press_key(send_mod, k->keycode);
+        hid_key_press(send_mod, k->keycode);
         rt_thread_mdelay(15);
-        ble_hid_keyboard_release_key(send_mod, k->keycode);
+        hid_key_release(send_mod, k->keycode);
     }
 }
 
@@ -2274,9 +2922,9 @@ static void ec_dispatch_press_gesture(const key_config_t *k)
     else if (act == KEY_ACTION_KEYBOARD || act == KEY_ACTION_MULTIMEDIA)
     {
         uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : k->modifier;
-        ble_hid_keyboard_press_key(send_mod, k->keycode);
+        hid_key_press(send_mod, k->keycode);
         rt_thread_mdelay(15);
-        ble_hid_keyboard_release_key(send_mod, k->keycode);
+        hid_key_release(send_mod, k->keycode);
     }
 }
 
@@ -2304,6 +2952,12 @@ void HAL_MspInit(void)
 int main(void)
 {
     //rt_kprintf("[VibeKey-F3] Version 1.2v!\r\n");
+
+    /* 11-13: BT 栈 DEBUG 日志的屏蔽改为**编译期**方案（详见 project/build_sf32lb52-vibekey_hcpu/rtconfig.h）：
+     * 把 ULOG_OUTPUT_LVL 由 7(DBG) 调到 6(INFO)，ulog 内部直接丢弃 DEBUG 级，
+     * 刷屏的 `[U-L]hid send interrupt report...` 就没了。
+     * ⚠️ 本 SDK 的 RT-Thread 没有链接 ulog_tag_lvl_filter_set（运行时按 tag 过滤），
+     *    所以只能用全局级别这一招；代价是其他模块的 DEBUG 也一并静音。 */
     /* boot ROM(USB下载检测)在 USBCR 遗留 USB_EN/DP_EN/DM_PD，PHY 白耗 ~3.6mA。
      * 在所有 init 之前立即关断，复制 usb_dc_low_level_deinit 序列。 */
     hwp_hpsys_cfg->USBCR &= ~(HPSYS_CFG_USBCR_DM_PD | HPSYS_CFG_USBCR_DP_EN | HPSYS_CFG_USBCR_USB_EN);
@@ -2311,6 +2965,12 @@ int main(void)
     HAL_Delay_us(100);
     hwp_hpsys_rcc->RSTR2 &= ~HPSYS_RCC_RSTR2_USBC;
     HAL_RCC_DisableModule(RCC_MOD_USBC);
+
+    /* 11-13: 先把上次存的零偏读出来 —— 开机/首次激活就有合理起点 */
+    mouse_bias_load();
+
+    /* 11-13: 麦克风链路默认增益（ADC 12→3dB 降底噪，AGC 18→22dB 补响度） */
+    { extern void vk_mic_apply_defaults(void); vk_mic_apply_defaults(); }
 
     /* 诊断探针(排查上电随机高功耗)：清完 PHY 后回读 USBCR，确认 USB_EN/DP_EN/DM_PD 真正清零。
      * 若 leak=1 却无 Type-C 插入(PA44=0)，说明 boot-ROM 残留未清掉 → PHY 白耗 ~3.6mA → 上电态 ~5.1mA。 */
@@ -2659,10 +3319,10 @@ int main(void)
                     switch (cfg->action_type)
                     {
                     case KEY_ACTION_KEYBOARD:
-                        ble_hid_keyboard_press_key(send_mod, cfg->keycode);
+                        hid_key_press(send_mod, cfg->keycode);
                         break;
                     case KEY_ACTION_MULTIMEDIA:
-                        ble_hid_keyboard_press_key(send_mod, cfg->keycode);
+                        hid_key_press(send_mod, cfg->keycode);
                         break;
                     default:
                         break;
@@ -2723,7 +3383,7 @@ int main(void)
                              cfg->action_type == KEY_ACTION_MULTIMEDIA)
                     {
                         uint8_t send_mod = (cfg->action_type == KEY_ACTION_MULTIMEDIA) ? 0x00 : cfg->modifier;
-                        ble_hid_keyboard_release_key(send_mod, cfg->keycode);
+                        hid_key_release(send_mod, cfg->keycode);
                     }
                 }
                 else if (action == BUTTON_CLICKED)
@@ -2787,9 +3447,9 @@ int main(void)
                 {
                     uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : lk->modifier;
                     if (action == BUTTON_PRESSED)
-                        ble_hid_keyboard_press_key(send_mod, lk->keycode);
+                        hid_key_press(send_mod, lk->keycode);
                     else if (action == BUTTON_RELEASED || action == BUTTON_CLICKED)
-                        ble_hid_keyboard_release_key(send_mod, lk->keycode);
+                        hid_key_release(send_mod, lk->keycode);
                 }
                 else if (act == KEY_ACTION_MOUSE)
                 {
@@ -2838,9 +3498,9 @@ int main(void)
                 {
                     uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : lk->modifier;
                     if (action == BUTTON_PRESSED)
-                        ble_hid_keyboard_press_key(send_mod, lk->keycode);
+                        hid_key_press(send_mod, lk->keycode);
                     else if (action == BUTTON_RELEASED || action == BUTTON_CLICKED)
-                        ble_hid_keyboard_release_key(send_mod, lk->keycode);
+                        hid_key_release(send_mod, lk->keycode);
                 }
                 else if (act == KEY_ACTION_MOUSE)
                 {
@@ -2873,9 +3533,9 @@ int main(void)
                 {
                     uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : lk->modifier;
                     if (action == BUTTON_PRESSED)
-                        ble_hid_keyboard_press_key(send_mod, lk->keycode);
+                        hid_key_press(send_mod, lk->keycode);
                     else if (action == BUTTON_RELEASED || action == BUTTON_CLICKED)
-                        ble_hid_keyboard_release_key(send_mod, lk->keycode);
+                        hid_key_release(send_mod, lk->keycode);
                 }
                 else if (act == KEY_ACTION_MOUSE)
                 {
@@ -2919,9 +3579,9 @@ int main(void)
                 {
                     uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : k->modifier;
                     if (action == BUTTON_PRESSED)
-                        ble_hid_keyboard_press_key(send_mod, k->keycode);
+                        hid_key_press(send_mod, k->keycode);
                     else if (action == BUTTON_RELEASED || action == BUTTON_CLICKED)
-                        ble_hid_keyboard_release_key(send_mod, k->keycode);
+                        hid_key_release(send_mod, k->keycode);
                 }
                 else if (act == KEY_ACTION_MOUSE)
                 {
@@ -2973,11 +3633,158 @@ int main(void)
                 else if (action == BUTTON_CLICKED)
                 {
                     uint8_t send_mod = (act == KEY_ACTION_MULTIMEDIA) ? 0x00 : k->modifier;
-                    ble_hid_keyboard_press_key(send_mod, k->keycode);
+                    hid_key_press(send_mod, k->keycode);
                     rt_thread_mdelay(15);
-                    ble_hid_keyboard_release_key(send_mod, k->keycode);
+                    hid_key_release(send_mod, k->keycode);
                 }
             }
         }
     }
 }
+
+/* ============================================================================
+ * stilltest —— 静止噪声测量命令
+ * ============================================================================
+ * 用法：把设备【平放在桌上，别碰】，然后：
+ *     msh /> stilltest 10
+ * 它会强制保持陀螺开启 10 秒（否则静止 ~5s 就进 IDLE 关陀螺，数据冻结测不出来），
+ * 结束后打印三轴的 min / max / **span** / mean：
+ *     [STILL] x: min=... max=... span=... mean=... mdps
+ * 判读：
+ *     span < 100 mdps  ⇒ 传感器正常，漂移是算法/姿态问题
+ *     span > 500 mdps  ⇒ 器件或供电有问题（纹波/焊接/地线），固件追不上
+ */
+int cmd_stilltest(int argc, char **argv)
+{
+    extern void air_mouse_set_active(int active, int cold);
+    int secs = (argc > 1) ? atoi(argv[1]) : 10;
+    if (secs <= 0) secs = 10;
+    if (secs > 60) secs = 60;
+
+    for (int i = 0; i < 3; i++) {
+        g_still_min[i] = 0x7FFFFFFF;
+        g_still_max[i] = -0x7FFFFFFF;
+        g_still_sum[i] = 0;
+    }
+    g_still_n = 0;
+    air_mouse_set_active(1, 1);                 /* 强制开陀螺（必须在读寄存器之前） */
+    {
+        /* ⚠️ 一定要在开陀螺之后再读：空闲态驱动会把 CTRL2_G 写成 0x00，
+         *    先读会看到 0x00 造成误导（已踩过）。
+         * 期望 CTRL2_G = 0x14：FS_G=01(±500dps, 位[5:4]) + ODR=0100(104Hz, 位[3:0])。*/
+        uint8_t ctrl1 = 0, ctrl2 = 0;
+        lsm_reg_read(LSM_REG_CTRL1_XL, &ctrl1);
+        lsm_reg_read(LSM_REG_CTRL2_G,  &ctrl2);
+        rt_kprintf("[STILL] CTRL1_XL=0x%02X CTRL2_G=0x%02X (expect 0x14 = FS_G:01 500dps + ODR:0100 104Hz)\n",
+                   ctrl1, ctrl2);
+    }
+    g_stilltest_frames = (uint16_t)(secs * 104); /* 104Hz */
+    rt_kprintf("[STILL] start %ds, keep the device still...\n", secs);
+    return 0;
+}
+/* ⚠️ 必须用 ALIAS：MSH_CMD_EXPORT 默认拿【函数名】当命令名，
+ *    直接写 MSH_CMD_EXPORT(cmd_stilltest, ...) 注册出来的是 `cmd_stilltest`，
+ *    敲 `stilltest` 会报 command not found（已实测踩过）。 */
+MSH_CMD_EXPORT_ALIAS(cmd_stilltest, stilltest,
+                     still test: measure gyro noise for N seconds);
+
+/* btlog —— 开关 BT 栈的 DEBUG 日志（默认关，屏蔽 HID 报文刷屏）
+ *   btlog 0  静音（默认）
+ *   btlog 1  打开 [U-L]/[L-U] 原始报文，用于排查 HID 收发
+ * 实现见 SDK bf0_bt_common.c 里 bt_log_output 的本地补丁。 */
+int cmd_btlog(int argc, char **argv)
+{
+    extern unsigned char g_bt_log_dbg_en;
+    int on = (argc > 1 && argv[1][0] == '1');
+    g_bt_log_dbg_en = on ? 1 : 0;
+    rt_kprintf("[LOG] BT debug -> %s\n", on ? "ON (spam)" : "OFF (quiet)");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_btlog, btlog, toggle BT stack DEBUG log: btlog 0|1);
+
+/* flush —— 运行时可调 HID 发送节拍，用来验证"回报率越高反而不跟手"
+ *   flush 6   每 6ms 出一包（默认，≈166Hz 上限）
+ *   flush 10  回到旧的 10ms 节拍（≈100Hz）
+ *   flush 13  再低一点（≈76Hz，用户说这个节奏"挺顺"）
+ * 原理：Windows 的指针平滑/弹道是按**每个报文**计算的。同样一段位移，
+ * 拆成更多、更小的包时，系统侧可能反而走得少/更"糊" —— 这正是用户观察到的
+ * "125Hz 反而不如 76Hz 顺"。所以先用这条命令实测，别凭感觉改。 */
+int cmd_flush(int argc, char **argv)
+{
+    if (argc > 1) {
+        int v = atoi(argv[1]);
+        if (v < 2)  v = 2;
+        if (v > 40) v = 40;
+        g_mouse_flush_ms = (uint16_t)v;
+    }
+    rt_kprintf("[HID] flush = %d ms (max ~%d Hz)\n",
+               (int)g_mouse_flush_ms, 1000 / (int)g_mouse_flush_ms);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_flush, flush, set HID report interval ms 2~40);
+
+/* sens —— 运行时覆盖鼠标灵敏度（立即生效，不用重烧）
+ *   sens 0           恢复用 app 里的速度档位
+ *   sens 0.0004      直接指定系数（当前三档是 0.00015 / 0.0003 / 0.0006）
+ * 用来现场找"跟手但不飘"的点：先调到觉得跟手，再往回退一档，
+ * 然后把这个数值告诉我，我写进 MOUSE_SENS_TABLE。 */
+int cmd_sens(int argc, char **argv)
+{
+    if (argc > 1) {
+        float v = (float)atof(argv[1]);
+        if (v < 0.0f) v = 0.0f;
+        if (v > 0.01f) v = 0.01f;
+        g_sens_override = v;
+    }
+    rt_kprintf("[MOUSE] sens override = %.6f (0=use table, table=%0.6f/%.6f/%.6f)\n",
+               (double)g_sens_override,
+               (double)MOUSE_SENS_TABLE[0], (double)MOUSE_SENS_TABLE[1], (double)MOUSE_SENS_TABLE[2]);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_sens, sens, override mouse sensitivity 0=table);
+
+/* mdbg —— 开关 IMU 回调里的诊断打印（[DRIFT]/[OUT]）
+ *   默认 **关**：这些打印在数据就绪回调里同步输出，每次阻塞 5~15ms，
+ *   会打乱 104Hz 帧节奏，直接表现为"鼠标慢半拍"。
+ *   需要看数据时 `mdbg 1`，看完记得关掉。 */
+int cmd_mdbg(int argc, char **argv)
+{
+    if (argc > 1) g_mouse_dbg = (argv[1][0] != '0');
+    rt_kprintf("[DBG] mouse diag prints -> %s\n", g_mouse_dbg ? "ON (会拖慢鼠标)" : "OFF");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_mdbg, mdbg, toggle IMU diag prints 0=off 1=on);
+
+/* biasclr —— 清除 flash 里保存的零偏（**换 IMU 芯片后必须执行一次**）
+ * 原因：flash 里存的是上一颗芯片的零偏，新芯片的零偏与之无关，
+ * 差值可能有几百上千 mdps；启动时被当成"有效起点"直接用 ⇒ 一开始就漂。
+ * 执行后：flash 记录失效 + 内存 bias 归零 + 标记无效
+ *        ⇒ 下次连接/激活会重新采样，得到这颗芯片自己的零偏。 */
+int cmd_biasclr(int argc, char **argv)
+{
+    extern int rt_flash_erase(unsigned int addr, unsigned int len);
+    (void)argc; (void)argv;
+    rt_flash_erase(MOUSE_BIAS_FLASH_ADDR, 0x1000);
+    g_bias_x = g_bias_y = g_bias_z = 0;
+    g_bias_valid = 0;
+    g_bias_trusted = 0;
+    bias_rec_last_x = 0x7FFFFFFF;
+    rt_kprintf("[AirMouse] stored bias cleared, will re-capture on next activate\n");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_biasclr, biasclr, clear stored gyro bias after IMU swap);
+
+/* rz —— 手动重新归零（执行时保持设备不动约 0.25 秒）
+ * 用途：零偏跳变导致光标持续单向漂移时，手动拉回来。
+ * 复用激活采样的滑动窗口逻辑：采样期间不输出位移，采到就一次性定 bias。 */
+int cmd_rz(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    g_bias_cap_left = MOUSE_BIAS_CAP_MAX_FRAMES;
+    g_bias_cap_idx = 0;
+    g_bias_cap_n = 0;
+    g_bias_trusted = 0;
+    rt_kprintf("[AirMouse] re-zero started, keep still ~0.25s...\n");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_rz, rz, re-zero gyro bias while holding still);

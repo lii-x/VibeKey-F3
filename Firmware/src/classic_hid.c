@@ -133,13 +133,84 @@ void classic_hid_send_consumer(bts2_u16 bitmap)
     bt_hid_send_consumer(bts2g_app_p, 0, bitmap);
 }
 
-/* 覆盖 SDK 的弱函数：键盘 + 鼠标 + 多媒体 三合一 */
+/* 多媒体使用码 → consumer 位图。
+ * 位序必须与 cls_hid_desc.c 里 consumer 描述符的声明顺序**逐位一致**：
+ *   bit0 0xCD 播放/暂停  bit1 0xE9 音量+   bit2 0xEA 音量-   bit3 0xE2 静音
+ *   bit4 0xB5 下一曲     bit5 0xB6 上一曲  bit6 0xB7 停止
+ * 只有这 7 个 —— 与【桌面版 Main.qml 的 mmModel】和【网页版 MEDIA_KEYS】三处保持一致。
+ * （旧表的"主页/邮件"都是 0x8A、"搜索"0xE6 已移除：主页/搜索是 0x223/0x221 的
+ *   16 位用法，而配置帧 keycode 只有 1 字节，装不下。） */
+static bts2_u16 media_usage_bit(unsigned code)
+{
+    switch (code) {
+    case 0xCD: return 0x0001;
+    case 0xE9: return 0x0002;
+    case 0xEA: return 0x0004;
+    case 0xE2: return 0x0008;
+    case 0xB5: return 0x0010;
+    case 0xB6: return 0x0020;
+    case 0xB7: return 0x0040;
+    default:   return 0;
+    }
+}
+
+/* BLE 键盘发送（ble_hid.c），这里只声明，避免把 ble_hid.h 拖进来 */
+extern void ble_hid_keyboard_press_key(unsigned char modifier, unsigned char keycode);
+extern void ble_hid_keyboard_release_key(unsigned char modifier, unsigned char keycode);
+
+/* ============================================================================
+ * 统一的按键发送入口 —— 修掉"多媒体键完全没反应"
+ * ============================================================================
+ * 之前所有 KEY_ACTION_MULTIMEDIA 的发送都调 ble_hid_keyboard_press_key()：
+ *   ① 走的是 BLE 键盘，不是经典 HID；
+ *   ② 发出去的是多媒体使用码(0xB5~0xE9)，而键盘描述符只声明了 usage 0x00~0x65
+ *      ⇒ 主机侧根本不存在这个键；
+ *   ③ classic_hid_send_consumer() 写好了却从没被调用过。
+ * 现在按"键码"分流：多媒体使用码一律走经典 consumer 报告（报告 ID 3），
+ * 普通按键仍走 BLE 键盘。判据用 keycode > 0x65 —— 两个使用码空间不重叠。
+ */
+void hid_key_press(bts2_u8 mod, bts2_u8 keycode)
+{
+    bts2_u16 bit = media_usage_bit(keycode);
+    if (bit) {
+        if (classic_hid_linked()) classic_hid_send_consumer(bit);
+        return;                       /* 经典未连时不回落：媒体键本就无处可发 */
+    }
+    /* keycode > 0x65 已超出键盘描述符声明的 usage 范围（0x00~0x65），
+     * 多半是【旧配置里遗留的媒体码】(如 0x8A/0xE6 已被移除) —— 丢掉即可，
+     * 不要再当键盘码发出去，否则主机收到的是无效键。 */
+    if (keycode > 0x65) {
+        static rt_tick_t last = 0;
+        rt_tick_t now = rt_tick_get();
+        if (last == 0 || (now - last) > rt_tick_from_millisecond(2000)) {
+            last = now;
+            rt_kprintf("[CLS HID] unsupported keycode 0x%02x ignored\n", keycode);
+        }
+        return;
+    }
+    ble_hid_keyboard_press_key(mod, keycode);
+}
+
+void hid_key_release(bts2_u8 mod, bts2_u8 keycode)
+{
+    bts2_u16 bit = media_usage_bit(keycode);
+    if (bit) {
+        if (classic_hid_linked()) classic_hid_send_consumer(0);   /* 松开 = 位图清零 */
+        return;
+    }
+    if (keycode > 0x65) return;       /* 同 press：超出键盘 usage 范围的直接丢 */
+    ble_hid_keyboard_release_key(mod, keycode);
+}
+
+/* 覆盖 SDK 的弱函数：键盘(id1) + 多媒体(id3) + 鼠标(id4) 三合一
+ * ⚠️ ID 3 必须留给多媒体：SDK 的 bt_hid_send_consumer() 固定用 HID_CONSUMER_REPORT_ID=3。
+ *    ID 2 仍刻意空缺（SDK 连上 HID 时的光标校准报文用它，主机应丢弃）。 */
 void bt_hid_cmpose_hid_descriptor(void)
 {
     /* ★ 10-31 复合描述符：键盘(Report ID 1) + 鼠标(Report ID 2) 写在【一条】SDP 记录里。
      * 实测多次 bt_hid_add_descriptor 会被主机拒绝，合成单条才能建起中断通道。 */
     bt_hid_add_descriptor(cls_hid_desc, (bts2_u8)CLS_HID_DESC_LEN);
-    rt_kprintf("[CLS HID] composite descriptor: keyboard(id1) + mouse(id3), %d bytes\n",
+    rt_kprintf("[CLS HID] composite descriptor: kb(id1) + consumer(id3) + mouse(id4), %d bytes\n",
                CLS_HID_DESC_LEN);
 }
 
