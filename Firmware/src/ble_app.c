@@ -84,13 +84,15 @@ extern void enc_stop(void);
     static const char *local_name = "VibeKey-F3";
 #endif
 
-/* ★ 2026-10-21 用户要求: 【经典蓝牙(BR/EDR)名改为空白】。
- * 只影响经典链路那条记录; BLE 名仍用 local_name(VibeKey-F3) 保持不变 ——
- * 上位机/网页配置工具靠 BLE 名识别设备, 不能一起改。
- * 用【单个空格】而不是空串: len=0 在部分协议栈/主机会被当成"名字尚未就绪",
- * 回退去显示 MAC 或 (unknown); 单个空格能稳定显示成一行空白。
- * 副作用(有意): 主机上原本"经典 + BLE 各一条同名记录"的两行, 现在能区分开了。 */
-static const char *bt_classic_name = " ";
+/* 经典蓝牙(BR/EDR)名。
+ * 历史: 2026-10-21 曾按要求改为【单个空格】(空串在部分主机上会被当成
+ * "名字尚未就绪"而回退显示 MAC, 所以用空格)。
+ * 11-17 用户改为明确名字 "VibeKey-F3-BR/EDR"：主机列表里能和 BLE 那条
+ * (VibeKey-F3) 区分开, 又不会再显示成空白。
+ * ⚠️ 只影响经典链路; BLE 名仍用 local_name(VibeKey-F3) 不变 ——
+ *    上位机/网页配置工具靠 BLE 名识别设备。
+ * ⚠️ 已经配对过的主机会缓存旧名字, 需要在主机侧"删除设备"后重新配对才会更新。 */
+static const char *bt_classic_name = "VibeKey-F3-BR/EDR";
 
 /* 设备类别(COD, Class of Device)：
  * 用户要求恢复默认图标 → 改回基线 0x200000(Object Transfer)。
