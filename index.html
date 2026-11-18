@@ -280,7 +280,7 @@
         <a class="btn btn-p btn-dl" id="heroDlBtn"
            data-gitee-repo="lii-x/vibe-key-f3"
            data-gh-repo="lii-x/VibeKey-F3"
-           href="https://gitee.com/lii-x/vibe-key-f3/releases/download/studio-v1.1.5/VibeKey-F3_Studio_Setup_v1.1.5.exe">
+           href="https://gitee.com/lii-x/vibe-key-f3/releases/download/studio-v1.1.7/VibeKey-F3_Studio_Setup_v1.1.7.exe">
           <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
             <path d="M12 3v10.6l3.3-3.3 1.4 1.4L11 17.4 5.3 11.7l1.4-1.4L10 13.6V3h2zM5 19h14v2H5v-2z"/>
           </svg>
@@ -649,7 +649,12 @@
     var best = null, bestV = null;
     list.forEach(function (rel) {
       var tag = rel.tag_name || '';
-      if (!/^studio-v\d+\.\d+\.\d+$/.test(tag)) return;   // 只认上位机安装包
+      /* ★ 11-18 修正: 原来只认 `studio-vX.Y.Z` 前缀, 但 GitHub 上的安装包
+       * 直接以 `v1.1.5` 发布(没有 studio- 前缀) ⇒ GitHub 源永远筛不出东西,
+       * 只剩 Gitee 一条腿; Gitee 一按 IP 限流就退回写死版本, 官网于是长期停在旧版。
+       * 改为: 前缀可有可无, **以"是否带 .exe 资产"为准** ——
+       * 固件 Release 从来没有 exe, 不会误选。 */
+      if (!/^(?:studio-)?v\d+\.\d+\.\d+$/.test(tag)) return;
       var assets = rel.assets || [];
       for (var i = 0; i < assets.length; i++) {
         var n = assets[i].name || '';
