@@ -46,7 +46,7 @@
 
 /* 设备身份信息（App 端握手据此确认是 VibeKey-F3）。版本号随发布 bump。 */
 #define VIBEKEY_MODEL      "VibeKey-F3"
-#define VIBEKEY_FW_VERSION "1.1.9"
+#define VIBEKEY_FW_VERSION "1.2.1"
 
 #ifdef CONFIG_USBDEV_ADVANCE_DESC
 
@@ -121,6 +121,13 @@ static volatile uint8_t conf_busy;
  * 设备端收齐后校验, bootloader 安装前也校验, 防止坏文件被装成砖。 */
 static volatile uint32_t ota_crc_running;
 static uint8_t ota_crc_trailer[4];
+/* ★ 11-17: 滚动记录"流的最后 4 字节"。
+ * 原实现只在绝对偏移 [total-4, total) 处捕获 CRC，一旦主机多发几个字节
+ * （实测多 8 字节：recv=1077448 vs total=1077440），取到的就不是 CRC 而是数据，
+ * 必然 mismatch；而且 ota_crc_trailer[off-(total-4)] 的偏移会**越界写**到相邻静态变量。
+ * 改为：每个字节都推进滚动窗口，收齐后拿"真正的流末尾 4 字节"去比对，
+ * 同时对越界做钳位（防御性）。 */
+static uint32_t ota_tail32 = 0;
 
 /* CRC-32 (poly 0xEDB88320, init 0xFFFFFFFF, final XOR 0xFFFFFFFF), 与 Python zlib.crc32 完全一致 */
 static uint32_t ota_crc32_update(uint32_t crc, const uint8_t *buf, uint32_t len)
@@ -742,6 +749,7 @@ void usbd_cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
             ota_model_best = 0;
             ota_model_best_off = 0;
             ota_crc_running = 0xFFFFFFFF;   /* CRC32 初值 */
+            ota_tail32 = 0;                 /* 11-17: 滚动尾清零 */
             memcpy(ota_header, read_buffer, 8);
             rt_kprintf("OTA: start, size=%d\r\n", ota_total_size);
             q_write(read_buffer + 8, nbytes - 8);
@@ -781,6 +789,20 @@ void usbd_cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
          * 绝不能当固件字节入队，否则污染固件流使 CRC 校验失败、升级回退旧固件。
          * - 若整包恰好是一个完整的 CONF 命令(长度=8+data_len)，丢弃该包并照常处理它；
          * - 若长度不符（与被固件字节粘连/分片），无法安全剥离 → 拒绝激活、保留旧固件防变砖。 */
+        /* ★ 11-17: 起始包被重复投递 —— 这是 "recv 比 total 多 8 字节" 的最可能来源。
+         * 8 字节起始包(magic+size)若被当成固件体入队，整个流就错位 8 字节，
+         * 之后 CRC 必然 mismatch（实测 recv=1077448 / total=1077440）。
+         * 这里识别"固件流开头又出现一个 OTA_MAGIC"，丢弃这 8 字节（若该包还带数据，
+         * 尾部照常入队），从此 recv 才能和 total 对齐。 */
+        if (magic == OTA_MAGIC && ota_received == 0 && ota_started)
+        {
+            uint32_t ts2 = *(uint32_t *)&read_buffer[4];
+            rt_kprintf("[OTA] duplicate start packet, skip 8B (ts=%u, nbytes=%u)\r\n", ts2, nbytes);
+            if (nbytes > 8) q_write(read_buffer + 8, nbytes - 8);
+            usbd_ep_start_read(busid, CDC_OUT_EP, read_buffer, 2048);
+            return;
+        }
+
         if (magic == CONF_MAGIC)
         {
             uint16_t dlen = *(uint16_t *)&read_buffer[6];
@@ -959,13 +981,17 @@ void ota_flash_task(int typec_pin)
                                 ota_model_state = 0;
                         }
                     }
-                    /* CRC32: 仅固件体字节(偏移 < ota_total_size-4)参与; 尾部 4 字节捕获 */
+                    /* CRC32: 仅固件体字节(偏移 < ota_total_size-4)参与 */
                     uint32_t off = base + i;
                     if (off < ota_total_size - 4) {
                         ota_crc_running = ota_crc32_update(ota_crc_running, &c, 1);
                     } else {
-                        ota_crc_trailer[off - (ota_total_size - 4)] = c;
+                        /* 兼容旧逻辑但**钳位**，防越界写 */
+                        uint32_t ti = off - (ota_total_size - 4);
+                        if (ti < 4) ota_crc_trailer[ti] = c;
                     }
+                    /* 滚动保存"流末尾 4 字节"(小端累积) */
+                    ota_tail32 = (ota_tail32 >> 8) | ((uint32_t)c << 24);
                 }
             }
             rt_flash_write(OTA_TARGET_ADDR + write_off, wbuf, chunk);
@@ -988,10 +1014,21 @@ void ota_flash_task(int typec_pin)
                 /* HIGH-2: 校验 CRC32(固件体) 与发送方追加的尾部 4 字节是否一致;
                  * 不一致说明传输损坏/文件错误, 拒绝激活(不写 magic), 避免坏文件变砖。 */
                 uint32_t crc_calc = ota_crc_running ^ 0xFFFFFFFF;
-                uint32_t crc_stored = ((uint32_t)ota_crc_trailer[0])
-                                    | ((uint32_t)ota_crc_trailer[1] << 8)
-                                    | ((uint32_t)ota_crc_trailer[2] << 16)
-                                    | ((uint32_t)ota_crc_trailer[3] << 24);
+                uint32_t crc_fixed = ((uint32_t)ota_crc_trailer[0])
+                                   | ((uint32_t)ota_crc_trailer[1] << 8)
+                                   | ((uint32_t)ota_crc_trailer[2] << 16)
+                                   | ((uint32_t)ota_crc_trailer[3] << 24);
+                /* 11-17: 优先用"流末尾 4 字节"(ota_tail32) 作为 CRC。
+                 * 主机若多发/少发若干字节，按固定偏移取 CRC 必错；
+                 * 而 CRC 本来就追加在流的最末尾，用滚动尾才是正解。
+                 * 两条都试，任一命中即通过（保持向后兼容）。 */
+                uint32_t crc_stored = ota_tail32;
+                if (crc_calc != crc_stored && crc_calc == crc_fixed)
+                {
+                    rt_kprintf("[OTA] CRC ok via fixed trailer (tail=%08x fixed=%08x)\n",
+                               crc_stored, crc_fixed);
+                    crc_stored = crc_calc;   /* 走旧路径也认 */
+                }
                 if (crc_calc != crc_stored)
                 {
                     /* 诊断(08-27): q_peak 接近队列容量说明曾接近背压极限;

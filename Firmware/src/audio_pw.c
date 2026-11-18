@@ -60,6 +60,7 @@
 #include "audprc.h"              /* AUDPRC_TypeDef / hwp_audprc / AUDPRC_CFG_ENABLE */
 #include "bf0_hal_pmu.h"         /* PMUC_LPSYS_LDO_EN / PMUC_LPSYS_SWR_RDY (hwp_pmuc 来自 register.h) */
 #include <stdlib.h>              /* atoi */
+#include <math.h>                /* sqrtf: 静音门计算 RMS */
 #include <stdbool.h>             /* bool —— 必须与 audio_3a.c 的 g_ans1_disabled 同型 */
 
 /* ---------------------------------------------------------------------------
@@ -463,3 +464,218 @@ int cmd_wbs(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT_ALIAS(cmd_wbs, wbs, toggle wideband speech 0=CVSD 1=mSBC);
+
+/* ============================================================================
+ * nslevel —— 降噪等级（11-17，软件侧压"沙沙"底噪）
+ * ============================================================================
+ * 麦克风 SNR 只有 59dB，静音底噪明显；硬件不能改，只能加深降噪。
+ *   0 = LOW   1 = MODERATE   2 = HIGH   3 = VERY_HIGH（当前默认）
+ * 等级越高底噪压得越狠，代价是语音会有轻微"水声/发闷"，可现场对比取平衡点。
+ * 立即生效（下一帧），不需要重新拨号。
+ * ========================================================================== */
+int cmd_nslevel(int argc, char **argv)
+{
+    extern int   g_vk_ns_level;
+    extern void *g_vk_ns_inst;
+    extern int   WebRtcNsx_set_policy(void *nsxInst, int mode);
+
+    if (argc > 1) {
+        int v = atoi(argv[1]);
+        if (v < 0) v = 0;
+        if (v > 3) v = 3;
+        g_vk_ns_level = v;
+        if (g_vk_ns_inst) {
+            int r = WebRtcNsx_set_policy(g_vk_ns_inst, v);
+            rt_kprintf("[NS] level -> %d (set_policy ret=%d)\n", v, r);
+        } else {
+            rt_kprintf("[NS] level -> %d (降噪尚未初始化, 下次通话生效)\n", v);
+        }
+        return 0;
+    }
+    rt_kprintf("[NS] level = %d  (0=LOW 1=MODERATE 2=HIGH 3=VERY_HIGH)\n", g_vk_ns_level);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_nslevel, nslevel, set NS level 0~3 VERY_HIGH=3);
+
+/* ============================================================================
+ * 上行静音门（11-17，软件侧压"沙沙"底噪，且**不降带宽**）
+ * ============================================================================
+ * 背景：麦克风 WMM7037AT2 SNR 仅 59dB，静音时等效噪声 ~35dB(A) SPL，与安静房间相当；
+ *      降噪等级提到 VERY_HIGH 会带来"水声"副作用（实测用户更偏好 HIGH），
+ *      又不能降带宽（会发闷）。剩下最有效且不伤语音的手段 = 静音门。
+ *
+ * 做法：在 mSBC 编码前的最后一级(PCM, 已经过 3A)，按短时能量决定增益：
+ *   · 每帧算 RMS，用"快降慢升"的方式跟踪噪声底 noise_rms
+ *     （向下 0.2 系数，向上 0.002 系数 ≈6s，避免把语音算进噪声底）
+ *   · RMS < 2.5×噪声底 → 目标增益 0.06(-24dB，听不出沙沙)
+ *     RMS > 4.0×噪声底 → 目标增益 1.0
+ *     （两个阈值构成迟滞，防止在临界点抖）
+ *   · 增益平滑：开启 0.5/帧(≈15ms，不吞字头)，关闭 0.15/帧(≈50ms，自然收尾)
+ * 副作用：极轻的"背景变安静"感，属正常；语音本身完全不处理。
+ *
+ * 现场命令：gate 0 关闭 / gate 1 打开（默认开）
+ * ========================================================================== */
+static volatile uint8_t g_gate_en   = 0;   /* 默认关: 用户实测底噪伴随语音出现, 不是静音问题 */
+static float            g_gate_gain = 1.0f;
+static float            g_noise_rms = 400.0f;
+static volatile float   g_gate_open_ratio  = 4.0f;   /* 高于 4×噪声底 = 有语音 */
+static volatile float   g_gate_close_ratio = 2.5f;   /* 低于 2.5×噪声底 = 只有底噪 */
+/* ★ 11-18 "近讲模式": 用**绝对电平**当门槛(dBFS)，低于它的一律当远场/底噪压掉。
+ * 0 = 关闭(退回相对噪声底模式)。
+ * ⚠️ 必须关掉上行 AGC(apw agc 1) 才有意义 —— AGC 会把远处的小声也拉到目标电平，
+ *    远近信息被抹平，绝对门槛就失效了。 */
+static volatile float   g_gate_abs_dbfs   = 0.0f;
+
+void vk_uplink_gate(int16_t *pcm, int nsamples)
+{
+    if (!g_gate_en || nsamples <= 0 || pcm == RT_NULL) return;
+
+    /* 1) 帧 RMS */
+    int64_t sum = 0;
+    for (int i = 0; i < nsamples; i++) {
+        int32_t v = pcm[i];
+        sum += (int64_t)v * v;
+    }
+    float rms = (float)sqrtf((float)sum / (float)nsamples);
+
+    /* 2) 噪声底跟踪：向下快、向上极慢 */
+    if (rms < g_noise_rms) g_noise_rms += (rms - g_noise_rms) * 0.2f;
+    else                   g_noise_rms += (rms - g_noise_rms) * 0.002f;
+    if (g_noise_rms < 50.0f) g_noise_rms = 50.0f;    /* 防止门限掉到 0 变成永不关闭 */
+
+    /* 3) 目标增益（迟滞） */
+    float target;
+    if (g_gate_abs_dbfs < -1.0f) {
+        /* 近讲模式: 绝对电平门槛(带 6dB 迟滞) */
+        float lin = 32768.0f * powf(10.0f, g_gate_abs_dbfs / 20.0f);
+        if (rms > lin * 2.0f)        target = 1.0f;      /* 高 6dB 以上: 开 */
+        else if (rms < lin)          target = 0.06f;     /* 低于门槛: 关 */
+        else target = g_gate_gain;                       /* 迟滞区 */
+    } else {
+        if (rms > g_noise_rms * g_gate_open_ratio)        target = 1.0f;
+        else if (rms < g_noise_rms * g_gate_close_ratio)  target = 0.06f;
+        else target = g_gate_gain;                        /* 迟滞区: 保持不变 */
+    }
+
+    /* 4) 平滑：开启快、关闭慢 */
+    float a = (target > g_gate_gain) ? 0.5f : 0.15f;
+    g_gate_gain += (target - g_gate_gain) * a;
+
+    /* 5) 应用 */
+    if (g_gate_gain < 0.999f) {
+        for (int i = 0; i < nsamples; i++)
+            pcm[i] = (int16_t)((float)pcm[i] * g_gate_gain);
+    }
+}
+
+int cmd_gate(int argc, char **argv)
+{
+    if (argc > 1) {
+        if (argv[1][0] == '0') g_gate_en = 0;
+        else                    g_gate_en = 1;
+        /* 重新打开时把增益复位，避免停留在衰减态 */
+        if (g_gate_en) g_gate_gain = 1.0f;
+    }
+    rt_kprintf("[GATE] %s  (gain=%.2f noise_rms=%.0f 开阈值=%.1fx 关阈值=%.1fx)\n",
+               g_gate_en ? "ON" : "OFF", (double)g_gate_gain, (double)g_noise_rms,
+               (double)g_gate_open_ratio, (double)g_gate_close_ratio);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_gate, gate, uplink noise gate 0=off 1=on);
+
+/* near —— 近讲模式（把"收音范围"缩小到嘴边）
+ *   near -30   只放行电平高于 -30dBFS 的声音（约等于 5~10cm 内正常说话）
+ *   near -36   门槛更低，拾音更远一点
+ *   near 0     关闭，回到"相对噪声底"模式
+ * ⚠️ 必须先 apw agc 1 关掉上行 AGC，否则远近电平被拉平、门槛失灵。
+ * ⚠️ 门槛越低越容易通，越高越"只认近讲"。
+ */
+int cmd_near(int argc, char **argv)
+{
+    if (argc > 1) {
+        float v = (float)atof(argv[1]);
+        if (v > 0.0f)  v = 0.0f;
+        if (v < -60.0f) v = -60.0f;
+        g_gate_abs_dbfs = v;
+        if (v < -1.0f) g_gate_en = 1;     /* 设置门槛即自动开门控 */
+        else           g_gate_abs_dbfs = 0.0f;
+    }
+    rt_kprintf("[NEAR] abs threshold = %.1f dBFS (%s), gate=%d\n",
+               (double)g_gate_abs_dbfs,
+               g_gate_abs_dbfs < -1.0f ? "近讲模式" : "相对噪声底模式",
+               (int)g_gate_en);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_near, near, near-field gate threshold in dBFS 0=off);
+
+/* ============================================================================
+ * agcgain —— 上行 AGC 压缩增益（11-17，对方反馈底噪大时用）
+ * ============================================================================
+ * 上行 AGC 会把安静段的底噪一起抬起来（压缩增益 18dB 默认）。
+ * 对方听到的"嘶嘶"有一部分就是被 AGC 放大后的本底噪声。
+ * 调低（如 12~14）能压底噪，代价是说话距离稍远时对方觉得小声。
+ * ⚠️ 该值在 AGC 初始化时读取（audio_3a_open），改完需要**重新拨号**生效。
+ * ========================================================================== */
+int cmd_agcgain(int argc, char **argv)
+{
+    extern int16_t g_ul_agc_compression_gain_db;
+    if (argc > 1) {
+        int v = atoi(argv[1]);
+        if (v < 0)  v = 0;
+        if (v > 30) v = 30;
+        g_ul_agc_compression_gain_db = (int16_t)v;
+    }
+    rt_kprintf("[AGC] uplink compression gain = %d dB (改后需重新拨号生效)\n",
+               (int)g_ul_agc_compression_gain_db);
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_agcgain, agcgain, set uplink AGC compression gain dB 0~30);
+
+/* ============================================================================
+ * whisper —— 气音/小声输入预设（11-18）
+ * ============================================================================
+ * 用户需求：靠近嘴边小声说话（气音）也要能输入。
+ *
+ * 为什么和"降噪/门控"天然冲突：
+ *   气音几乎没有基频（unvoiced），能量分布和宽带噪声几乎一样，
+ *   降噪算法无法区分"气音"和"底噪" —— 压噪就会连气音一起吃掉；
+ *   门控按电平判断，气音电平低，会被直接关掉。
+ *
+ * 更根本的限制（用这颗麦克风的实测指标算）：
+ *   灵敏度 -42 dBV/Pa、自身噪声等效 35 dB(A) SPL
+ *     正常说话 10cm ≈ 65 dB SPL → 高于底噪 30dB，随便怎么处理都清楚
+ *     气音      ≈ 45 dB SPL → 只高于底噪 **10dB**
+ *   ⇒ 气音的信噪比只有 10dB，任何强降噪都会伤到它。
+ *
+ * 所以这个预设做了取舍：**放弃降噪强度，换取气音可懂**
+ *   · 门控全关（否则气音直接被切）
+ *   · 降噪回到 HIGH(2)（VERY_HIGH 会吃 unvoiced 成分）
+ *   · ADC 增益提到 18dB（气音要够响，只能靠模拟增益抬）
+ *   · 上行 AGC 打开、压缩增益回 18（补小声部分的电平）
+ * 代价：底噪会比之前明显 —— 这是"能听见气音"的必要条件，不是 bug。
+ * ========================================================================== */
+int cmd_whisper(int argc, char **argv)
+{
+    extern int8_t  g_adc_volume;
+    extern int16_t g_ul_agc_compression_gain_db;
+    extern int     g_vk_ns_level;
+    extern void   *g_vk_ns_inst;
+    extern int     WebRtcNsx_set_policy(void *nsxInst, int mode);
+    extern void    audio_3a_set_bypass(uint8_t is_bypass, uint8_t mic, uint8_t down);
+
+    (void)argc; (void)argv;
+
+    g_gate_en = 0;                 /* 关静音门/近讲门: 否则气音被切 */
+    g_gate_abs_dbfs = 0.0f;
+    g_gate_gain = 1.0f;
+    g_adc_volume = 18;             /* 模拟增益抬高, 气音才够响 */
+    g_ul_agc_compression_gain_db = 18;
+    g_vk_ns_level = 2;             /* HIGH: 兼顾压噪与 unvoiced 保真 */
+    if (g_vk_ns_inst) WebRtcNsx_set_policy(g_vk_ns_inst, 2);
+    audio_3a_set_bypass(0, 0, 0);  /* 确保 3A 没被旁路 */
+
+    rt_kprintf("[WHISPER] 气音模式: gate=OFF near=OFF ns=HIGH adc=18dB agc=18dB\n");
+    rt_kprintf("[WHISPER] 底噪会比之前明显 —— 这是能听见气音的必要代价\n");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_whisper, whisper, apply whisper-friendly audio preset);

@@ -123,12 +123,19 @@ def ota_upgrade(port, firmware_path):
     ser = serial.Serial(port, 115200, timeout=5, write_timeout=5)
     time.sleep(0.1)
 
+    # ★★ 11-17 关键修复：起始包**不能单独发一个 8 字节的包**。
+    # 设备端(旧固件)在 USB CDC 上会把这种"只有 8 字节头"的短包多计 8 字节
+    # （实测 recv 恒比 total 多 8 → 尾部 CRC 取错位置 → 必然 mismatch）。
+    # 把"头 + 首段固件体"拼成**一次写入**，设备就能在同一个 512 字节包里
+    # 正确剥离 8 字节头（magic 分支: q_write(buf+8, nbytes-8)）。
     print("STATUS:Sending header...", flush=True)
-    ser.write(header)
-    time.sleep(0.1)
+    chunk_size = 512
+    first_len = min(chunk_size - len(header), len(payload))
+    first_pkt = bytes(header) + payload[:first_len]
+    ser.write(first_pkt)
 
     chunk_size = 512
-    sent = 0
+    sent = first_len
     retries = 0
     while sent < len(payload):
         chunk = payload[sent:sent + chunk_size]

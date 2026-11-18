@@ -84,15 +84,11 @@ extern void enc_stop(void);
     static const char *local_name = "VibeKey-F3";
 #endif
 
-/* 经典蓝牙(BR/EDR)名。
- * 历史: 2026-10-21 曾按要求改为【单个空格】(空串在部分主机上会被当成
- * "名字尚未就绪"而回退显示 MAC, 所以用空格)。
- * 11-17 用户改为明确名字 "VibeKey-F3-BR/EDR"：主机列表里能和 BLE 那条
- * (VibeKey-F3) 区分开, 又不会再显示成空白。
- * ⚠️ 只影响经典链路; BLE 名仍用 local_name(VibeKey-F3) 不变 ——
- *    上位机/网页配置工具靠 BLE 名识别设备。
- * ⚠️ 已经配对过的主机会缓存旧名字, 需要在主机侧"删除设备"后重新配对才会更新。 */
-static const char *bt_classic_name = "VibeKey-F3-BR/EDR";
+/* 经典蓝牙(BR/EDR)名 —— ★ 11-18 按要求与 BLE 名保持一致。
+ * 直接指向 local_name(而不是各写一份字符串), 以后改名只改一处, 不会漂移。
+ * 历史: 10-21 曾是单个空格; 11-17 改为 "VibeKey-F3-BR/EDR"; 11-18 改回同名。
+ * ⚠️ 已经配对过的主机会缓存旧名字, 需在主机侧"删除设备"后重新配对才会更新。 */
+static const char *bt_classic_name = RT_NULL;   /* 运行时取 local_name, 见使用处 */
 
 /* 设备类别(COD, Class of Device)：
  * 用户要求恢复默认图标 → 改回基线 0x200000(Object Transfer)。
@@ -1249,10 +1245,11 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
         switch (msg->event_id) {
         case BT_NOTIFY_COMMON_BT_STACK_READY:   // bt蓝牙协议栈准备就绪事件
             g_br_ready = 1;
-            /* 经典蓝牙名 = 空白(与 BLE 名解耦), 见 bt_classic_name 的注释 */
-            bt_interface_set_local_name(strlen(bt_classic_name), (void *)bt_classic_name);
+            /* 经典蓝牙名: 默认与 BLE 名相同(bt_classic_name 为 NULL 时回落到 local_name) */
+            const char *cls_name = bt_classic_name ? bt_classic_name : local_name;
+            bt_interface_set_local_name(strlen(cls_name), (void *)cls_name);
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
-                  bt_classic_name, local_name);
+                  cls_name, local_name);
             /* 10-31: 蓝牙栈就绪 ⇒ 使能经典 HID(键盘+鼠标+多媒体) */
             { extern void classic_hid_open(void); classic_hid_open(); }
             /* 链路策略：入向 lp_in=0x0005(role switch+sniff) 保留——PC 主动连时

@@ -799,6 +799,17 @@ static bool    g_acc_ring_full = false;                /* 缓冲已填满(可算
 static float   g_ema_x = 0.0f, g_ema_y = 0.0f;         /* EMA平滑后位移 */
 static float   g_pending_dx = 0.0f, g_pending_dy = 0.0f;/* 累积位移 (含小数) */
 static bool    g_active_x = false, g_active_y = false;  /* 迟滞死区状态 */
+/* 11-18 诊断: 姿态映射的中间量, 供 [OUT] 打印定位"上下不动" */
+static float   g_dbg_gy3 = 0, g_dbg_gz3 = 0, g_dbg_inv = 0;
+static float   g_dbg_yaw = 0, g_dbg_pitch = 0;
+/* ★ 11-18 重力向量自愈: acc_rotating 若卡在 1(过度灵敏/标志卡死), g3 只能靠
+ * 陀螺积分预测、长期得不到加速度校正 → 越积越偏 → den2 严重偏离 → inv 被钳位
+ * → 上下(yaw/pitch 一起)塌陷。实测现象:"只能左右移动、上下失效", 重启后恢复。
+ * 这里统计连续旋转帧数, 超过阈值就判定标志卡死, 直接用当前加速度重置 g3。 */
+static uint32_t g_rot_streak = 0;
+/* 连续"旋转"帧数上限: 104Hz 下 1040 帧 ≈ 10 秒。真手持不可能连转 10 秒 */
+#define MOUSE_G3_ROT_STREAK_MAX   (104 * 10)
+static uint32_t g_dbg_acty_cnt = 0;
 static uint8_t g_still_cnt = 0;                         /* 连续静止计数 */
 
 /* --- 校准采样缓冲 (中位数+均值, 抑制抖动异常值) --- */
@@ -1153,8 +1164,12 @@ static void mouse_send_thread(void *param)
             }
             if (!g_click_hold)
                 mouse_button = btn;
-            /* 手机端：链路可能已被主设备拉回 sniff，发报文前先踢一次(内部限流 400ms) */
-            { extern void ble_app_mouse_sniff_kick(void); ble_app_mouse_sniff_kick(); }
+            /* ★ 11-18 撤销"发送前踢 sniff"（19:xx 为手机端延迟加的）：
+             * 实测在电脑上使用后**整个 HID 卡死**——移动报文完全发不出去，
+             * 而滚轮/按键仍正常（它们不走这条踢出路径）。日志里只有
+             * `[MS] wheel=.. TX` 没有任何移动 TX，与"踢出指令把协议栈灌满"吻合。
+             * sniff 退出已由激活时 ble_app_mouse_sniff_ctl(1) 一次性完成，
+             * 这里不再每条报文前调用 hcia_exit_sniff_mode。 */
             ble_hid_mouse_move(mx, my, mouse_button);
             g_hid_send_cnt++;          /* 实测回报率统计 */
         }
@@ -1683,11 +1698,23 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
             g_g3z += (wy * g_g3x - wx * g_g3y) * t;
             /* ② 加速度校正 (近似静止时) */
             if (!acc_rotating) {
+                g_rot_streak = 0;
                 float inv = inv_sqrt(a2);
                 float al = MOUSE_G3_ACC_ALPHA;
                 g_g3x = g_g3x * (1.0f - al) - (float)acc_mg3.x * inv * al;
                 g_g3y = g_g3y * (1.0f - al) - (float)acc_mg3.y * inv * al;
                 g_g3z = g_g3z * (1.0f - al) - (float)acc_mg3.z * inv * al;
+            } else if (++g_rot_streak > MOUSE_G3_ROT_STREAK_MAX) {
+                /* ★ 连续旋转超过 ~10 秒: 现实中不可能持续转这么久,
+                 * 判定 acc_rotating 卡死 → 用当前加速度硬重置重力向量,
+                 * 否则 g3 只靠陀螺积分会持续漂移, 最终导致姿态映射退化。 */
+                float inv = inv_sqrt(a2);
+                g_g3x = -(float)acc_mg3.x * inv;
+                g_g3y = -(float)acc_mg3.y * inv;
+                g_g3z = -(float)acc_mg3.z * inv;
+                g_rot_streak = 0;
+                rt_kprintf("[G3] rotating flag stuck >%d frames, reseeded from accel"
+                           " (was mapping-degenerate?)\n", MOUSE_G3_ROT_STREAK_MAX);
             }
             /* 归一化 (防积分/舍入漂移长度) */
             float n3 = inv_sqrt(g_g3x*g_g3x + g_g3y*g_g3y + g_g3z*g_g3z);
@@ -2298,6 +2325,8 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         float pitch = (float)MOUSE_BEAM_SGN * (rate_z * gy3 - rate_y * gz3) * inv;  /* 屏幕Y: +下 */
         sx = (float)MOUSE_ROLL_SGN_X * MOUSE_ROLL_GAIN * yaw;
         sy = (float)MOUSE_ROLL_SGN_Y * MOUSE_ROLL_GAIN * pitch;
+        g_dbg_gy3 = gy3; g_dbg_gz3 = gz3; g_dbg_inv = inv;
+        g_dbg_yaw = yaw; g_dbg_pitch = pitch;
     }
 #else
     sx = ROT_A * rate_x + ROT_B * rate_y;  /* 屏幕X原始分量(左右) */
@@ -2325,7 +2354,7 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         if (sx <  MOUSE_DZ_EXIT && sx > -MOUSE_DZ_EXIT) g_active_x = false;
     }
     if (!g_active_y) {
-        if (sy >  MOUSE_DZ_ENTER || sy < -MOUSE_DZ_ENTER) g_active_y = true;
+        if (sy >  MOUSE_DZ_ENTER || sy < -MOUSE_DZ_ENTER) { g_active_y = true; g_dbg_acty_cnt++; }
     } else {
         if (sy <  MOUSE_DZ_EXIT && sy > -MOUSE_DZ_EXIT) g_active_y = false;
     }
@@ -2367,9 +2396,12 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
                              (int64_t)(now_t - last_tick));
             }
             last_cnt = cnt; last_tick = now_t;
-            rt_kprintf("[OUT] sx=%d sy=%d act=(%d,%d) dx=%d dy=%d sens=%.4f rate=%d/s flush=%dms\n",
+            rt_kprintf("[OUT] sx=%d sy=%d act=(%d,%d) dx=%d dy=%d rate=%d/s\n", 
                        (int)sx, (int)sy, g_active_x ? 1 : 0, g_active_y ? 1 : 0,
-                       (int)dx, (int)dy, (double)mouse_sens(), rate, (int)g_mouse_flush_ms);
+                       (int)dx, (int)dy, rate);
+            rt_kprintf("[MAP] gy3=%.3f gz3=%.3f inv=%.2f yaw=%.0f pitch=%.0f acty_cnt=%u\n",
+                       (double)g_dbg_gy3, (double)g_dbg_gz3, (double)g_dbg_inv,
+                       (double)g_dbg_yaw, (double)g_dbg_pitch, (unsigned)g_dbg_acty_cnt);
         }
     }
 
