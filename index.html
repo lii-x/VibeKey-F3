@@ -307,7 +307,7 @@
              【独立一行里的紧凑胶囊】, 宽度只包住内容, 左对齐跟在按钮行下方。
              不做第 4 个按钮: 首屏主转化只有"下载"和"网页配置", 再塞实心按钮会稀释焦点。
              ⚠️ 必须是普通 <a> 跳转: PDF 是二进制直链, 别改成 fetch/XHR 绕 CORS。 -->
-        <div class="hero-doc-row">
+        <div class="hero-doc-row is-stack">
           <a class="hero-doc" href="web/manual.pdf" target="_blank" rel="noopener noreferrer">
             <svg class="doc-ic" viewBox="0 0 24 24" width="16" height="16" fill="none"
                  stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
@@ -316,6 +316,25 @@
               <path d="M14 3v5h5M9 13h6M9 17h4"/>
             </svg>
             <span>使用说明书</span>
+            <svg class="doc-arrow" viewBox="0 0 24 24" width="14" height="14" fill="none"
+                 stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" focusable="false">
+              <path d="M4 12h15M13.4 6.2 19.4 12l-6 5.8"/>
+            </svg>
+          </a>
+          <!-- 视频版上手教程(小红书), 与说明书同一行容器内竖排。
+               ⚠️ 站外链接必须 target=_blank + rel="noopener noreferrer";
+                  小红书分享链接带 xsec_token, 参数里的 & 要写成 &amp; 才不会把后面截掉。 -->
+          <a class="hero-doc" id="heroGuideBtn"
+             href="https://www.xiaohongshu.com/discovery/item/6b01a0d20000000026011315?source=webshare&amp;xhsshare=pc_web&amp;xsec_token=YB_w64pLHcoksrMH6XRZXAHCwAcbGxV19la-A6pcuMntE=&amp;xsec_source=pc_share"
+             target="_blank" rel="noopener noreferrer">
+            <svg class="doc-ic" viewBox="0 0 24 24" width="16" height="16" fill="none"
+                 stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"
+                 aria-hidden="true" focusable="false">
+              <rect x="2.6" y="5.4" width="18.8" height="13.2" rx="3.2"/>
+              <path d="M10.4 9.6 15 12l-4.6 2.4z"/>
+            </svg>
+            <span>上手使用指南（视频）</span>
             <svg class="doc-arrow" viewBox="0 0 24 24" width="14" height="14" fill="none"
                  stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"
                  aria-hidden="true" focusable="false">

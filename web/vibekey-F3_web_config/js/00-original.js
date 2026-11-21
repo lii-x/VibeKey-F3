@@ -140,12 +140,19 @@ const HID_KEYS = [
 ];
 
 // 多媒体键码 (常用)
+/* ⚠️ 这张表必须与【桌面版 Main.qml 的 mmModel】和【固件 consumer 描述符】三处一致。
+ *
+ * 11-10 修订：原来这里多列了「浏览器主页 0x8A / 邮件 0x8A / 搜索 0xE6」——
+ *   ① 主页和邮件填的是**同一个值** 0x8A（0x8A 实际是 AL Email Reader，即"邮件"），
+ *      选哪个都触发同一个动作；
+ *   ② 真正的"主页/搜索"是 0x223 / 0x221（AC Home / AC Search），**超出 8 位**，
+ *      而配置帧里 keycode 只有 1 字节，装不下 ⇒ 选了也发不出去。
+ *   ⇒ 统一收敛成这 7 个 8 位标准用法（与桌面版完全一致），不再提供发不出去的选项。 */
 const MEDIA_KEYS = [
   { text: '音量+', value: 0xE9 }, { text: '音量-', value: 0xEA },
   { text: '静音', value: 0xE2 }, { text: '播放/暂停', value: 0xCD },
   { text: '下一曲', value: 0xB5 }, { text: '上一曲', value: 0xB6 },
-  { text: '停止', value: 0xB7 }, { text: '浏览器主页', value: 0x8A },
-  { text: '邮件', value: 0x8A }, { text: '搜索', value: 0xE6 },
+  { text: '停止', value: 0xB7 },
 ];
 
 // 鼠标键码
@@ -729,6 +736,10 @@ function parseDeviceInfo(line) {
 
 function applyDeviceInfo(info, syncSlot) {
   deviceInfo = info;
+  /* 11-22: 把设备固件版本喂给 OTA 模块 —— 与上位机 PortDetector.deviceVersion 同源。
+     不接的话 otaFwVersion 恒为空: "发现新固件"横幅永远不出现、在线列表头和设备行
+     都显示不出 "vX.Y.Z"。每次刷新设备信息都同步一次(版本可能因 OTA 而变)。 */
+  if (typeof otaSetFwVersion === 'function') otaSetFwVersion(info.version || '');
   const el = document.getElementById('deviceInfo');
   if (info.name) {
     let txt = info.name;
@@ -1248,7 +1259,8 @@ async function sendLedBle(state) {
 }
 
 async function sendLed(state) {
-  const names = { 0: '关灯', 1: '黄灯', 2: '绿灯', 3: '红灯' };
+  // 4=蓝灯: 固件 10-21 新增状态(LED_STATE_BLUE, 借 LED1/PA5), 与上位机 sendState(4) 对齐。
+  const names = { 0: '关灯', 1: '黄灯', 2: '绿灯', 3: '红灯', 4: '蓝灯' };
   const ch = ledChannel();
   if (ch === 'ble') {
     const ok = await sendLedBle(state);
@@ -1500,12 +1512,6 @@ async function startOta() {
     hdv.setUint32(0, OTA_MAGIC, true);
     hdv.setUint32(4, fw.length, true);
 
-    setOtaStatus('发送固件头...');
-    let w = port.writable.getWriter();
-    await w.write(new Uint8Array(header));
-    w.releaseLock();
-    await sleep(100);
-
     // payload = 固件体 + CRC32(LE)
     const crc = crc32(fw);
     const payload = new Uint8Array(fw.length + 4);
@@ -1513,12 +1519,28 @@ async function startOta() {
     const cdv = new DataView(payload.buffer);
     cdv.setUint32(fw.length, crc, true);
 
+    /* ★ 11-22: 起始包必须是「头 + 首段固件体」拼成的一次 write —— 对齐上位机
+       ota_worker.py 的 11-17 修复, 不要退回"单独发 8 字节头"。
+       原因: 设备端 USB CDC 对这种"裸 8 字节短包"会重复投递, 固件流凭空多出 8 字节
+       （实测 recv 恒比 total 多 8）, 尾部 CRC 因此取错位置 → 必然 mismatch → 回退旧固件,
+       表现为"升级未生效: 设备版本未变化"。拼进 512 字节包后, 设备在同一个包里就能
+       正确剥离 8 字节头（dfu_device.c: q_write(buf + 8, nbytes - 8)）。
+       ⚠️ 后续分块仍是整 512 字节(不是 504), 与上位机循环一致。 */
+    const CHUNK = 512;
+    const firstLen = Math.min(CHUNK - 8, payload.length);
+    const firstPkt = new Uint8Array(8 + firstLen);
+    firstPkt.set(new Uint8Array(header), 0);
+    firstPkt.set(payload.subarray(0, firstLen), 8);
+
     setOtaStatus('正在传输固件...');
-    const chunkSize = 512;
-    let sent = 0;
+    let w = port.writable.getWriter();
+    await w.write(firstPkt);        // 头 + 首段合并写出(不可拆成两次!)
+    w.releaseLock();
+
+    let sent = firstLen;
     while (sent < payload.length) {
       if (otaAbort) throw new Error('CANCELLED');
-      const end = Math.min(sent + chunkSize, payload.length);
+      const end = Math.min(sent + CHUNK, payload.length);
       const chunk = payload.subarray(sent, end);
       w = port.writable.getWriter();
       await w.write(chunk);

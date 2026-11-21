@@ -76,6 +76,21 @@
   .nav-btn.active .ic-off { display: none; }
   .nav-btn.active .ic-on { display: block; }
   .nav-more { margin-top: auto; }
+  /* 有新固件: 侧栏 OTA 图标右上角红点(对齐 QML 10px 脉冲圆点, 任意页可见)。
+     脉冲用 box-shadow 扩散而不是改 scale —— 改 scale 会把图片图标一起缩放/抖动。 */
+  .nav-badge {
+    position: absolute; top: 6px; right: 7px;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: #ff4d4f; border: 1.5px solid #fff;
+    box-sizing: content-box; pointer-events: none;
+    animation: navBadgePulse 1.4s ease-out infinite;
+  }
+  .nav-badge[hidden] { display: none; }
+  @keyframes navBadgePulse {
+    0%   { box-shadow: 0 0 0 0 rgba(255, 77, 79, .55); }
+    70%  { box-shadow: 0 0 0 6px rgba(255, 77, 79, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(255, 77, 79, 0); }
+  }
 
   /* ===== 主内容区 ===== */
   .main {
@@ -369,11 +384,16 @@
   .led-green:hover { background: rgba(35,165,90,0.1); }
   .led-red { border-color: #e5484d; color: #e5484d; }
   .led-red:hover { background: rgba(229,72,77,0.1); }
+  /* 蓝灯(state=4): 与上位机 QML 的 #0080FF 同色相, 浅色底上压深一点保证对比度
+     (和黄/绿/红三色同一套处理方式)。 */
+  .led-blue { border-color: #0b6fd0; color: #0b6fd0; }
+  .led-blue:hover { background: rgba(10,132,224,0.1); }
   .led-off { border-color: #999; color: #999; }
   .led-off:hover { background: rgba(136,136,136,0.1); }
   [data-theme="dark"] .led-yellow { border-color: #FFAA00; color: #FFAA00; }
   [data-theme="dark"] .led-green { border-color: #00FF00; color: #4dff4d; }
   [data-theme="dark"] .led-red { border-color: #FF0000; color: #ff5555; }
+  [data-theme="dark"] .led-blue { border-color: #0080FF; color: #4da6ff; }
 
   /* ===== 固件升级 (OTA) — 全部对齐上位机 Main.qml 826-1110 =====
      整页可滚动(QML 842-848 ScrollView: 横幅 + 版本列表会把「开始升级」顶出可视区)。 */
@@ -396,6 +416,13 @@
   }
   .ota-notice-btn:hover { background: #e89c0c; }
   .ota-notice-btn:disabled { background: #ffe7ba; cursor: not-allowed; }
+  /* 「稍后」: 灰底次要按钮(对齐 QML 弹窗的"稍后" #f0f0f0), 与橙色主按钮区分层级 */
+  .ota-notice-later {
+    flex-shrink: 0; min-width: 54px; height: 28px; border: none; border-radius: 6px;
+    background: #f0f0f0; color: #666; font-size: 14.7px; font-weight: 600;
+    cursor: pointer; font-family: inherit; transition: background 0.15s, color 0.15s;
+  }
+  .ota-notice-later:hover { background: #e4e4e4; color: #444; }
 
   /* 设备行 (QML 899-927): 高 56 白底 radius 10 + 两层外发光, 右侧「刷新」绿字 */
   .ota-dev {

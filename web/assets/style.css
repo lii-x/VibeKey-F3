@@ -384,13 +384,19 @@ html, body { height: 100%; overflow: hidden; }
   padding: 2px 7px; border-radius: 999px;
   background: var(--blue-l); color: var(--blue);
 }
-/* 首屏「使用说明书」入口: 单独一行, 【宽度 = 三个按钮的总宽】。
+/* 首屏「使用说明书 / 上手使用指南(视频)」入口: 单独一行, 【宽度 = 三个按钮的总宽】。
    靠 grid-column:1/-1 横跨上面三列实现(见 .hero-btns), 不是写死像素、也不是撑满文字栏
    —— 撑满整栏太长(用户反馈"太长了不美观"), 只包住内容又太短像附注。 */
 .hero-doc-row {
   grid-column: 1 / -1;
   display: flex;
   margin-top: 2px;
+}
+/* 多个入口竖排(说明书 + 视频指南): 一个 grid 行里纵向叠放, 免得两行之间
+   吃到 .hero-btns 的 14px 栅格间距(那样会跟按钮间距一样大, 看着像两段不同的东西)。 */
+.hero-doc-row.is-stack {
+  flex-direction: column;
+  gap: 8px;
 }
 .hero-doc {
   width: 100%;               /* 吃满这一行 = 三个按钮的总宽 */

@@ -106,6 +106,72 @@ var otaReleases = [];       // 在线版本列表 [{tag,name,date,file,url,size}
 var otaNetBusy = false;     // 网络操作进行中(对齐 QML otaManager.netBusy)
 var otaNetAbort = null;     // fetch AbortController
 var otaFwVersion = '';      // 设备当前固件版本(用于"发现新固件"横幅与版本比对)
+var otaFwAutoTried = false; // 设备上线时"列表为空就补拉一次"只做一次(对齐 OtaManager::m_fwAutoTried)
+
+/* ---------- 列表缓存(对齐上位机 net_worker.py 的三层策略) ----------
+   为什么必须有: Gitee 对匿名请求限流很紧(403 Rate Limit Exceeded 是常态),
+   页面每次打开都裸打一次 API 很容易把配额打光。策略与客户端一致:
+     ① TTL 内直接吃缓存, 根本不发请求;
+     ② 请求成功 -> 写缓存;
+     ③ 请求失败 -> 用旧缓存兜底(最多 7 天), 至少让界面/红点还有判断依据。
+   ⚠️ localStorage 在无痕模式/某些 file:// 场景会抛异常, 一律 try/catch 静默降级。 */
+var OTA_CACHE_KEY = 'vkf3_ota_list_v1';
+var OTA_CACHE_TTL_SEC = 1800;             // 30 分钟
+var OTA_CACHE_STALE_MAX_SEC = 7 * 86400;  // 失败兜底最多用 7 天前的缓存
+var OTA_DISMISS_KEY = 'vkf3_ota_notice_dismissed_v1';  // "稍后"忽略的版本号(对齐 fwNoticeDismissed)
+
+function otaCacheRead(maxAgeSec) {
+  try {
+    const raw = localStorage.getItem(OTA_CACHE_KEY);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || !Array.isArray(o.list) || !o.list.length || !o.ts) return null;
+    const ageSec = (Date.now() - o.ts) / 1000;
+    if (!(ageSec <= maxAgeSec)) return null;
+    o.ageSec = ageSec;
+    return o;                     // {ts, ageSec, list}
+  } catch (e) { return null; }
+}
+function otaCacheWrite(list) {
+  try {
+    // 只存可序列化字段: _okMirror 里带函数, 存进去会变成 {name} 污染下次使用
+    const clean = list.map(function (r) {
+      return { tag: r.tag, name: r.name, date: r.date, file: r.file, url: r.url, size: r.size, src: r.src };
+    });
+    localStorage.setItem(OTA_CACHE_KEY, JSON.stringify({ ts: Date.now(), list: clean }));
+  } catch (e) { /* 配额满/无痕模式: 不缓存也能用, 只是下次要重新拉 */ }
+}
+function otaDismissedVer() {
+  try { return localStorage.getItem(OTA_DISMISS_KEY) || ''; } catch (e) { return ''; }
+}
+// 「稍后」: 记住这个版本不再提示横幅(红点仍保留, 与客户端一致 ——
+//   客户端"稍后"只关弹窗, 侧栏红点照样常亮)。
+function otaDismissNotice() {
+  const latest = otaLatestRelease();
+  if (!latest || !latest.tag) return;
+  const ver = String(latest.tag).replace(/^v/i, '');
+  try { localStorage.setItem(OTA_DISMISS_KEY, ver); } catch (e) { /* 忽略 */ }
+  otaPaintNotice();
+}
+// 取在线最新版本(列表已按版本降序排好)
+function otaLatestRelease() {
+  return (otaReleases && otaReleases.length) ? otaReleases[0] : null;
+}
+// 是否有新版: 只有【线上版本 > 设备版本】才算(数字逐段比较, 对齐 OtaManager::cmpVersion)。
+// 设备版本比线上还新时(本地 1.2.8 vs 线上 1.1.x)绝不能说"发现新固件"。
+function otaHasNewFw() {
+  const latest = otaLatestRelease();
+  const cur = String(otaFwVersion || '').replace(/^v/i, '');
+  if (!latest || !latest.tag || !cur) return false;
+  return otaCmpVer(String(latest.tag).replace(/^v/i, ''), cur) > 0;
+}
+// 侧栏 OTA 图标右上角红点: 任意页可见(对齐 QML 的 10px 脉冲圆点)
+function otaPaintBadge() {
+  const b = document.getElementById('otaNavBadge');
+  if (!b) return;
+  if (otaHasNewFw()) b.removeAttribute('hidden');
+  else b.setAttribute('hidden', '');
+}
 
 function setOtaSrcMode(mode) {
   otaSrcMode = mode;
@@ -129,18 +195,41 @@ function otaFetchTimeout(url, opts, ms) {
 }
 
 // ---------- 在线版本列表 ----------
-async function otaRefreshReleases() {
-  if (otaNetBusy) { setOtaStatus('网络操作进行中...'); return; }
+// mode: 'silent' = 启动 / 设备上线时的静默检查(失败不弹错, 优先吃缓存)
+//       'force'  = 用户点「刷新」, 绕过 TTL 强制拉最新(对齐上位机手动"检查更新")
+//       省略     = 首次进入 OTA 页, 允许吃 30 分钟内的缓存
+async function otaRefreshReleases(mode) {
+  const silent = (mode === 'silent');
+  const force = (mode === 'force');
+
+  if (otaNetBusy) { if (!silent) setOtaStatus('网络操作进行中...'); return; }
+
+  // ① TTL 内(30 分钟)的缓存直接吃, 根本不发请求 —— 保护 Gitee 匿名配额, 与客户端同策略。
+  //    手动「刷新」传 force 跳过这一步(用户意图就是要最新)。
+  if (!force) {
+    const fresh = otaCacheRead(OTA_CACHE_TTL_SEC);
+    if (fresh) {
+      otaReleases = fresh.list;
+      otaReleases.sort(otaCmpRelease);
+      otaPaintNotice(); paintOtaNet(); updateOtaControls();
+      if (!silent) {
+        setOtaStatus('已使用 ' + Math.max(1, Math.round(fresh.ageSec / 60)) + ' 分钟前的缓存列表'
+          + '（点「刷新」可强制获取最新）');
+      }
+      return;
+    }
+  }
+
   otaNetBusy = true;
   paintOtaNet();
-  setOtaStatus('正在获取在线版本...');
+  if (!silent) setOtaStatus('正在获取在线版本...');
   var fails = [];
   try {
     var out = null;
     // 逐源尝试: 任一成功拿到非空列表即停
     for (var i = 0; i < OTA_LIST_SOURCES.length; i++) {
       var s = OTA_LIST_SOURCES[i];
-      if (i > 0) setOtaStatus('正在尝试备用源 ' + s.name + ' ...');
+      if (i > 0 && !silent) setOtaStatus('正在尝试备用源 ' + s.name + ' ...');
       try {
         var r = await otaFetchTimeout(s.url, { headers: { 'User-Agent': OTA_UA } }, 15000);
         if (!r.ok) {
@@ -174,21 +263,43 @@ async function otaRefreshReleases() {
       if (otaReleases[k].size > 0 || !otaReleases[k].url) continue;
       otaReleases[k].size = await otaHeadSize(otaReleases[k]);
     }
+    otaCacheWrite(otaReleases);      // ② 成功 -> 写缓存, 供下次 TTL 内直取
     otaPaintNotice();
     setOtaStatus(otaReleases.length
       ? ('获取到 ' + otaReleases.length + ' 个可用版本，请选择后下载')
       : '仓库暂无可用固件发布');
   } catch (e) {
+    // ③ 网络失败 -> 旧缓存兜底(最多 7 天): 至少让红点/横幅还能判断有没有新版,
+    //    而不是一片空白 + 报错(客户端 net_worker.py 也是这么兜的)。
+    const stale = otaCacheRead(OTA_CACHE_STALE_MAX_SEC);
+    if (stale) {
+      otaReleases = stale.list;
+      otaReleases.sort(otaCmpRelease);
+      otaPaintNotice();
+      const mins = Math.max(1, Math.round(stale.ageSec / 60));
+      const ago = mins >= 120 ? Math.round(mins / 60) + ' 小时' : mins + ' 分钟';
+      setOtaStatus('网络获取失败，已使用 ' + ago + '前的缓存列表'
+        + (e && e.message ? '（' + e.message + '）' : ''), true);
+      return;
+    }
     otaReleases = [];
+    otaPaintNotice();
     var msg = '获取在线版本失败: ' + (e && e.message ? e.message : e)
       + '。请检查网络/代理后重试，或切到「本地文件」手动选择 .bin。';
-    setOtaStatus(msg, true);
-    // 同时写日志: 状态栏一行放不下全部源/原因, 日志面板可完整查看
-    // (log() 内部用 innerHTML, 故必须转义 —— 消息里含 URL/浏览器串)
-    if (typeof log === 'function' && typeof escapeHtml === 'function') {
-      log('[OTA] ' + escapeHtml(msg), 'error');
-      log('[OTA] 页面来源: ' + escapeHtml(location.protocol + '//' + (location.host || '(本地文件)'))
-        + ' | 浏览器: ' + escapeHtml(navigator.userAgent.slice(0, 60)), 'info');
+    if (silent) {
+      // 静默检查失败不打扰用户(页面没开 OTA 页时尤其不能弹), 只留一条日志
+      if (typeof log === 'function' && typeof escapeHtml === 'function') {
+        log('[OTA] 后台检查失败（不影响其他功能）: ' + escapeHtml(msg), 'info');
+      }
+    } else {
+      setOtaStatus(msg, true);
+      // 同时写日志: 状态栏一行放不下全部源/原因, 日志面板可完整查看
+      // (log() 内部用 innerHTML, 故必须转义 —— 消息里含 URL/浏览器串)
+      if (typeof log === 'function' && typeof escapeHtml === 'function') {
+        log('[OTA] ' + escapeHtml(msg), 'error');
+        log('[OTA] 页面来源: ' + escapeHtml(location.protocol + '//' + (location.host || '(本地文件)'))
+          + ' | 浏览器: ' + escapeHtml(navigator.userAgent.slice(0, 60)), 'info');
+      }
     }
   } finally {
     otaNetBusy = false;
@@ -213,6 +324,15 @@ function otaCmpRelease(a, b) {
   if (va) return -1;
   if (vb) return 1;
   return String(b.tag).localeCompare(String(a.tag));
+}
+
+// 版本号逐段数字比较: a>b 返回正数, 相等 0, a<b 负数(对齐上位机 OtaManager::cmpVersion)。
+// ⚠️ 不能用字符串比较: "1.1.10" < "1.1.9" 会判错。
+function otaCmpVer(a, b) {
+  const va = otaParseVer(a), vb = otaParseVer(b);
+  if (!va || !vb) return String(a || '').localeCompare(String(b || ''));
+  for (let i = 0; i < 3; i++) { if (va[i] !== vb[i]) return va[i] - vb[i]; }
+  return 0;
 }
 
 // 取固件字节数: 逐条通道试 HEAD, 首个成功即用; 全失败返回 0(UI 显示 "-")。
@@ -368,14 +488,17 @@ function paintOtaNet() {
   const empty = document.getElementById('otaNetEmpty');
   const cur = document.getElementById('otaNetCur');
   const btn = document.getElementById('otaNetRefresh');
+  /* 列表可能还没加载过(OtaSetFwVersion 会在连上设备的瞬间就被 applyDeviceInfo 调用,
+     早于首次 otaRefreshReleases) ⇒ 这里对 otaReleases 兜底, 不能直接 .length/.map。 */
+  const rels = otaReleases || [];
   if (cur) cur.textContent = otaFwVersion ? ('当前设备 v' + otaFwVersion) : '';
   if (btn) {
     btn.textContent = otaNetBusy ? '处理中…' : '刷新';
     btn.classList.toggle('off', otaNetBusy);
   }
-  if (empty) empty.style.display = (!otaNetBusy && !otaReleases.length) ? '' : 'none';
+  if (empty) empty.style.display = (!otaNetBusy && !rels.length) ? '' : 'none';
   if (!list) return;
-  list.innerHTML = otaReleases.map((r, i) => {
+  list.innerHTML = rels.map((r, i) => {
     const sz = fmtSizeBytes(r.size);
     return '<div class="ota-rel' + (otaNetBusy ? ' busy' : '') + '" data-i="' + i + '" onclick="otaDownloadRelease(' + i + ')">' +
       '<span class="ota-rel-tag">' + escapeHtml(r.tag) + '</span>' +
@@ -393,14 +516,17 @@ function escapeHtml(s) {
 
 // ---------- 新固件横幅 (QML 856-896) ----------
 function otaPaintNotice() {
+  otaPaintBadge();     // 红点先更新: 它在侧栏, 任何页都可见, 不依赖横幅 DOM
   const box = document.getElementById('otaNotice');
   if (!box) return;
-  const latest = otaReleases.length ? otaReleases[0] : null;
-  if (!latest || !latest.tag) { box.style.display = 'none'; return; }
-  const latestVer = String(latest.tag).replace(/^v/i, '');
+  const latest = otaLatestRelease();
+  const latestVer = (latest && latest.tag) ? String(latest.tag).replace(/^v/i, '') : '';
   const curVer = String(otaFwVersion || '').replace(/^v/i, '');
-  const hasNew = curVer && latestVer && latestVer !== curVer;
-  if (!hasNew) { box.style.display = 'none'; return; }
+  /* 判定标准与上位机一致: 只有【线上版本 > 设备版本】才提示(数字逐段比较)。
+     原来用 != 比较, 设备版本比线上还新时(本地 1.2.8 vs 线上 1.1.x)会提示
+     "发现新固件 v1.1.x", 等于劝用户降级。
+     另: 用户点过「稍后」且线上版本没变 -> 横幅不再出现(红点保留, 同客户端)。 */
+  if (!otaHasNewFw() || otaDismissedVer() === latestVer) { box.style.display = 'none'; return; }
   box.style.display = '';
   document.getElementById('otaNoticeTitle').textContent = '发现新固件 v' + latestVer;
   document.getElementById('otaNoticeSub').textContent = '设备当前 v' + curVer + ' · 建议升级到最新固件';
@@ -443,4 +569,31 @@ function otaIsUsb() {
 }
 
 // ---------- 供外部调用: 记录设备固件版本 ----------
-function otaSetFwVersion(v) { otaFwVersion = v || ''; otaPaintNotice(); paintOtaDev(); }
+// 调用点在 applyDeviceInfo(00-original.js) —— 每次刷新设备信息都会同步。
+// 三个渲染函数都要重画: 横幅+红点(有无新版) / 列表头(当前设备 vX) / 设备行(已连接 vX)。
+function otaSetFwVersion(v) {
+  otaFwVersion = v || '';
+  otaPaintNotice();
+  paintOtaNet();
+  paintOtaDev();
+  /* 设备上线但还没有在线列表 -> 静默补拉一次(对齐 OtaManager.cpp:128-135
+     "连上设备(USB 或蓝牙)即能对比出固件有没有新版")。
+     只做一次: otaFwAutoTried, 防反复联网把 Gitee 匿名配额打光。 */
+  if (otaFwVersion && !(otaReleases && otaReleases.length) && !otaNetBusy && !otaFwAutoTried) {
+    otaFwAutoTried = true;
+    setTimeout(function () { otaRefreshReleases('silent'); }, 0);
+  }
+}
+
+/* ---------- 启动静默检查 (对齐客户端 main.cpp:99) ----------
+   客户端是启动 5 秒后静默拉一次列表(吃缓存); 网页端同理 —— 这样用户不必先点进
+   「固件升级」页, 只要设备连着, 侧栏 OTA 图标就能亮红点。
+   ⚠️ 延迟 1.2s: 让设备自动连接/首页渲染先完成, 别和 Web Serial 授权抢时序。
+   ⚠️ 交给 otaRefreshReleases('silent'): 命中 30 分钟缓存时零请求, 失败也不弹错。 */
+(function otaStartupCheck() {
+  const run = function () {
+    setTimeout(function () { otaRefreshReleases('silent'); }, 1200);
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+  else run();
+})();
