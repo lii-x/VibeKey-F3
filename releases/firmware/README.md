@@ -22,6 +22,8 @@ jsDelivr → GitHub 直链 → Gitee 直链，本目录即是 jsDelivr 通道的
 
 | 文件 | 版本 | 字节数 | SHA-256 |
 |---|---|---|---|
+| `vibekey-f3-v1.2.2.bin` | 1.2.2 | 1081600 | `74f3ce3d4c0b197d58ac99d0932d22497819cadeb84cc5d67bbbcf2bd3470b07` |
+| `vibekey-f3-v1.2.1.bin` | 1.2.1 | 1081020 | `d8b8aa5eb291f8e5f63f0d7a518231a93294d1b7cadec9efe623496e3a059fc1` |
 | `vibekey-f3-v1.1.2.bin` | 1.1.2 | 1052880 | `f76bd95f3ff8f60b208f01142ba5585a5275caabdfff7c4217f6245358e17a4d` |
 | `vibekey-f3-v1.1.1.bin` | 1.1.1 | 1048320 | `c6cabe6850bda9fdadc96b3661ae15f33e63e17d6d24a1ce7713867ea63cff49` |
 | `vibekey-f3-v1.1.0.bin` | 1.1.0 | 1047928 | `7c3befa560032209568115ca998faf1fb17b1fd53603849ee7b825d067e16f16` |
