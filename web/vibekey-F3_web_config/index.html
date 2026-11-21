@@ -3769,6 +3769,14 @@ var OTA_MIRRORS = [
     build: function (r) {
       return 'https://cdn.jsdelivr.net/gh/' + OTA_GH_REPO + '@' + r.tag + '/releases/firmware/' + r.file;
     } },
+  /* ★ 11-22: 新增 raw.githubusercontent 通道(实测响应带 access-control-allow-origin: *)。
+     存在的两个理由(前者今天线上真踩到了):
+       ① jsDelivr 会把**404 负缓存**住 —— 固件刚提交进仓库时它仍回 404, 而 raw 立刻 200,
+          用户只会看到"下载失败", 干等 CDN 缓存过期;
+       ② jsDelivr 在国内网络经常不可用, raw 是另一条独立链路。 */
+  { name: 'GitHub raw', build: function (r) {
+      return 'https://raw.githubusercontent.com/' + OTA_GH_REPO + '/main/releases/firmware/' + r.file;
+    } },
   { name: 'GitHub 直链', build: function (r) { return r.src === 'github' ? r.url : ''; } },
   { name: 'Gitee 直链', build: function (r) { return r.url; } },
 ];
@@ -4101,8 +4109,9 @@ async function otaDownloadRelease(idx) {
   } catch (e) {
     if (e && e.name === 'AbortError') setOtaStatus('下载已取消');
     else {
-      setOtaStatus('下载失败：' + tried.join('；') + '。Gitee 不允许浏览器跨域下载固件，'
-        + '请点「复制直链」用浏览器下载 .bin 后, 切到「本地文件」选择它。', true);
+      setOtaStatus('下载失败：' + tried.join('；') + '。'
+        + '若是刚发布的新固件，可能尚未同步进 GitHub 镜像仓库（releases/firmware/），'
+        + '或当前网络拦截了 CDN；可点「复制直链」用浏览器下载 .bin 后, 切到「本地文件」选择它。', true);
       var box = document.getElementById('otaNetPicked');
       if (box) {
         box.style.display = '';
