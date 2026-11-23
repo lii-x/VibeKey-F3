@@ -215,6 +215,37 @@ void bt_hid_cmpose_hid_descriptor(void)
 }
 
 /* 蓝牙栈就绪后调用：使能 HID 设备（SDK 里只有 finsh 命令会调，产品固件必须自己调） */
+/* ============================================================================
+ * 深度睡眠唤醒后重建经典 HID（11-23）
+ * ============================================================================
+ * 现象：PC 关机 → 设备进 DEEP → 唤醒后 BLE 连上、经典 ACL 也连上、HFP 正常，
+ *       但**电脑上收不到任何按键/鼠标**（HID 报文静默丢失）。
+ * 根因：DEEP 只停 LCPU/射频，HCPU 侧的 HID 服务状态没重建；等 PC 重新开机连上来时，
+ *       SDK 内部仍认为"通道已开"，`bt_classic_hid_sdk_connected()` 返回真，
+ *       于是 ble_app 的 sync 定时器把我们的 ready 标志又恢复成 1 —— 报文就这样
+ *       被送进一个并不存在的通道（PC 侧根本没 open interrupt channel）。
+ * 对策：唤醒后把"已连接"标志作废并重新 `bt_hid_open()`，让 SDK 重建服务端状态，
+ *       等 PC 真正 open 通道时由 SDK 事件重新置位。
+ * ========================================================================== */
+void classic_hid_reopen_after_wake(void)
+{
+    if (!bts2g_app_p) {
+        rt_kprintf("[CLS HID] reopen skipped: bts2g_app_p is NULL\n");
+        return;
+    }
+    { extern void classic_hid_set_linked(unsigned char);
+      classic_hid_set_linked(0); }        /* 旧状态一律作废，等真实 connect 事件 */
+    /* ⚠️ 必须先 close 再 open。SDK 的 bt_hid_open() 里有 `bts2s_hid_openFlag` 短路：
+     * 已经 open 时只回一个 "URC HID open,alreay open" 就返回，**不做任何重建**。
+     * 实测只调 open 无效（日志里正是 "alreay open"），HID 依然是陈旧状态。
+     * close 会把 openFlag 清 0 并 hid_disb_req()（注销 SDP 记录/拆通道），
+     * 随后 open 才真正重新 hid_enb_req()。 */
+    { extern void bt_hid_close(void); bt_hid_close(); }
+    rt_thread_mdelay(80);                 /* 让 disb 请求在 BT 线程里落地 */
+    bt_hid_open();
+    rt_kprintf("[CLS HID] reopened after deep wake (close+open, stale state dropped)\n");
+}
+
 void classic_hid_open(void)
 {
     if (!bts2g_app_p) {

@@ -321,6 +321,29 @@ void ble_app_mouse_sniff_ctl(int active)
  * ========================================================================== */
 #define MOUSE_SNIFF_KICK_MS  150
 
+/* ============================================================================
+ * 配对完成后修正角色（11-23）
+ * ============================================================================
+ * 现象（手机）：**首次配对**连上后，空中鼠标明显"拖慢"；重启设备后恢复正常。
+ * 根因：两次连接的角色不同 ——
+ *   手机发起(dir=1) → 设备是 **slave**，只能等主机轮询才能发 HID 报文，
+ *                     手机轮询间隔长 ⇒ 报文排队 ⇒ 手感拖慢；
+ *   设备发起(dir=0) → 设备是 **master**，发包时序自己掌控 ⇒ 顺畅。
+ *   （日志实证：dir=1 时 `role: slave`，重启后 dir=0 时 `role: master`）
+ * 手机拒绝设备直接 role switch 回 master（res=14 安全理由），
+ * 所以改用等效于"重启"的做法：配对保存完之后**主动断一次**，让 auto-connect
+ * 以设备发起的方式重连 ⇒ 变 master。只在配对完成时触发一次，不影响日常回连。
+ * ========================================================================== */
+void ble_app_post_pair_role_fix(void)
+{
+    const uint8_t *peer = bt_cls_peer_addr();
+    if (!peer) return;
+    rt_kprintf("[HID] post-pair role fix: drop ACL, will reconnect as master (dir=0)\n");
+    bt_interface_disconnect_req((unsigned char *)peer);
+    /* 快速回连：auto-connect 默认 8s 一拍，这里插一次 1.5s 的提前量 */
+    { extern void bt_cls_autoconn_kick(uint32_t delay_ms); bt_cls_autoconn_kick(1500u); }
+}
+
 void ble_app_mouse_sniff_kick(void)
 {
     static rt_tick_t last = 0;
@@ -988,9 +1011,18 @@ void bt_classic_hid_kick_connect(void)
     /* ★ 11-17: 60 秒窗口用完进入"放弃"状态后，**任何来源都不许再踢**，
      * 否则 kick 状态机每 10s 自动重新武装，会一直把射频拉起来、反复唤醒主核。
      * 只有按键（bt_cls_autoconn_kick_user）会清掉这个标志。 */
-    if (g_cls_giveup) return;
+    /* ★ 11-23 静默返回改成可观测 —— 之前这里一旦被挡住，日志里连一行提示都没有，
+     * 只能看到"HFP 连上了但 HID 没反应"，完全无法判断是没踢还是踢了没用。 */
+    if (g_cls_giveup) {
+        rt_kprintf("[CLS HID] kick SKIP: giveup flag set (wait user key)\n");
+        return;
+    }
 
-    if (g_hid_kick_pending || classic_hid_linked()) return;
+    if (g_hid_kick_pending || classic_hid_linked()) {
+        rt_kprintf("[CLS HID] kick SKIP: pending=%d linked=%d\n",
+                   g_hid_kick_pending, classic_hid_linked() ? 1 : 0);
+        return;
+    }
 
     /* ★ 11-10 重新武装：用满次数后不是永久放弃，退避期满就再来一轮，
      * 否则"主机重连后反应慢"会变成一次性的死局。 */
@@ -1014,6 +1046,29 @@ void bt_classic_hid_kick_connect(void)
                          &(rt_tick_t){rt_tick_from_millisecond(HID_KICK_FIRST_MS)});
     }
     rt_timer_start(g_hid_kick_timer);
+}
+
+/* ★★ 11-23 清掉 SDK HID 连接表里的陈旧槽位。
+ * SDK 的 bt_hid_connect_requset() 开头用 bt_hid_check_connection_by_addr() 判重：
+ *     for(i) if (bd_eq(&conn[i].rmt_bd, bd)) { 打印 "already connected or connecting"; return; }
+ * 它**只比地址**，而且 bt_hid_close() 并不会清这张表。
+ * 于是深睡唤醒后（我们 close+open 过），每次踢都会被判成"已连接"直接返回，
+ * HID 通道永远建不起来 —— 日志实证：kick connect #1..#6 后面全是
+ * "This address already connected or connecting"，最后次数耗尽放弃。
+ * 对策：发起连接前把该地址对应的槽位清空，让 SDK 的判重放行。 */
+static void hid_clear_stale_conn_slot(BTS2S_BD_ADDR *bd)
+{
+    bts2_app_stru *app = (bts2_app_stru *)bts2g_app_p;
+    if (!app || !bd) return;
+
+    for (int i = 0; i < CFG_MAX_HID_CONN_NUM; i++) {
+        if (bd_eq(&app->hid_inst.conn[i].rmt_bd, bd)) {
+            rt_kprintf("[CLS HID] clear stale hid conn slot #%d (%02x:%02x:%02x:%02x:%02x:%02x)\n",
+                       i, bd->lap & 0xFF, (bd->lap >> 8) & 0xFF, (bd->lap >> 16) & 0xFF,
+                       (bd->lap >> 24) & 0xFF, bd->uap, bd->nap & 0xFF);
+            memset(&app->hid_inst.conn[i].rmt_bd, 0, sizeof(app->hid_inst.conn[i].rmt_bd));
+        }
+    }
 }
 
 static void hid_kick_fire(void *parameter)
@@ -1045,6 +1100,7 @@ static void hid_kick_fire(void *parameter)
         bt_addr_convert_to_bts((bd_addr_t *)m, &bd);
         rt_kprintf("[CLS HID] kick connect #%d -> %02x:%02x:%02x:%02x:%02x:%02x\n",
                    g_hid_kick_tries, m[5], m[4], m[3], m[2], m[1], m[0]);
+        hid_clear_stale_conn_slot(&bd);   /* 放行 SDK 的地址判重，见函数上方说明 */
         bt_hid_connect_requset(&bd);
     }
 
@@ -1100,8 +1156,16 @@ static void hid_link_sync_cb(void *parameter)
     if (sdk == ours) return;
 
     if (sdk) {
-        classic_hid_set_linked(1);
-        rt_kprintf("[CLS HID] sync: SDK says connected -> flag restored\n");
+        /* ★★ 11-23 关键修正：**不能**凭 sdk 恢复"已连接"标志。
+         * `bt_classic_hid_sdk_connected()` 底层是 bt_hid_check_connection_by_addr()，
+         * 而它的实现只是遍历 hid_inst.conn[] **比较一下对端地址**
+         *   for(i) if (bd_eq(&conn[i].rmt_bd, bd)) return TRUE;
+         * —— 它表示"这个地址还登记在 HID 槽位里"，**完全不反映 L2CAP 通道是否打开**。
+         * 深睡唤醒后我们刚 close+open 过，旧槽位地址仍在 ⇒ 它照样返回真，
+         * 于是这里把标志恢复成 1，报文被送进一个 PC 根本没建立的通道 → 静默丢失。
+         * 正确做法：只把"地址已登记但通道未知"当作**该去建通道**的信号，
+         * 踢一次 HID 连接，等 BT_NOTIFY_HID_PROFILE_CONNECTED 这个唯一可靠事件来置位。 */
+        bt_classic_hid_kick_connect();
     } else {
         classic_hid_set_linked(0);
         rt_kprintf("[CLS HID] sync: SDK says NOT connected -> flag cleared, re-kick\n");
@@ -1548,6 +1612,13 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             g_hid_kick_tries = 0;
             g_hid_kick_warned = 0;
             g_hid_kick_last_tick = 0;
+            /* ★ 11-23: ACL 已经建起来 = 主机就在那儿，之前"60 秒窗口用尽、放弃重连"
+             * 的判据已经不成立。必须在这里解除 giveup，否则 kick 会被永久挡住
+             * （只有按键能清），表现就是"链路连着但 HID 通道永远不重建"。 */
+            if (g_cls_giveup) {
+                g_cls_giveup = 0;
+                rt_kprintf("[CLS HID] giveup cleared (ACL is up, host reachable)\n");
+            }
             bt_classic_hid_kick_connect();
             hid_link_sync_start();     /* 11-10: 起 HID 标志自愈校正 */
             g_hfp_connected = 1;

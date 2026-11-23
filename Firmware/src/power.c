@@ -1646,6 +1646,9 @@ static void power_enter_standby(void)
     g_in_deep_sleep = 0;
 
     power_resume_from_deep();
+    /* ★ 11-23 重建经典 HID：DEEP 之后 SDK 的 HID 通道状态是陈旧的，
+     * 不重建会出现"PC 重启后连上了但按键鼠标全无反应"（详见 classic_hid.c 说明）。 */
+    { extern void classic_hid_reopen_after_wake(void); classic_hid_reopen_after_wake(); }
     rt_kprintf("[POWER] resumed from standby\n");
 }
 

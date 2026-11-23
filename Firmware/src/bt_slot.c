@@ -572,6 +572,9 @@ void bt_multi_on_br_paired(const uint8_t *addr)
     rt_kprintf("[BTSLOT] BR/EDR paired -> slot%d addr %02x:%02x:%02x:%02x:%02x:%02x, PAIR window end\n",
                g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
     bt_multi_led_stop();
+    /* ★ 11-23: 首次配对是手机发起(dir=1) ⇒ 设备为 slave ⇒ 空中鼠标拖慢。
+     * 主动断一次让 auto-connect 以 master 身份重连，与"重启设备"等效。 */
+    { extern void ble_app_post_pair_role_fix(void); ble_app_post_pair_role_fix(); }
 }
 
 /* ---- 连接过滤(白名单) ---- */
