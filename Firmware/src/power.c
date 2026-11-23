@@ -1257,6 +1257,22 @@ static rt_timer_t power_find_timer_by_name(const char *name)
  * ============================================================================ */
 static void power_enter_standby(void)
 {
+    /* ★★ 11-23 安全模式：绝不进入待机流程。
+     * 必须放在【这里】而不是 sleep_thread_entry 的入口 —— 那个线程在
+     * power_init() 里就创建了，早于 main 设置 g_boot_safe_mode，入口处读到
+     * 的永远是 0（实测 8 分钟后照样走到下面的 bt_interface_* → DACCVIOL）。
+     * 本函数里有一串 bt_interface_*（关扫描/断链/释放 PM 锁），而安全模式下
+     * 蓝牙栈从未初始化，任何一个都会踩空指针。 */
+    { extern volatile uint8_t g_boot_safe_mode;
+      if (g_boot_safe_mode) {
+          static uint8_t warned = 0;
+          if (!warned) {
+              warned = 1;
+              rt_kprintf("[SAFE] standby skipped (safe mode) — 后续静默\n");
+          }
+          return;
+      } }
+
     /* ★★★ 09-18：入口立刻置"准备期"标志 + 建立干净基线。
      * 必须在**任何耗时步骤之前**（BT 关闭 / ~20s RTC 校准都在后面）：它让
      * `power_standby_wakeup()` 在准备窗口内也能记下按键，从而可被中止检查捕获。
@@ -1669,8 +1685,11 @@ static void sleep_thread_entry(void *param)
 
         if (!bt_host_linked())
         {
-            /* 未连接：60s 等待回连, 仍未连则进待机(原逻辑) */
-            rt_kprintf("[POWER] BT disconnected, waiting 60s\n");
+            /* 未连接：60s 等待回连, 仍未连则进待机(原逻辑)
+             * 安全模式下蓝牙根本没启动，这条会每 60s 刷一次，跳过。 */
+            { extern volatile uint8_t g_boot_safe_mode;
+              if (!g_boot_safe_mode)
+                  rt_kprintf("[POWER] BT disconnected, waiting 60s\n"); }
             uint32_t elapsed = 0;
             while (elapsed < 60000 && !bt_host_linked())
             {

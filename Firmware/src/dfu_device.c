@@ -46,7 +46,7 @@
 
 /* 设备身份信息（App 端握手据此确认是 VibeKey-F3）。版本号随发布 bump。 */
 #define VIBEKEY_MODEL      "VibeKey-F3"
-#define VIBEKEY_FW_VERSION "1.2.2"
+#define VIBEKEY_FW_VERSION "1.2.9"
 
 #ifdef CONFIG_USBDEV_ADVANCE_DESC
 
@@ -236,6 +236,19 @@ static void conf_task_entry(void *param)
              * 越界按槽1处理。READ/WRITE/RESET 均按指定槽操作, 上位机可改任意
              * 槽(运行时无需切槽/重启)。旧上位机(buf[5]=0)默认操作槽1, 兼容。 */
             uint8_t slot = pkt.buf[5];
+
+            /* ★★ 11-23 安全模式：只放行 INFO 查询，其余配置命令一律拒绝。
+             * 安全模式下 rgb_led_init()/LED 设备节点均未创建，上位机若下发
+             * RGB 预览/按键配置，rgbapp 线程会 rt_device_control(NULL) →
+             * 断言失败 + 该线程栈溢出（实测 SCB_CFSR_UFSR:0x10 STKOF）。
+             * 升级只需要 INFO（读版本确认）和 OTA 数据帧（走 USB ISR，不经这里）。 */
+            { extern volatile uint8_t g_boot_safe_mode;
+              if (g_boot_safe_mode && cmd != CONF_CMD_INFO)
+              {
+                  rt_kprintf("[SAFE] conf cmd 0x%02x ignored (no peripherals)\n", cmd);
+                  conf_status_reply(&pkt, 0x01);      /* 0x01 = 拒绝 */
+                  continue;
+              } }
 
             if (cmd == CONF_CMD_READ)
             {
@@ -840,7 +853,12 @@ void usbd_cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
 
 void usbd_cdc_acm_bulk_in(uint8_t busid, uint8_t ep, uint32_t nbytes)
 {
-    rt_kprintf("CDC IN: nbytes=%d\r\n", nbytes);
+    /* ★ 11-23 删掉 `CDC IN: nbytes=%d` 打印。
+     * 这是 USB 发送完成回调（中断上下文），上位机每次查询状态都会回一帧
+     * (nbytes=23 就是 INFO 回复 "VibeKey-F3|x.y.z|电量|槽位\n")，于是每查一次
+     * 打印一行 —— 上位机轮询时日志被完全刷屏。
+     * 更重要的是：在端点回调里调 rt_kprintf 是同步串口输出，会拖慢 USB 完成
+     * 处理、拉高中断延迟，对 OTA 吞吐和 HID 发送都有影响。调试期已结束，删除。 */
     if ((nbytes % usbd_get_ep_mps(busid, ep)) == 0 && nbytes)
         usbd_ep_start_write(busid, CDC_IN_EP, NULL, 0);
     else
@@ -871,7 +889,10 @@ void cdc_acm_init(uint8_t busid, uintptr_t reg_base)
 
     /* RGB 实时预览线程（ISR 不能直接调 WS2812B 驱动，经消息队列转发）*/
     rgb_mq = rt_mq_create("rgbmq", sizeof(rgb_req_t), RGB_REQ_MQ_SIZE, RT_IPC_FLAG_FIFO);
-    rt_thread_t rgb_tid = rt_thread_create("rgbapp", rgb_apply_task, RT_NULL, 1024, 15, 10);
+    /* ★ 11-23 栈 1KB → 2KB：崩溃现场该线程水位已到 87%，且出现过 STKOF 栈溢出。
+     * RGB 下发里会走 ws2812b 驱动的 device_control（内部有格式化/遍历），
+     * 1KB 明显不够。 */
+    rt_thread_t rgb_tid = rt_thread_create("rgbapp", rgb_apply_task, RT_NULL, 2048, 15, 10);
     if (rgb_tid)
         rt_thread_startup(rgb_tid);
 

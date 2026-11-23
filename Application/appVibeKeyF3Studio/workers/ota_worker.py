@@ -168,23 +168,28 @@ def ota_upgrade(port, firmware_path):
 
     print("STATUS:固件已发送(含CRC), 等待设备重启...", flush=True)
     ser.close()
-    time.sleep(5)   # 等待 reboot + USB 重新枚举
+    # ★ 11-23 验证提速：原来固定 sleep(5) + 每次失败再等 3 秒，最坏要 50 秒。
+    # 实测设备端启动 1.2 秒 USB 就绪（[BOOT] 埋点：start@18ms / vbus@1158ms），
+    # 那 5 秒纯属空等。改为"短等待 + 密探询"：0.8s 起探，每次判定只给 0.5s，
+    # 失败间隔 0.3s，次数加到 25 —— 正常情况 1~2 秒就能拿到版本，
+    # 慢枚举（Windows 重新分配串口）也有足够重试窗口。
+    time.sleep(0.8)
 
     # 重握手验证: 设备应已用新固件重新上线; 若超时无响应说明可能变砖
     print("STATUS:验证设备是否重新上线...", flush=True)
     new_version = None
-    for attempt in range(1, 16):
+    for attempt in range(1, 26):
         try:
-            vser = serial.Serial(port, 115200, timeout=2)
-            time.sleep(0.3)
-            info = send_info_and_read(vser, timeout=2)
+            vser = serial.Serial(port, 115200, timeout=0.5)
+            time.sleep(0.15)
+            info = send_info_and_read(vser, timeout=0.5)
             vser.close()
             if info is not None:
                 new_model, new_version = info
                 break
         except Exception:
             pass
-        time.sleep(1)
+        time.sleep(0.3)
 
     if new_version is None:
         print("VERIFY_FAIL", flush=True)

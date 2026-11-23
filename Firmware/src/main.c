@@ -72,6 +72,10 @@ static void ota_thread_entry(void *param)
     ota_flash_task(CHARGE_DETECT_PIN);
 }
 
+/* ===== 启动分段计时（11-23）：定位"OTA 后 App 等设备上线太久"到底卡在哪一步 ===== */
+#define BOOT_T(tag) rt_kprintf("[BOOT] %-14s @%lums\n", tag, \
+                               (unsigned long)(rt_tick_get() * 1000UL / RT_TICK_PER_SECOND))
+
 static void usb_init_once(void)
 {
     extern void cdc_acm_init(uint8_t busid, uintptr_t base);
@@ -192,6 +196,7 @@ static void usb_vbus_thread(void *param)
     if (v0 > 0)
         usb_start();                /* 插着开机也可用 CDC */
     rt_kprintf("[USB] vbus thread started, vbus=%d\n", v0);
+    BOOT_T("vbus_thread");
 
     while (1) {
         /* 阻塞等"VBUS 状态变化"通知（来自 1s 充电轮询）；1s 超时兜底 = 自带兜底轮询，
@@ -3035,6 +3040,34 @@ void HAL_MspInit(void)
     BSP_IO_Init();
 }
 
+/* ============================================================================
+ * 开机安全模式（仅 USB + OTA）—— 11-23
+ * ============================================================================
+ * 需求背景：现场出现过"OTA 刷进去之后设备卡住，蓝牙起不来、也没法再 OTA"的情况。
+ * 用户在售后/自救场景里只能拆机线刷。这里给一条软出路：
+ *
+ *   **上电时按住滚轮中键不放** → 只启动 USB CDC + OTA 任务，蓝牙/音频/IMU/
+ *   LED/编码器轮询全部不初始化，主线程进入空转。设备在电脑上就是一个串口，
+ *   用上位机照常 OTA，刷完自动重启回正常模式。
+ *
+ * 退出方式：松开按键，重新上电即可（不做任何持久化，避免"进得去出不来"）。
+ *
+ * 为什么用滚轮中键：它是最不容易被误按的（需要专门按住），且上电时按它
+ * 本来没有其他语义 —— bt_multi_boot_select() 只认 C1-C3 / L1-L3。
+ * ========================================================================== */
+/* ★ 11-23 安全模式标志：其它模块（尤其 power.c 的休眠线程）要据此跳过
+ * 一切蓝牙调用 —— 安全模式下蓝牙栈【从未初始化】，任何 bt_interface_* 都会
+ * 踩空指针（实测 mem manage fault: DACCVIOL, MMAR=0x386）。 */
+volatile uint8_t g_boot_safe_mode = 0;
+
+static int vk_boot_safe_mode_wanted(void)
+{
+    /* key_config_init() 已把该脚配成上拉输入（低有效），这里直接读电平。
+     * 延时 30ms 等上电抖动过去，避免"插电瞬间的毛刺"误触发。 */
+    rt_thread_mdelay(30);
+    return (rt_pin_read(BSP_EC_KEY_PIN) == 0) ? 1 : 0;
+}
+
 int main(void)
 {
     //rt_kprintf("[VibeKey-F3] Version 1.2v!\r\n");
@@ -3066,18 +3099,59 @@ int main(void)
         rt_kprintf("[USB] PHY cleanup done: USBCR=0x%08X leak=%d (1=残余耗电~3.6mA)\n", _usbcr, _leak);
     }
 
+    BOOT_T("start");
     power_init();
+    BOOT_T("power_init");
     key_config_init();
+    BOOT_T("key_config");
     /* 09-05: C 键三手势单击判定定时器(依赖 key_config_init 后的 mailbox/定时器框架)
      * 09-07: L1/L2/L3 三键同样架构 —— 各建 3 个单击判定定时器
      * 09-07: EC 按下同样架构 —— 建 1 个单击判定定时器 */
     c_gesture_timers_init();
     l_gesture_timers_init();
     ec_gesture_timers_init();
+
+    /* ★ 11-23 开机安全模式：按住滚轮中键上电 → 只留 USB + OTA。
+     * 必须放在 bt_slot_init()/app_bt_hid_init() 之前 —— 蓝牙栈一旦起来，
+     * 出问题时就又回到"卡住刷不了"的死局。 */
+    if (vk_boot_safe_mode_wanted()) {
+        rt_kprintf("\n");
+        rt_kprintf("==========================================================\n");
+        rt_kprintf("[SAFE] 安全模式：仅 USB + OTA\n");
+        rt_kprintf("[SAFE] 蓝牙/音频/IMU/LED/编码器 均未启动\n");
+        rt_kprintf("[SAFE] 用上位机正常升级即可；松开按键重新上电恢复正常\n");
+        rt_kprintf("==========================================================\n");
+        g_boot_safe_mode = 1;            /* 通知电源管理：不要碰任何蓝牙接口 */
+        usb_init_once();                 /* CDC 接口/端点 + OTA 线程 */
+        usb_sem = rt_sem_create("usbvbus", 0, RT_IPC_FLAG_FIFO);
+        {
+            rt_thread_t tid = rt_thread_create("usbvbus", usb_vbus_thread,
+                                               RT_NULL, 1024, 16, 10);
+            if (tid) rt_thread_startup(tid);
+        }
+        rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED);
+        /* ★ 11-23 黄灯慢闪 = 安全模式的可视标识。
+         * 用【独立 LED2(黄)】而不是 WS2812B 彩灯 —— RGB 链路的初始化(ws2812b
+         * 设备节点)在安全模式下被跳过了，碰它就是 NULL 断言。
+         * 闪法 250ms 亮/250ms 灭：比充电指示慢、比心跳快，一眼能分清。 */
+        {
+            extern void led_init(void);
+            extern void led_status(uint8_t pin, uint8_t mode);
+            led_init();                          /* 幂等：重复调用安全 */
+            while (1) {
+                led_status(BSP_LED2_PIN, BSP_LED2_ACTIVE);
+                rt_thread_mdelay(250);
+                led_status(BSP_LED2_PIN, !BSP_LED2_ACTIVE);
+                rt_thread_mdelay(250);
+            }
+        }
+    }
     /* 三设备切换: 读 Flash 槽位存储 + 上电按键选择蓝牙槽位/模式(C1-C3=连接, L1-L3=配对) */
     bt_slot_init();
+    BOOT_T("bt_slot");
     bt_multi_boot_select();
     app_bt_hid_init();
+    BOOT_T("bt_hid_init");
 
     /* RGB LED init */
     extern void rgb_led_init(void);
@@ -3092,6 +3166,7 @@ int main(void)
 
     /* USB CDC 一次性注册 + OTA 线程（接口/端点只注册一次，插拔只启停控制器）*/
     usb_init_once();
+    BOOT_T("usb_init");
 
     /* 编码器 */
     {
