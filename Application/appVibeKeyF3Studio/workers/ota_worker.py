@@ -178,18 +178,30 @@ def ota_upgrade(port, firmware_path):
     # 重握手验证: 设备应已用新固件重新上线; 若超时无响应说明可能变砖
     print("STATUS:验证设备是否重新上线...", flush=True)
     new_version = None
-    for attempt in range(1, 26):
+    for attempt in range(1, 41):
+        # ★ 11-23 区分"端口打不开"与"没回应"：
+        # 设备重启后 COM 口会先消失再重新枚举，Windows 释放旧句柄需要时间。
+        # 实测：每 0.3s 硬撞会连续失败（上一版 25 次全废，而上位机自己的 probe
+        # 晚一步去开就好了）。这里打不开就退让 0.8s 再试；一旦能打开，
+        # 握手只需 ~0.16s，仍然是"快"的。
         try:
-            vser = serial.Serial(port, 115200, timeout=0.5)
-            time.sleep(0.15)
-            info = send_info_and_read(vser, timeout=0.5)
-            vser.close()
-            if info is not None:
-                new_model, new_version = info
-                break
+            vser = serial.Serial(port, 115200, timeout=1.0)
         except Exception:
-            pass
-        time.sleep(0.3)
+            time.sleep(0.8)
+            continue
+        info = None
+        try:
+            time.sleep(0.15)
+            info = send_info_and_read(vser, timeout=1.0)
+        finally:
+            try:
+                vser.close()          # 无论成败都释放，避免句柄泄漏
+            except Exception:
+                pass
+        if info is not None:
+            new_model, new_version = info
+            break
+        time.sleep(0.4)
 
     if new_version is None:
         print("VERIFY_FAIL", flush=True)

@@ -924,15 +924,14 @@ ApplicationWindow {
                     /* OTA Tab */
                     Rectangle {
                         color: "white"
-                        /* 中心背景图标: 绝对定位居中, 不参与布局, 不被挤压 */
-                        Image {
-                            anchors.centerIn: parent
-                            width: 120; height: 120
-                            source: "qrc:/otabg.png"
-                            fillMode: Image.PreserveAspectFit
-                            z: 2
-                            opacity: 0.4
-                        }
+                        /* ★ 11-23: 中心水印(otabg.png)已按需求移除。
+                         * 原先它 z:2 顶在内容上、盖住"传输完成/进度条"；
+                         * 改成 z:-1 后用户仍觉多余，直接删掉。
+                         * 若以后要恢复，加回:
+                         *   Image { anchors.centerIn: parent; width:120; height:120
+                         *           source:"qrc:/otabg.png"; fillMode: Image.PreserveAspectFit
+                         *           z: -1; opacity: 0.4 }
+                         */
                         /* 09-14: 整页可滚动 —— 新固件横幅 + 在线版本列表可能把底部"开始升级"
                          * 顶出可视区(用户实测: 横幅出现后按钮被挤掉且滚不动)。用 ScrollView
                          * 包裹; 内层 ColumnLayout 里 Item{Layout.fillHeight} 占位在 ScrollView

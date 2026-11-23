@@ -50,8 +50,14 @@ LightMonitor::LightMonitor(QObject *parent)
                        "-ErrorAction SilentlyContinue }").arg(myPid)});
 #endif
 
-    // 定时探测 VibeKey 蓝牙设备是否已配对/在线（手动测试时用于通道选择）
-    m_bleTimer->setInterval(3000);
+    /* 定时探测 VibeKey 蓝牙设备是否已配对/在线（手动测试时用于通道选择）
+     * ★ 11-23: 3s → 10s。每次探测都要**启动一个 Python 子进程**
+     * (python ble_worker.py status)，解释器启动 50~150ms + 进程创建开销，
+     * 每 3 秒一次长期挂机是纯浪费（笔记本上可见）。
+     * 放宽的代价：无 serve 进程时判定断开最多慢到 kBleDiscThreshold×10s=20s；
+     * 但 serve 握着链路时以它为准(serveAuthoritative)，这条轮询只是兜底，
+     * 慢一点不影响灯效观感。 */
+    m_bleTimer->setInterval(10000);
     connect(m_bleTimer, &QTimer::timeout, this, &LightMonitor::checkBleConnection);
     m_bleTimer->start();
     checkBleConnection(); // 立即探一次
@@ -426,6 +432,17 @@ void LightMonitor::sendState(int state)
         return;
     }
 
+    /* ★ 11-23 USB 直发快路径：直接写一帧 CONF_CMD_LED(0x05)，
+     * 耗时 1~5ms；原来每次点击都起一个 config_worker.py（约 1~2s），
+     * 那排"黄灯/绿灯/红灯/蓝灯/关灯"按钮因此明显发滞。
+     * 打开失败（端口被探测占用）时返回 false，自动落到下面的进程路径。 */
+    if (m_portDetector && m_portDetector->sendUsbLedState(port, state)) {
+        m_viaUsb = true;
+        m_lastSentState = state;
+        m_usbPending = false;
+        return;
+    }
+
     // 占用串口，避免探测线程抢端口造成冲突
     if (m_portDetector) m_portDetector->setPortInUse(true);
     m_viaUsb = true;
@@ -488,7 +505,7 @@ void LightMonitor::checkBleConnection()
     QString worker = findBleWorkerScript();
     QString appDir = QCoreApplication::applicationDirPath();
     m_bleProc->setWorkingDirectory(appDir);
-    qDebug() << "[LightMonitor] BLE status check";
+    /* ★ 11-23 原来每次轮询都打一行 → 日志被刷爆；只在结果变化时打(见下)。 */
     m_bleProc->start(m_pythonPath, {worker, "status"});
 }
 
@@ -502,7 +519,15 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
     if (m_bleProc) {
         QByteArray out = m_bleProc->readAllStandardOutput();
         QString output = QString::fromUtf8(out).trimmed();
-        qDebug() << "[LightMonitor] BLE status exit=" << exitCode << "out=" << output;
+        {   /* ★ 11-23 只在输出变化时打印（轮询每 1.5s 一次，结果通常不变） */
+            static QString lastOut;
+            static int lastExit = -1;
+            if (output != lastOut || exitCode != lastExit) {
+                lastOut = output;
+                lastExit = exitCode;
+                qDebug() << "[LightMonitor] BLE status exit=" << exitCode << "out=" << output;
+            }
+        }
         // 新格式：CONNECTED <battery>（battery 为 0-100 或 -1）；旧格式 CONNECTED 也兼容
         if (output.startsWith("CONNECTED", Qt::CaseInsensitive)) {
             connected = true;

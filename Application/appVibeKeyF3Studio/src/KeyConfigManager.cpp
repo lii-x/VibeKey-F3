@@ -1129,6 +1129,18 @@ void KeyConfigManager::onPreviewTick()
              << "off=" << (m_previewOff ? 1 : 0)
              << "via=" << (port.isEmpty() ? "BLE" : "USB")
              << "py=" << m_pythonPath;
+    /* ★ 11-23 USB 快路径：直接写一帧(1~5ms)，不再起 python 进程(~150ms)。
+     * 端口偶发被探测占用时返回 false，自动回退到下面的 worker 路径。 */
+    if (!port.isEmpty() && m_portDetector &&
+        m_portDetector->sendUsbRgbPreview(port, keyIndex, en ? 1 : 0, r, g, b, bri)) {
+        m_previewPending = false;
+        m_previewOff = false;
+        m_previewLedTest = false;
+        if (!m_ledClearQueue.isEmpty())
+            m_previewPending = true;     /* 逐灯补发队列还有剩，下一 tick 继续 */
+        return;
+    }
+
     if (!port.isEmpty()) {
         m_previewProcess->start(m_pythonPath, {findWorkerScript(), port, "rgb",
                                 QString::number(keyIndex),
