@@ -1205,6 +1205,13 @@ static void air_mouse_set_active(int active, int cold)
          * 500ms 级的 sniff 锚点，表现就是"掉帧、跟手差"。空闲分支会恢复。 */
         { extern void ble_app_mouse_sniff_ctl(int); ble_app_mouse_sniff_ctl(1); }
         enc_enter_active();                 /* 编码器恢复 1ms 轮询 */
+        /* ★ 11-22 跟手: 使用期把 HCPU 从 48MHz 提到 240MHz。
+         * 48MHz 下协议栈的加解密/L2CAP/重传一忙, 鼠标线程就被推迟几毫秒,
+         * 报文间隔随之抖动 —— 平均延迟不大, 但"节奏不匀"就是用户说的
+         * "不如 BLE 那时顺畅"(BLE 有固定连接事件时钟, 天然均匀)。
+         * 只在"拿着用"的几秒内生效, 空闲立刻退回 48MHz; 按每天累计使用
+         * 1 小时估算, 额外耗电约 3mAh, 相对 400mAh 可忽略。 */
+        rt_pm_run_enter(PM_RUN_MODE_HIGH_SPEED);
         rt_kprintf("[AirMouse] -> ACTIVE (gyro on, LIGHT, tight BLE, enc poll)\n");
     } else {
         if (g_imu_lp)
@@ -1225,6 +1232,10 @@ static void air_mouse_set_active(int active, int cold)
         /* ★ 10-31: 空闲了，重新允许经典链路进 Sniff 省电（活跃时被禁用）。 */
         { extern void ble_app_mouse_sniff_ctl(int); ble_app_mouse_sniff_ctl(0); }
         enc_enter_idle();                   /* 编码器停轮询, 改引脚边沿唤醒 */
+        /* 空闲退回 48MHz。通话(SCO)期间不动 —— 音频链路需要高频,
+         * 由协议栈自己的 PM 场景管理，这里插手会把音质/断音搞坏。 */
+        { extern volatile uint8_t g_sco_active;
+          if (!g_sco_active) rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED); }
         /* 记录当前重力方向作为唤醒检测基线 */
         g_idle_acc_base_x = (int32_t)g_acc_x;
         g_idle_acc_base_y = (int32_t)g_acc_y;
@@ -1696,18 +1707,25 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
             g_g3x += (wz * g_g3y - wy * g_g3z) * t;
             g_g3y += (wx * g_g3z - wz * g_g3x) * t;
             g_g3z += (wy * g_g3x - wx * g_g3y) * t;
-            /* ② 加速度校正 (近似静止时) */
-            if (!acc_rotating) {
-                g_rot_streak = 0;
+            /* ② 加速度校正 —— ★ 11-22 改为【始终校正】，运动时用小权重。
+             * 原实现"运动时完全不校正"⇒ 挥动那一两秒 g3 只靠陀螺积分，
+             * 零偏(几百 mdps)积一秒就是几度误差；而 g3 是映射的旋转轴，
+             * 轴一偏，投影方向就随之旋转 ⇒ 用户描述"从上往下滑，光标走圆弧"。
+             * 改为标准互补滤波：静止时正常权重(0.08)，运动中降到 1/12(≈0.0067)，
+             * 既能锁住重力方向，又把挥动时的线性加速度污染压到可忽略。 */
+            {
                 float inv = inv_sqrt(a2);
-                float al = MOUSE_G3_ACC_ALPHA;
+                float al = acc_rotating ? (MOUSE_G3_ACC_ALPHA * 0.083f)
+                                        : MOUSE_G3_ACC_ALPHA;
                 g_g3x = g_g3x * (1.0f - al) - (float)acc_mg3.x * inv * al;
                 g_g3y = g_g3y * (1.0f - al) - (float)acc_mg3.y * inv * al;
                 g_g3z = g_g3z * (1.0f - al) - (float)acc_mg3.z * inv * al;
+            }
+            if (!acc_rotating) {
+                g_rot_streak = 0;
             } else if (++g_rot_streak > MOUSE_G3_ROT_STREAK_MAX) {
                 /* ★ 连续旋转超过 ~10 秒: 现实中不可能持续转这么久,
-                 * 判定 acc_rotating 卡死 → 用当前加速度硬重置重力向量,
-                 * 否则 g3 只靠陀螺积分会持续漂移, 最终导致姿态映射退化。 */
+                 * 判定 acc_rotating 卡死 → 用当前加速度硬重置重力向量。 */
                 float inv = inv_sqrt(a2);
                 g_g3x = -(float)acc_mg3.x * inv;
                 g_g3y = -(float)acc_mg3.y * inv;
@@ -2348,6 +2366,20 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
 
     /* 09-01 BLE 诊断快照(0xFF02)已移除, 此处原为每帧更新 g_diag_gyro/g_diag_sx/sy, 一并删除 */
 
+    /* ★★ 11-22 主流向抑制（axis lock）
+     * 现象：横着左右划，光标会"往下/往上飘一点"，压不住直线。
+     * 成因：纯水平旋转在数学上 pitch 应恒为 0（pitch = σ·ω(gz3·gy3 − gy3·gz3)·inv），
+     *       但陀螺噪声与重力向量微小误差会留下残差，再被 inv(≤1.8) 放大后推过死区。
+     * 对策：当某轴明显主导(>2.5 倍)时，把另一轴按 1/4 衰减后再进死区。
+     *       45° 斜向(比例≈1)完全不受影响；只有"明显是直线"的动作才被扶正，
+     *       所以不会出现"斜着划反而走的是一格一格的台阶"。 */
+    {
+        float ax = (sx >= 0) ? sx : -sx;
+        float ay = (sy >= 0) ? sy : -sy;
+        if (ax > ay * 2.5f)      sy *= 0.25f;
+        else if (ay > ax * 2.5f) sx *= 0.25f;
+    }
+
     if (!g_active_x) {
         if (sx >  MOUSE_DZ_ENTER || sx < -MOUSE_DZ_ENTER) g_active_x = true;
     } else {
@@ -2371,6 +2403,28 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         dy = sy_eff * mouse_sens();   /* 屏幕Y (上下, +下 -上) */
     } else {
         dy = 0.0f;
+    }
+
+    /* ★★ 11-22 踢出 sniff —— 按"每次开始移动"触发，而不是每条报文。
+     * 背景：主设备(手机/PC)会自己把 ACL 拉回 sniff。链路一旦在 sniff，
+     * HID 中断报文必须等下一个嗅探锚点(常见 100~500ms)才能发出 ⇒
+     * 报文攒在本地 = "动作延迟 + 一卡一卡/追赶"，正是当前的手感。
+     * 教训：早先按【每条报文】踢(150ms 限流)会把 LMP 指令队列灌满，
+     * PC 上表现为整个 HID 卡死(滚轮/按键正常、移动全无) —— 那版已撤销。
+     * 现在折中：静止→移动的那一帧踢一次，之后移动过程中每 1.5s 补一次。
+     * 一条 M 制下 LMP 指令频率 <= 0.7 次/秒, 不会造成风暴。 */
+    {
+        static rt_tick_t kick_tick = 0;
+        static uint8_t   was_moving = 0;
+        uint8_t moving = (g_active_x || g_active_y) ? 1 : 0;
+        if (moving &&
+            (!was_moving ||
+             (rt_tick_get() - kick_tick) > rt_tick_from_millisecond(1500))) {
+            extern void ble_app_mouse_sniff_kick(void);
+            ble_app_mouse_sniff_kick();
+            kick_tick = rt_tick_get();
+        }
+        was_moving = moving;
     }
 
     /* ★ 11-13 输出级诊断：前面的 [DRIFT] 只看到"进入死区之前"的 rate，
@@ -3059,7 +3113,13 @@ int main(void)
     g_mouse_sem = rt_sem_create("mse", 0, RT_IPC_FLAG_FIFO);
 
     {
-        rt_thread_t tid = rt_thread_create("mse_tx", mouse_send_thread, RT_NULL, 3072, 16, 10);
+        /* ★ 11-22 跟手优化: 优先级 16 → 11。
+         * 16 低于 bts(12), 协议栈一忙(收发/维护/协商)鼠标线程就被压住,
+         * 位移在 g_pending_dx/dy 里累积, 等轮到它时一次性打包发出 ——
+         * 主观感受就是"粘一下再跳", 也就是"不跟手"。
+         * 提到 11(略高于 bts) 后报文能及时出队; 单条报文只有 7~9 字节、
+         * 100Hz 量级, 不会把协议栈饿死。若出现 BT 侧异常可回退到 16。 */
+        rt_thread_t tid = rt_thread_create("mse_tx", mouse_send_thread, RT_NULL, 3072, 11, 10);
         if (tid)
             rt_thread_startup(tid);
     }
@@ -3820,3 +3880,45 @@ int cmd_rz(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT_ALIAS(cmd_rz, rz, re-zero gyro bias while holding still);
+
+/* ============================================================================
+ * rd —— 读内存（11-21）
+ * ============================================================================
+ * 用途：确认"设备 flash 里的字节是否真的等于我们编译出来的镜像"。
+ * 崩溃日志里 pc=0x12099a8a 处本该是合法指令 `bl bt_log_output`，却报了
+ * UNDEFINSTR —— 只有"镜像内容与 ELF 不一致"能解释。用它读回该地址比对。
+ *
+ * 用法：rd 0x12099a80 [16]
+ *   默认 16 字节，按 32 位字输出（与 RT-Thread md 格式一致）。
+ * ========================================================================== */
+int cmd_rd(int argc, char **argv)
+{
+    if (argc < 2) {
+        rt_kprintf("usage: rd <addr> [bytes]   e.g. rd 0x12099a80 16\n");
+        return 0;
+    }
+    uint32_t addr = (uint32_t)strtoul(argv[1], RT_NULL, 0);
+    int len = (argc > 2) ? atoi(argv[2]) : 16;
+    if (len <= 0) len = 16;
+    if (len > 256) len = 256;
+
+    /* 只允许读 flash / SRAM 这两个安全区，避免误读外设寄存器触发总线错误 */
+    uint32_t end = addr + (uint32_t)len;
+    int in_flash = (addr >= 0x12000000u && end <= 0x12800000u);
+    int in_sram  = (addr >= 0x20000000u && end <= 0x20060000u);
+    if (!in_flash && !in_sram) {
+        rt_kprintf("[RD] 地址范围不安全: 0x%08x~0x%08x (只允许 flash 0x12000000+ / SRAM 0x20000000+)\n",
+                   addr, end);
+        return 0;
+    }
+
+    const uint32_t *p = (const uint32_t *)addr;
+    for (int i = 0; i < len; i += 16) {
+        rt_kprintf("%08x:", addr + i);
+        int n = (len - i >= 16) ? 4 : ((len - i + 3) / 4);
+        for (int k = 0; k < n; k++) rt_kprintf(" %08x", p[(i >> 2) + k]);
+        rt_kprintf("\n");
+    }
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_rd, rd, read memory: rd <addr> [bytes]);

@@ -555,7 +555,11 @@ static uint8_t   g_cls_giveup = 0;        /* 1=已放弃, 只等按键 */
 static rt_tick_t g_cls_link_up_tick = 0;  /* ACL 建立时刻(用于判断是否真的连上过) */
 
 #define CLS_CONN_TRIES_MAX   5
-#define CLS_CONN_RETRY_MS    3000
+/* ★ 11-21: 3s → 8s。经典寻呼一次超时就是 5.12s，3s 的间隔必然让第二条请求
+ * 落在第一条的窗口内 —— 实测崩溃日志里正是"auto connect #1 未结束就发 #2"，
+ * 随后 ACL 建起来后协议栈在 L2CAP 通道建立阶段跑飞(hard fault)。
+ * 8s > 5.12s，保证任一时刻最多一个连接请求在途。 */
+#define CLS_CONN_RETRY_MS    8000
 
 /* 该主动连谁：优先本次会话记下的经典对端地址，否则用当前槽位的已配对地址 */
 static const uint8_t *cls_target_addr(void)
