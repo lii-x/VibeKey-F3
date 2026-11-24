@@ -127,8 +127,27 @@ ApplicationWindow {
         }
     }
 
+    /* 11-24: macOS 用 Mac 的按键叫法, 与 Windows 版差异化:
+     *   Command / Option / Control / Shift(不再出现 LWin/RAlt 这类 HID 名),
+     *   并保留左右手 —— 捕获侧由 MacModifierWatcher 提供物理 keyCode。
+     * 例: 右Command+J = 右 Command + J; 左Option = 左 Option。
+     * Windows 继续用 LCtrl/RAlt 全名(保留左右手区分)。 */
+    readonly property bool isMacOS: Qt.platform.os === "osx" || Qt.platform.os === "macos"
+
     function hidModifierName(mod) {
         var modKeys = []
+        if (isMacOS) {
+            /* 同侧按 Apple 习惯排序: Control, Option, Shift, Command */
+            if (mod & 0x01) modKeys.push("左Control")
+            if (mod & 0x04) modKeys.push("左Option")
+            if (mod & 0x02) modKeys.push("左Shift")
+            if (mod & 0x08) modKeys.push("左Command")
+            if (mod & 0x10) modKeys.push("右Control")
+            if (mod & 0x40) modKeys.push("右Option")
+            if (mod & 0x20) modKeys.push("右Shift")
+            if (mod & 0x80) modKeys.push("右Command")
+            return modKeys.join("+")
+        }
         if (mod & 0x01) modKeys.push("LCtrl")
         if (mod & 0x02) modKeys.push("LShift")
         if (mod & 0x04) modKeys.push("LAlt")
@@ -141,6 +160,15 @@ ApplicationWindow {
     }
 
     function hidKeyName(code) {
+        /* 11-24: 这几个键在 Mac 上叫法与 PC 不同(Return / Escape / Delete /
+         * Forward Delete / Page Up / Page Down), 其余沿用通用 HID 名。 */
+        if (isMacOS) {
+            var macNames = {
+                40: "Return", 41: "Escape", 42: "Delete", 76: "Forward Delete",
+                75: "Page Up", 78: "Page Down"
+            }
+            if (macNames[code] !== undefined) return macNames[code]
+        }
         var pairs = [
             [4,"A"],[5,"B"],[6,"C"],[7,"D"],[8,"E"],[9,"F"],[10,"G"],[11,"H"],[12,"I"],[13,"J"],
             [14,"K"],[15,"L"],[16,"M"],[17,"N"],[18,"O"],[19,"P"],[20,"Q"],[21,"R"],[22,"S"],
@@ -4402,7 +4430,8 @@ ApplicationWindow {
                                             if (ki !== 3 && ki !== 5 && ki !== 6) return ""
                                             if (lTypeCombo.currentIndex !== 1 && lTypeCombo.currentIndex !== 2) return ""
                                             if (keyConfig.captureIndex === ki)
-                                                return "正在捕获：请在键盘上按下想设置的组合键（纯修饰键如仅 Ctrl 也可）"
+                                                return "正在捕获：请在键盘上按下想设置的组合键（纯修饰键如仅 "
+                                                       + (isMacOS ? "Command" : "Ctrl") + " 也可）"
                                             var m = lKeyMap(ki === 3 ? 2 : ki - 5)
                                             if (m.action === "multimedia") {
                                                 var n = mmCodeName(m.keycode)
@@ -4726,7 +4755,8 @@ ApplicationWindow {
                                     }
                                     Text {
                                         text: keyConfig.captureIndex === -2
-                                              ? "捕获中：请在键盘上按下想触发的组合键（纯修饰键也可，如仅 Ctrl+Alt）"
+                                              ? "捕获中：请在键盘上按下想触发的组合键（纯修饰键也可，如仅 "
+                                                + (isMacOS ? "Command+Option" : "Ctrl+Alt") + "）"
                                               : "设置完成后请点击上方“写入”按钮保存到当前蓝牙槽位"
                                         font.pointSize: 10; color: "#f56c6c"
                                         Layout.fillWidth: true

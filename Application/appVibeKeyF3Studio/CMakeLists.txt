@@ -16,6 +16,11 @@ endif()
 
 project(VibeKeyF3Studio VERSION 0.1 LANGUAGES CXX)
 
+# 11-24: macOS 左右修饰键追踪用 Objective-C++(MacModifierWatcher.mm)
+if(APPLE)
+    enable_language(OBJCXX)
+endif()
+
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -85,6 +90,21 @@ qt_add_executable(appVibeKeyF3Studio
 
 if(WIN32)
     target_sources(appVibeKeyF3Studio PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/app_icon.rc)
+endif()
+
+# 11-24: macOS 左右修饰键追踪 —— 本地 NSEvent 监视器(只监听本应用事件,
+# 不需要辅助功能/输入监控授权)。Windows 低层钩子本就能区分左右(VK_L*/VK_R*)。
+if(APPLE)
+    target_sources(appVibeKeyF3Studio PRIVATE
+        src/MacModifierState.h
+        src/MacModifierState.cpp
+        src/MacModifierWatcher.h
+        src/MacModifierWatcher.mm
+    )
+    # 监视器回调是 block; 只给这一个文件开 ARC(与 Qt 自身一致), 不影响其它源文件
+    set_source_files_properties(src/MacModifierWatcher.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+    find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
+    target_link_libraries(appVibeKeyF3Studio PRIVATE ${COCOA_FRAMEWORK})
 endif()
 
 # C++ sources live in src/ and include their headers by bare name ("PortDetector.h"),
