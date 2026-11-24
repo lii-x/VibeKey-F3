@@ -80,7 +80,27 @@ def debug_log(msg):
     except Exception:
         pass
 
+def normalize_port(port):
+    """把 Qt 传来的 portName 规范成 pyserial 能打开的路径。
+
+    Windows: QSerialPortInfo::portName() = "COM3"  -> pyserial 直接可用。
+    macOS/Linux: portName() = "cu.usbmodem20221234561"（无目录前缀），
+    而 pyserial 要求 "/dev/cu.usbmodem20221234561"；直接传裸名会抛
+    FileNotFoundError: [Errno 2] No such file or directory —— 表现就是
+    "USB 已连接但按键配置不可用"。这里补全前缀，两端共用同一份端口字符串。
+    """
+    if not port:
+        return port
+    if port.startswith("/dev/") or port.startswith("COM"):
+        return port
+    # macOS 上 QSerialPortInfo 会同时枚举 cu.* / tty.*，优先用 cu.*（拨出设备）
+    if os.name != "nt":
+        return "/dev/" + port
+    return port
+
+
 def open_port(port):
+    port = normalize_port(port)
     debug_log(f"Opening port {port}")
     ser = serial.Serial(port, 115200, timeout=1)
     ser.reset_input_buffer()
