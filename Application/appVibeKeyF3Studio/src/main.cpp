@@ -17,6 +17,12 @@
 int main(int argc, char *argv[])
 {
     // 使用 QApplication（而非 QGuiApplication），因为系统托盘右键菜单用到了 QWidget（QMenu）
+    /* 禁止 Python worker 在 app bundle 内写 __pycache__ 目录和 .pyc 文件。
+     * macOS 的代码签名会封存 bundle 资源；运行时新增/修改 .pyc 会让
+     * `codesign --verify` 立刻报 "a sealed resource is missing or invalid"。
+     * 这里设置的环境变量会被 QProcess 子进程继承（所有 worker 都生效）。 */
+    qputenv("PYTHONDONTWRITEBYTECODE", "1");
+
     QApplication app(argc, argv);
 
     // 强制使用非 native 风格（Fusion）。本工程大量自定义了 Slider/ProgressBar 等控件的

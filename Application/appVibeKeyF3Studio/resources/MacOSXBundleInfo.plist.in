@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS Bundle 元数据模板（仅 macOS 使用）。
+  版本号 / bundle id 由 CMakeLists.txt 的 set_target_properties 通过
+  @MACOSX_BUNDLE_*@ 变量注入，不要在这里写死。
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh_CN</string>
+    <key>CFBundleExecutable</key>
+    <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
+    <key>CFBundleIdentifier</key>
+    <string>${MACOSX_BUNDLE_GUI_IDENTIFIER}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+    <key>CFBundleDisplayName</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_NAME}</string>
+    <key>CFBundleIconFile</key>
+    <string>appicon.icns</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
+    <key>CFBundleVersion</key>
+    <string>${MACOSX_BUNDLE_BUNDLE_VERSION}</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <!--
+      蓝牙用途说明 —— macOS 的硬性要求，缺了不是"弹窗被拒绝"，而是直接 SIGABRT。
+
+      BLE 访问发生在 python 子进程（workers/ble_*_mac.py，走 CoreBluetooth），
+      但 TCC 把隐私请求归属到 responsible process，也就是本 app bundle；
+      所以这段说明必须写在 app 的 Info.plist 里，写在 worker 里没有用。
+
+      缺 key 时崩溃报告的 termination 字段：
+        namespace: TCC
+        "This app has crashed because it attempted to access privacy-sensitive
+         data without a usage description. The app's Info.plist must contain an
+         NSBluetoothAlwaysUsageDescription key ..."
+      现象：app 静默消失或 serve 进程莫名退出，日志里没有任何 Python traceback。
+
+      NSBluetoothPeripheralUsageDescription 是 10.15 之前的旧键，保留兼容老系统。
+    -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>VibeKey-F3 Studio 需要蓝牙来读取和写入设备的按键配置、灯效与电量信息。</string>
+    <key>NSBluetoothPeripheralUsageDescription</key>
+    <string>VibeKey-F3 Studio 需要蓝牙来读取和写入设备的按键配置、灯效与电量信息。</string>
+</dict>
+</plist>
