@@ -54,6 +54,11 @@ trap cleanup EXIT
 echo "==> 准备 DMG 内容"
 ditto "$APP" "$STAGING/$APP_NAME.app"
 ln -s /Applications "$STAGING/Applications"
+if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+    SIGN_NOTE="当前构建为 ad-hoc 签名；对外正式分发需 Developer ID 签名 + 公证。"
+else
+    SIGN_NOTE="当前构建已使用 Developer ID 签名。"
+fi
 cat > "$STAGING/安装说明.txt" <<EOF
 $APP_NAME v$VERSION
 
@@ -62,7 +67,7 @@ $APP_NAME v$VERSION
 
 首次打开：
   如果 macOS 提示“无法验证开发者”，请在 Finder 中右键 App → 打开。
-  （当前构建为 ad-hoc 签名；对外正式分发需 Developer ID 签名 + 公证。）
+  $SIGN_NOTE
 EOF
 
 echo "==> 生成 DMG: $DMG"
