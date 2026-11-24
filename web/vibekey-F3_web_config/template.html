@@ -212,6 +212,21 @@
           <div class="panel-title">通信日志</div>
           <div class="log-panel" id="logPanel"></div>
         </div>
+
+        <!-- 串口日志（设备控制台经 USB 转发，11-24） -->
+        <div class="panel">
+          <div class="panel-title" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>串口日志 <span style="font-weight:400;color:#8a8f99;font-size:12px;">（设备控制台，经 USB 转发）</span></span>
+            <span style="display:flex;gap:8px;">
+              <button class="btn-sm" id="srLogToggleBtn" onclick="toggleSerialLog()">开始</button>
+              <button class="btn-sm" onclick="clearSerialLog()">清空</button>
+            </span>
+          </div>
+          <div class="srlog" id="srLog"></div>
+          <div class="srlog-note">
+            开启后会<b>暂停设备信息轮询</b>——日志与命令共用同一条串口，必须互斥。再次点击「停止」恢复。
+          </div>
+        </div>
       </section>
 
       <!-- ===== 页签：固件升级 ===== -->

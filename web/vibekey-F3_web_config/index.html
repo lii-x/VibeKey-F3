@@ -212,6 +212,21 @@
           <div class="panel-title">通信日志</div>
           <div class="log-panel" id="logPanel"></div>
         </div>
+
+        <!-- 串口日志（设备控制台经 USB 转发，11-24） -->
+        <div class="panel">
+          <div class="panel-title" style="display:flex;align-items:center;justify-content:space-between;">
+            <span>串口日志 <span style="font-weight:400;color:#8a8f99;font-size:12px;">（设备控制台，经 USB 转发）</span></span>
+            <span style="display:flex;gap:8px;">
+              <button class="btn-sm" id="srLogToggleBtn" onclick="toggleSerialLog()">开始</button>
+              <button class="btn-sm" onclick="clearSerialLog()">清空</button>
+            </span>
+          </div>
+          <div class="srlog" id="srLog"></div>
+          <div class="srlog-note">
+            开启后会<b>暂停设备信息轮询</b>——日志与命令共用同一条串口，必须互斥。再次点击「停止」恢复。
+          </div>
+        </div>
       </section>
 
       <!-- ===== 页签：固件升级 ===== -->
@@ -890,6 +905,12 @@ async function readLoop() {
       reader.releaseLock();
       if (done) break;
       if (value && value.length > 0) {
+        /* ★ 11-24 串口日志模式：设备此时推的是纯文本，直接渲染，
+         * 不进 rxBuffer（否则会污染请求-应答的长度匹配）。 */
+        if (srLogOn) {
+          srLogAppend(srLogDecoder.decode(value, { stream: true }));
+          continue;
+        }
         // 追加到缓冲区
         const newBuf = new Uint8Array(rxBuffer.length + value.length);
         newBuf.set(rxBuffer, 0);
@@ -908,6 +929,12 @@ async function readLoop() {
         log('读取循环错误: ' + e.message, 'error');
         // 设备意外断开，自动更新 UI 状态
         keepReading = false;
+        /* 断开时同步退出日志模式，否则重连后仍会按文本解析 */
+        if (srLogOn) {
+          srLogOn = false;
+          const b = document.getElementById('srLogToggleBtn');
+          if (b) b.textContent = '开始';
+        }
         port = null;
         document.getElementById('statusDot').classList.remove('connected');
         document.getElementById('statusText').textContent = '已断开';
@@ -1134,8 +1161,74 @@ function applyDeviceInfo(info, syncSlot) {
 
 // 08-31: 周期轮询设备信息(电量/槽位)，上位机由 PortDetector 每 1.5s 轮询；
 // 网页版 5s 一次，读/写进行中自动跳过，避免抢占串口
+// ============================================================
+// 串口日志（设备控制台经 USB 转发，CONF_CMD_LOG = 0x07）
+// ------------------------------------------------------------
+// 设备侧把 rt_kprintf 镜像进环形缓冲，收到本命令后开始往 CDC IN 推纯文本。
+// 由于共用同一条串口，采用【互斥模式】：开日志期间暂停一切查询，
+// 收到的字节一律按 UTF-8 文本渲染。
+// ============================================================
+const CMD_LOG = 0x07;
+let srLogOn = false;
+const srLogDecoder = new TextDecoder('utf-8');
+const SRL0G_MAX = 200000;   /* 文本上限，超出截断，避免长时间挂着吃内存 */
+
+function clearSerialLog() {
+  const el = document.getElementById('srLog');
+  if (el) el.textContent = '';
+}
+
+function srLogAppend(text) {
+  const el = document.getElementById('srLog');
+  if (!el || !text) return;
+  el.textContent += text;
+  if (el.textContent.length > SRL0G_MAX)
+    el.textContent = el.textContent.slice(-SRL0G_MAX / 2);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function srLogSendCmd(enable) {
+  const hdr = buildHeader(CMD_LOG, 1, 0);
+  const pkt = new Uint8Array(hdr.length + 1);
+  pkt.set(hdr, 0);
+  pkt[hdr.length] = enable ? 1 : 0;
+  writer = port.writable.getWriter();
+  await writer.write(pkt);
+  writer.releaseLock();
+}
+
+async function toggleSerialLog() {
+  const btn = document.getElementById('srLogToggleBtn');
+  if (!port || !port.writable) { toast('请先连接设备', 'error'); return; }
+
+  if (!srLogOn) {
+    try {
+      rxBuffer = new Uint8Array(0);
+      await srLogSendCmd(true);
+      await waitForBytes(2, 1500);          // 设备回 2 字节 code
+      rxBuffer = new Uint8Array(0);
+      srLogDecoder.decode(new Uint8Array(0));   /* 复位解码器状态 */
+      srLogOn = true;
+      if (btn) btn.textContent = '停止';
+      srLogAppend('[已开启] 日志经 USB 转发中…\n');
+    } catch (e) {
+      toast('开启失败: ' + e.message, 'error');
+    }
+  } else {
+    srLogOn = false;                        // 先退出文本模式，再发命令
+    if (btn) btn.textContent = '开始';
+    srLogAppend('\n[已停止]\n');
+    try {
+      await srLogSendCmd(false);
+      await new Promise(r => setTimeout(r, 120));
+      rxBuffer = new Uint8Array(0);         // 丢掉尾部残留
+    } catch (e) { /* 断开时忽略 */ }
+  }
+}
+
 async function pollDeviceInfo() {
-  if (isBusy || capturingPath || otaTransferring || !port) return;
+  /* 日志模式下绝不能再发查询 —— 会和日志文本混在一起 */
+  if (isBusy || capturingPath || otaTransferring || srLogOn || !port) return;
   const info = await sendQuery();
   if (!info || !info.name) return;
   applyDeviceInfo(info, true);
