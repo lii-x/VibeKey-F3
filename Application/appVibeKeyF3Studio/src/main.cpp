@@ -99,7 +99,10 @@ int main(int argc, char *argv[])
     systemTray.init();
 
     // 启动 3 秒后后台静默查一次应用更新(静默: 无新版/失败都不弹气泡, 有新版才提示)
-    QTimer::singleShot(3000, &app, [&appUpdater]() { appUpdater.checkNow(true); });
+    // ⚠️ 只在支持自更新的平台(Windows)执行: macOS 没有 .exe 安装资产, 查了也装不上,
+    //    白白派生一个 python 进程去请求 Gitee。见 AppUpdater.h 的平台说明。
+    if (AppUpdater::supported())
+        QTimer::singleShot(3000, &app, [&appUpdater]() { appUpdater.checkNow(true); });
     // 启动 5 秒后后台静默查一次固件更新: 拉到在线最新固件并与【已连接设备】版本比对,
     // 在线更新才提醒。未插设备时只缓存最新版; 之后插上 USB 由 deviceVersionChanged 触发比对。
     QTimer::singleShot(5000, &app, [&otaManager]() { otaManager.checkFirmwareUpdate(true); });

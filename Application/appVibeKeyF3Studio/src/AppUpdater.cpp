@@ -14,6 +14,18 @@
 #include <QDebug>
 #include "PythonLocator.h"
 
+bool AppUpdater::supported()
+{
+    /* 发布资产只有 Windows 安装器(VibeKey-F3_Studio_Setup_vX.Y.Z.exe),
+     * 安装动作是 "setup.exe /S" —— 这两点在 macOS/Linux 上都不成立。
+     * 详见 AppUpdater.h 文件头的平台说明。 */
+#ifdef Q_OS_WIN
+    return true;
+#else
+    return false;
+#endif
+}
+
 AppUpdater::AppUpdater(QObject *parent)
     : QObject(parent)
     , m_currentVersion(QLatin1String(VIBEKEY_STUDIO_VERSION))
@@ -74,6 +86,15 @@ void AppUpdater::setBusy(bool busy)
 
 void AppUpdater::checkNow(bool silent)
 {
+    /* macOS/Linux: 没有可用的安装包资产, 检查出来也没法装 -> 直接跳过,
+     * 免得弹"发现新版"却永远装不上(调用方通常已按 supported() 屏蔽入口,
+     * 这里是防御性兜底)。 */
+    if (!supported()) {
+        qDebug() << "AppUpdater: 当前平台不支持应用自更新, 跳过检查";
+        if (!silent)
+            emit checkFailed(QStringLiteral("当前平台暂不支持应用自更新，请从官网下载最新版本"));
+        return;
+    }
     if (m_busy) {
         qDebug() << "AppUpdater: already busy";
         return;
@@ -102,6 +123,10 @@ void AppUpdater::checkNow(bool silent)
 
 void AppUpdater::installUpdate()
 {
+    if (!supported()) {
+        emit updateFailed(QStringLiteral("当前平台暂不支持应用自更新，请从官网下载最新版本"));
+        return;
+    }
     if (m_busy)
         return;
     if (m_latestUrl.isEmpty() || m_latestFile.isEmpty()) {

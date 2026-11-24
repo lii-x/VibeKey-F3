@@ -76,6 +76,12 @@ void SystemTray::init()
     if (m_window)
         m_window->setIcon(icon);   // 任务栏窗口按钮图标（QWindow::setIcon，不依赖 QML 属性）
 
+    /* 应用自更新只在 Windows 可用(发布资产只有 .exe 安装器, 安装动作是 /S)。
+     * 其它平台不创建"检查更新/立即更新"菜单项 —— 否则用户点了必然失败:
+     * net_worker 只认 VibeKey-F3_Studio_Setup_*.exe, macOS 上既下载不到也装不上。
+     * 见 AppUpdater.h 的平台说明。 */
+    const bool canSelfUpdate = AppUpdater::supported();
+
     m_tray = new QSystemTrayIcon(this);
     m_tray->setIcon(icon);
     m_tray->setToolTip(QStringLiteral("VibeKey-F3 Studio 工作台 v%1").arg(VIBEKEY_STUDIO_VERSION));
@@ -84,11 +90,14 @@ void SystemTray::init()
     auto *verAct = menu->addAction(QStringLiteral("VibeKey-F3 Studio v%1").arg(VIBEKEY_STUDIO_VERSION));
     verAct->setEnabled(false);                       // 灰色信息项
     menu->addSeparator();
-    auto *checkAct = menu->addAction("检查更新…");
-    // 有新版时可见的"立即更新"入口(触发即下载→静默重装→自动开新版)
-    m_updateAct = menu->addAction("立即更新");
-    m_updateAct->setVisible(false);
-    menu->addSeparator();
+    QAction *checkAct = nullptr;
+    if (canSelfUpdate) {
+        checkAct = menu->addAction("检查更新…");
+        // 有新版时可见的"立即更新"入口(触发即下载→静默重装→自动开新版)
+        m_updateAct = menu->addAction("立即更新");
+        m_updateAct->setVisible(false);
+        menu->addSeparator();   /* 只在这里加, 否则非 Windows 上会出现两条连续分隔线 */
+    }
     auto *showAct = menu->addAction("显示主窗口");
 #ifdef Q_OS_MACOS
     /* macOS 的 CoreBluetooth 只暴露系统已连接的外设，配对必须去系统设置；
@@ -105,18 +114,20 @@ void SystemTray::init()
 
     connect(showAct, &QAction::triggered, this, &SystemTray::showWindow);
     connect(quitAct, &QAction::triggered, qApp, &QGuiApplication::quit);
-    connect(checkAct, &QAction::triggered, this, [this]() {
-        if (m_appUpdater)
-            m_appUpdater->checkNow(false);
-    });
-    connect(m_updateAct, &QAction::triggered, this, [this]() {
-        if (m_appUpdater && !m_appUpdater->busy())
-            m_appUpdater->installUpdate();
-    });
+    if (checkAct) {
+        connect(checkAct, &QAction::triggered, this, [this]() {
+            if (m_appUpdater)
+                m_appUpdater->checkNow(false);
+        });
+        connect(m_updateAct, &QAction::triggered, this, [this]() {
+            if (m_appUpdater && !m_appUpdater->busy())
+                m_appUpdater->installUpdate();
+        });
+    }
     connect(m_tray, &QSystemTrayIcon::activated, this, &SystemTray::onActivated);
     connect(m_tray, &QSystemTrayIcon::messageClicked, this, [this]() {
         // 点气泡 = 立即更新(若确有新版且未在下载)
-        if (m_appUpdater && m_updateAct->isVisible() && !m_appUpdater->busy())
+        if (m_appUpdater && m_updateAct && m_updateAct->isVisible() && !m_appUpdater->busy())
             m_appUpdater->installUpdate();
     });
 
@@ -161,6 +172,10 @@ void SystemTray::onUpdateAvailable(const QString &version, const QString &file, 
 {
     Q_UNUSED(file);
     Q_UNUSED(body);
+    /* 非 Windows 平台没有创建这些菜单项(m_updateAct 为空), 直接忽略 ——
+     * 正常也不会走到这里, 因为 AppUpdater::checkNow 已按 supported() 提前返回。 */
+    if (!m_updateAct)
+        return;
     m_updateAct->setText(QStringLiteral("立即更新到 v%1").arg(version));
     m_updateAct->setVisible(true);
     if (m_tray) {
@@ -172,7 +187,8 @@ void SystemTray::onUpdateAvailable(const QString &version, const QString &file, 
 
 void SystemTray::onUpToDate(bool wasSilent)
 {
-    m_updateAct->setVisible(false);
+    if (m_updateAct)
+        m_updateAct->setVisible(false);
     if (!wasSilent && m_tray) {
         m_tray->showMessage(QStringLiteral("已是最新版本"),
                             QStringLiteral("VibeKey-F3 Studio v%1 已是最新").arg(VIBEKEY_STUDIO_VERSION),
@@ -188,7 +204,8 @@ void SystemTray::onCheckFailed(const QString &error)
 
 void SystemTray::onUpdateFailed(const QString &error)
 {
-    m_updateAct->setVisible(true);   // 保留"立即更新"入口, 允许重试
+    if (m_updateAct)
+        m_updateAct->setVisible(true);   // 保留"立即更新"入口, 允许重试
     if (m_tray)
         m_tray->showMessage(QStringLiteral("更新失败"), error, QSystemTrayIcon::Critical, 8000);
 }
