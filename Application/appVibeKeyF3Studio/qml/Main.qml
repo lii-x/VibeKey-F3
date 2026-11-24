@@ -5674,7 +5674,7 @@ ScrollView {
                                                                             Text {
                                                                                 text: workbuddyMonitor.status === "alert" ? "WorkBuddy 正在等待你确认高风险操作"
                                                                                      : (workbuddyMonitor.status === "await" ? "WorkBuddy 正在等待你的选择"
-                                                                                     : (workbuddyMonitor.active ? "WorkBuddy 正在运行任务" : "WorkBuddy 未运行"))
+                                                                                     : (workbuddyMonitor.active ? "WorkBuddy 正在运行任务" : "当前无运行任务"))
                                                                                 font.pointSize: 11; color: "#999"
                                                                             }
                                                                         }
