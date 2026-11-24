@@ -1331,7 +1331,12 @@ void KeyConfigManager::onPreviewTick()
         bri = m_ledTestBrightness[keyIndex];
     } else {
         QJsonObject obj = m_keyConfigs[keyIndex].toJsonObject();
-        en = obj["rgb_enabled"].toBool();
+        /* rgb_enabled 在设备回包里是数字 1/0（config_worker 的 payload），而
+         * QML 切换开关写回的是 JSON bool。QJsonValue::toBool() 对数字返回
+         * false —— 直接用它会让"读取后预览"永远下发 en=0（开关显示开、灯不亮）。
+         * 两种类型都兼容。 */
+        const QJsonValue rgbEnabled = obj.value(QStringLiteral("rgb_enabled"));
+        en = rgbEnabled.toBool() || rgbEnabled.toInt(0) != 0;
         int color = obj["rgb_color"].toInt();
         r = (color >> 16) & 0xFF;
         g = (color >> 8) & 0xFF;
