@@ -12,6 +12,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QTimer>
+#include "PythonLocator.h"
 #ifdef Q_OS_WIN
 #include <windows.h>
 static KeyConfigManager *g_hookInstance = nullptr;
@@ -420,27 +421,15 @@ KeyConfigManager::~KeyConfigManager()
 
 QString KeyConfigManager::findPython()
 {
-    // 优先使用程序目录下的 python/（绿色版捆绑的 Python）
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python310\\python.exe"
-    };
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(1000) && test.exitCode() == 0)
-            return path;
-    }
-    return "python";
+    /* config_worker.py 必须能 import serial；BLE 通道额外要 bleak。
+     * macOS 的 mac worker 还用 bleak 3.x 的 BleakAdapter，必须把这层版本要求
+     * 也纳入探测：旧版 bleak 虽然 `import bleak` 能过，运行时会 ImportError。 */
+#ifdef Q_OS_MACOS
+    const QStringList required = {"serial", "bleak:BleakAdapter"};
+#else
+    const QStringList required = {"serial"};
+#endif
+    return findPythonInterpreter(required);
 }
 
 QString KeyConfigManager::findWorkerScript()

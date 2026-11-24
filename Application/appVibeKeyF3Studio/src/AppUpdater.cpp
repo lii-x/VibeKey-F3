@@ -12,6 +12,7 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QDebug>
+#include "PythonLocator.h"
 
 AppUpdater::AppUpdater(QObject *parent)
     : QObject(parent)
@@ -38,27 +39,7 @@ AppUpdater::~AppUpdater()
 
 QString AppUpdater::findPython()
 {
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-    };
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(500) && test.exitCode() == 0) {
-            qDebug() << "AppUpdater: Python at" << path;
-            return path;
-        }
-    }
-    qWarning() << "AppUpdater: Python not found";
-    return "python";
+    return findPythonInterpreter({});
 }
 
 QString AppUpdater::findScript(const QString &scriptName)

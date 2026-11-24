@@ -66,6 +66,8 @@ qt_add_executable(appVibeKeyF3Studio
     src/AppUpdater.cpp
     src/PortDetector.h
     src/PortDetector.cpp
+    src/PythonLocator.h
+    src/PythonLocator.cpp
     src/OtaManager.h
     src/OtaManager.cpp
     src/ReleasesModel.h

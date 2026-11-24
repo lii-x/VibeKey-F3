@@ -6,6 +6,7 @@
 #include "PortDetector.h"
 
 // 蓝牙连接判定去抖阈值：连续这么多次探测为“断开”才真正判定断开。
+#include "PythonLocator.h"
 // BLE HID 设备空闲时无线电链接会瞬时掉线、有活动时重连，ConnectionStatus 会闪；
 // 用迟滞避免 UI 反复“连接/断开”，也避免每次断开都 kill 掉常驻 BLE 进程导致灯控失效。
 static const int kBleDiscThreshold = 2;
@@ -95,27 +96,18 @@ LightMonitor::~LightMonitor()
 
 QString LightMonitor::findPython()
 {
-    // 优先使用程序目录下的 python/（绿色版捆绑的 Python）
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python310\\python.exe"
-    };
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(1000) && test.exitCode() == 0)
-            return path;
-    }
-    return "python";
+    /* 依赖随平台不同：
+     *   macOS  -> 0xFF00 服务走 bleak(CoreBluetooth)，见 ble_status_worker_mac.py
+     *   Windows-> 走 UWP winrt，见 ble_led_worker.py
+     *   USB 灯控本身只需要 pyserial（config_worker.py）。 */
+#ifdef Q_OS_MACOS
+    const QStringList required = {"serial", "bleak:BleakAdapter"};
+#elif defined(Q_OS_WIN)
+    const QStringList required = {"serial", "winrt"};
+#else
+    const QStringList required = {"serial"};
+#endif
+    return findPythonInterpreter(required);
 }
 
 QString LightMonitor::findWorkerScript()
