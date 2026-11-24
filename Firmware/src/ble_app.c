@@ -84,13 +84,11 @@ extern void enc_stop(void);
     static const char *local_name = "VibeKey-F3";
 #endif
 
-/* ★ 2026-10-21 用户要求: 【经典蓝牙(BR/EDR)名改为空白】。
- * 只影响经典链路那条记录; BLE 名仍用 local_name(VibeKey-F3) 保持不变 ——
- * 上位机/网页配置工具靠 BLE 名识别设备, 不能一起改。
- * 用【单个空格】而不是空串: len=0 在部分协议栈/主机会被当成"名字尚未就绪",
- * 回退去显示 MAC 或 (unknown); 单个空格能稳定显示成一行空白。
- * 副作用(有意): 主机上原本"经典 + BLE 各一条同名记录"的两行, 现在能区分开了。 */
-static const char *bt_classic_name = " ";
+/* 经典蓝牙(BR/EDR)名 —— ★ 11-18 按要求与 BLE 名保持一致。
+ * 直接指向 local_name(而不是各写一份字符串), 以后改名只改一处, 不会漂移。
+ * 历史: 10-21 曾是单个空格; 11-17 改为 "VibeKey-F3-BR/EDR"; 11-18 改回同名。
+ * ⚠️ 已经配对过的主机会缓存旧名字, 需在主机侧"删除设备"后重新配对才会更新。 */
+static const char *bt_classic_name = RT_NULL;   /* 运行时取 local_name, 见使用处 */
 
 /* 设备类别(COD, Class of Device)：
  * 用户要求恢复默认图标 → 改回基线 0x200000(Object Transfer)。
@@ -242,6 +240,127 @@ static uint8_t hfp_connect_retry;
 static uint8_t g_hfp_rederive_cnt;  /* 本次 BLE 会话已重派生经典 key 次数(HFP_REDERIVE_MAX 上限) */
 static uint8_t g_hfp_connected;     /* HFP 链路已建立(麦克风可用) */
 
+/* ★ 10-31 新增：宿主是否已连上 —— BLE 或 经典蓝牙(HFP/HID) 任一。
+ * 起因：手机只走经典蓝牙(Android 不会连我们的 BLE)，而全工程大量逻辑用
+ *       `g_hid_env.is_connected`(BLE) 当作"已连接"判据 ⇒ 在手机上永远为假：
+ *       ① 槽位 RGB 每次按键唤醒都被重开成"等回连蓝闪"(用户反馈"按按键槽位灯闪")；
+ *       ② 空中鼠标/旋钮只在 BLE 连上时启动 ⇒ 手机端鼠标完全不可用。
+ * 以后凡是要判断"有没有宿主连着"，一律用本函数，不要再用 g_hid_env.is_connected。 */
+int bt_host_linked(void)
+{
+    extern unsigned char classic_hid_linked(void);
+    if (g_hid_env.is_connected) return 1;   /* BLE(PC/上位机)已连 */
+    if (g_hfp_connected) return 1;          /* 经典 ACL + HFP 已连(手机主路径) */
+    return classic_hid_linked() ? 1 : 0;    /* 经典 HID 通道已建 */
+}
+
+/* 经典链路对端地址（6 字节，小端）。由 BT_NOTIFY_HF_PROFILE_CONNECTED 事件填充。
+ * 手机只走经典、BLE 从不连 ⇒ g_hid_env.peer_addr 是全 0，而发 HID 报文必须给真实地址。 */
+static uint8_t g_cls_peer_addr[6];
+
+/* 发经典 HID 报文要用哪个对端地址：
+ *   PC   —— BLE 已连，用 g_hid_env.peer_addr（BLE 与经典是同一台设备，实测可用）
+ *   手机 —— BLE 未连，用 HFP 事件里记下的经典地址
+ * ⚠️ 不要改成去读 bts2g_app_p->hid_inst.conn[i].rmt_bd：实测这样取到的地址和
+ *    SDK 库内部那份连接表对不上（结构布局/初始化时机差异），报文会被判"未连接"丢弃。 */
+const uint8_t *bt_cls_peer_addr(void)
+{
+    if (g_hid_env.is_connected &&
+        (g_hid_env.peer_addr[0] | g_hid_env.peer_addr[1] | g_hid_env.peer_addr[2] |
+         g_hid_env.peer_addr[3] | g_hid_env.peer_addr[4] | g_hid_env.peer_addr[5])) {
+        return g_hid_env.peer_addr;
+    }
+    if (g_cls_peer_addr[0] | g_cls_peer_addr[1] | g_cls_peer_addr[2] |
+        g_cls_peer_addr[3] | g_cls_peer_addr[4] | g_cls_peer_addr[5]) {
+        return g_cls_peer_addr;
+    }
+    return RT_NULL;
+}
+
+/* ★ 10-31: 空中鼠标活跃期禁止经典链路进 Sniff，空闲时恢复。
+ * 为什么必须这么做：HFP 空闲时栈会把 ACL 打进 Sniff，间隔 500ms 左右
+ * （日志 `Sniff mode st: 0, inv: 498.75` / `[L-U]hid mode change to 2`）。
+ * Sniff 下鼠标报文只能等下一个锚点才发得出去 ⇒ 表现就是"一帧一帧、跟手很差"。
+ * 原来只在 PTT(语音键) 按下时退出 sniff，鼠标没有对应处理。
+ * 这里：活跃 → 先退出 sniff，并关掉 sniff 使能(防止刚退出又被拉回去)；
+ *       空闲 → 重新允许 sniff，把功耗还原。 */
+static void hfp_request_sniff_delayed(uint32_t delay_ms);   /* 定义在下方 */
+
+void ble_app_mouse_sniff_ctl(int active)
+{
+    const uint8_t *peer = bt_cls_peer_addr();
+    BTS2S_BD_ADDR bd;
+
+    bt_interface_set_sniff_enable(active ? 0 : 1);
+
+    /* ★ 11-06: 回到空闲时**补发一次 sniff 请求**。
+     * 只把使能标志置 1 是不够的：`hfp_request_sniff_delayed()` 是**一次性**定时器，
+     * 若它触发的那个 2s 窗口正好落在"鼠标活跃"期间（此时 sniff 使能=0、请求被丢），
+     * 之后再也没人重发 ⇒ 这一次连接就永远进不了 sniff（"有时候进不去"的来源之一）。
+     * 这里在空闲时补一发，把这条路径闭合。 */
+    if (!active && peer && g_hfp_connected && !g_sco_active)
+        hfp_request_sniff_delayed(1200);
+
+    if (!active || !peer) return;
+    bt_addr_convert_to_bts((bd_addr_t *)peer, &bd);
+    hcia_exit_sniff_mode(&bd, NULL);
+    rt_kprintf("[HID] mouse ACTIVE -> exit sniff, sniff disabled\n");
+}
+
+/* ★★★ 11-15 移动期反复踢出 sniff（解决手机端"晃完了才开始动"）
+ * ============================================================================
+ * 现象：同一设备在 PC 上正常，连手机时鼠标明显滞后——手已经停下，光标才开始移动。
+ * 原因：`hcia_exit_sniff_mode()` 只在激活那一刻发**一次**；手机作为主设备过一会儿
+ *       会自己把 ACL 重新拉进 sniff（sniff interval 常见 100~500ms）。
+ *       链路一旦在 sniff，HID 中断报文必须等下一个嗅探锚点才能发出去
+ *       ⇒ 报文被攒在本地，表现为"动作延迟 + 一卡一卡/追赶"。
+ *       PC 端通常维持 active（或 sniff 极短），所以看不出来。
+ * 对策：移动报文真正要发的时候，如果距上次踢出已超过 400ms，就再踢一次。
+ *       手机收到 exit sniff 会回到 active，报文立刻能走。
+ *       限流 400ms，避免自己造成"指令风暴"（原注释担心的点）。
+ * ========================================================================== */
+#define MOUSE_SNIFF_KICK_MS  150
+
+/* ============================================================================
+ * 配对完成后修正角色（11-23）
+ * ============================================================================
+ * 现象（手机）：**首次配对**连上后，空中鼠标明显"拖慢"；重启设备后恢复正常。
+ * 根因：两次连接的角色不同 ——
+ *   手机发起(dir=1) → 设备是 **slave**，只能等主机轮询才能发 HID 报文，
+ *                     手机轮询间隔长 ⇒ 报文排队 ⇒ 手感拖慢；
+ *   设备发起(dir=0) → 设备是 **master**，发包时序自己掌控 ⇒ 顺畅。
+ *   （日志实证：dir=1 时 `role: slave`，重启后 dir=0 时 `role: master`）
+ * 手机拒绝设备直接 role switch 回 master（res=14 安全理由），
+ * 所以改用等效于"重启"的做法：配对保存完之后**主动断一次**，让 auto-connect
+ * 以设备发起的方式重连 ⇒ 变 master。只在配对完成时触发一次，不影响日常回连。
+ * ========================================================================== */
+void ble_app_post_pair_role_fix(void)
+{
+    const uint8_t *peer = bt_cls_peer_addr();
+    if (!peer) return;
+    rt_kprintf("[HID] post-pair role fix: drop ACL, will reconnect as master (dir=0)\n");
+    bt_interface_disconnect_req((unsigned char *)peer);
+    /* 快速回连：auto-connect 默认 8s 一拍，这里插一次 1.5s 的提前量 */
+    { extern void bt_cls_autoconn_kick(uint32_t delay_ms); bt_cls_autoconn_kick(1500u); }
+}
+
+void ble_app_mouse_sniff_kick(void)
+{
+    static rt_tick_t last = 0;
+    rt_tick_t now = rt_tick_get();
+
+    if (last != 0 && (now - last) < rt_tick_from_millisecond(MOUSE_SNIFF_KICK_MS))
+        return;
+
+    const uint8_t *peer = bt_cls_peer_addr();
+    if (!peer) return;
+
+    BTS2S_BD_ADDR bd;
+    bt_addr_convert_to_bts((bd_addr_t *)peer, &bd);
+    hcia_exit_sniff_mode(&bd, NULL);
+    last = now;
+}
+
 /* ⚠️ 自愈重配已整体移除(2026-08-25): 设备侧无 bond 时【不再主动 create_bond】。
  * 原因: ① Windows 拒绝设备主动重配(实测 op10 GAPC_BOND ret66 → 断连19);
  * ② 延迟定时器会在 Windows 正常发起的配对流程进行中补发 create_bond →
@@ -265,6 +384,11 @@ static void hfp_sniff_timer_cb(void *param)
 {
     (void)param;
     if (!g_hfp_connected) return;   /* HFP 已断开，不请求 */
+    /* 11-06 诊断：把"请求发出时"的关键状态打出来，一眼分清是哪类原因 ——
+     *   sco=1  ⇒ 通话中，controller 不允许 sniff（正常现象，通完会重发）
+     *   idle 为 0 相关的判断不在本函数，但可对照 air_mouse 日志看当时是否活跃
+     * 若这里一切正常却始终进不去，就是**对端(手机/PC)拒绝了 HCI Sniff_Mode**。 */
+    LOG_I("[HID] sniff req: hfp=%d sco=%d", g_hfp_connected, g_sco_active);
     /* ① 写 link policy：出向连接禁用 role switch(0x0004=sniff only)，保持 master。
      * sniff bit 确保链路可进 sniff（若 SCO 未活动时 sniff 可生效）。 */
     bt_wr_link_policy(&g_sniff_bd, 0x0004);
@@ -282,7 +406,20 @@ static void hfp_sniff_timer_cb(void *param)
 }
 static void hfp_request_sniff_delayed(uint32_t delay_ms)
 {
-    bt_addr_convert_to_bts((bd_addr_t *)g_hid_env.peer_addr, &g_sniff_bd);
+    /* ★★★ 11-10 修复：这里原来用 g_hid_env.peer_addr —— 那是 **BLE** 地址，
+     * 而"手机只连经典蓝牙"时它恒为全 0（本文件 260 行的注释早就写明这一点，
+     * 发 HID 报文时也早已改用 bt_cls_peer_addr()，唯独 sniff 这两处漏了）。
+     *
+     * 后果（用户日志逐行实证）：每次 `[HID] sniff req:` 后面紧跟
+     *     write link policy error,try perform error handle
+     *     svc_release gap_wr_lp_settings_compl2c_hdl ...
+     * 因为地址是 0-0-0，HCI 命令直接被拒。⇒ 我们的 link policy / keep_sniff /
+     * Enter Sniff **三条全部无效**，实际进 sniff 只能靠 SDK 自己的 keep_sniff
+     * 计时器，日志里 1032s 才出现 `>> Sniff mode`（与注释记录的 268~331s 吻合）。
+     * ⇒ 改用 bt_cls_peer_addr()（BLE 已连时取 BLE 地址，否则取经典对端地址）。 */
+    const uint8_t *m = bt_cls_peer_addr();
+    if (!m) return;                        /* 还没有对端地址，这次不排 */
+    bt_addr_convert_to_bts((bd_addr_t *)m, &g_sniff_bd);
     if (g_sniff_timer) {
         rt_timer_stop(g_sniff_timer);
         rt_timer_delete(g_sniff_timer);
@@ -300,7 +437,13 @@ static void hfp_request_sniff_delayed(uint32_t delay_ms)
 void ble_app_exit_sniff_for_call(void)
 {
     if (!g_hfp_connected || !g_hid_env.is_connected) return;
-    bt_addr_convert_to_bts((bd_addr_t *)g_hid_env.peer_addr, &g_sniff_bd);
+    /* 同 hfp_request_sniff_delayed：必须用经典对端地址，g_hid_env.peer_addr 在
+     * "只连经典"的场景下是全 0，发出去的 HCI 命令会被直接拒掉。 */
+    {
+        const uint8_t *m = bt_cls_peer_addr();
+        if (!m) return;
+        bt_addr_convert_to_bts((bd_addr_t *)m, &g_sniff_bd);
+    }
     bt_exit_sniff_mode(&g_sniff_bd);
     LOG_I("[HID] exit sniff for call (PTT start)");
 }
@@ -391,6 +534,165 @@ static uint8_t hfp_bt_key_valid(void)
 {
     extern void *bt_cm_get_bonded_dev_by_addr(uint8_t *addr);
     return bt_cm_get_bonded_dev_by_addr(g_hid_env.peer_addr) != NULL;
+}
+
+/* ============ 仅经典链路(手机)的主动回连 ============
+ * 背景：整套 HFP 主动连逻辑(hfp_mgr_thread / pscan 链 / hfp_retry)全部挂在
+ *       `g_hid_env.is_connected`(BLE) 上。手机只走经典蓝牙、BLE 从不连
+ *       ⇒ 设备永远不会主动发起 ⇒ 每次都要在手机上点一下"连接"。
+ * 做法：独立一条只依赖经典链路的回连定时器，完全不看 BLE 状态：
+ *   - 目标地址：本次会话记下的经典对端 → 没有则用当前槽位里存的已配对地址
+ *   - 只在"确实没有任何宿主连着"时发起；手机正在来连(g_phone_acl_up)或
+ *     已判定要等主机重配(g_stale_bond_cleared)时不插手(避免双连接认证冲突)
+ *   - 失败按 3s 间隔重试，最多 5 次即收敛(避免无脑 page 打扰手机 + 费电)
+ *   - 设备侧没有 BR/EDR link key 时直接不发起(发起也必然认证失败)
+ * 触发点：蓝牙栈就绪后 3s、HFP 断开后 3s、按键唤醒时 300ms。 */
+static rt_timer_t g_cls_conn_timer = RT_NULL;
+static uint8_t g_cls_conn_tries = 0;
+
+/* ★★★ 11-15 断连锁 —— 解决"没有按键也会自己唤醒"
+ * 现象：PC 蓝牙关掉后，设备每隔十几秒自己从 DEEP 醒一次，日志 `[pm]WSR:0x80`。
+ *   0x80 = HPSYS_AON_WSR_LP2HP_IRQ（低功耗核/蓝牙子系统把主核叫醒），不是按键/RTC。
+ * 根因：断连后 `bt_cls_autoconn_kick()` 会重置重试计数并重新排 5 次重连（间隔 3s），
+ *   每次都拉起蓝牙协议栈 → 射频活动 → 又把主核唤醒 → 醒了又重试 ……
+ *   日志里 `[CLS] auto connect #1..#5` 反复从 #1 开始，就是"计数被重置 + 重新来一轮"。
+ * 对策：连续失败按"轮"退避，60s → 120s → 240s …… 上限 10 分钟，且**不再被唤醒事件重置**；
+ *   只有真正连上（bt_host_linked）才清零。这样放着不动时唤醒频率会迅速降到分钟级。
+ */
+/* 用户需求：断连后**只给 60 秒**回连窗口，超时立即放弃，
+ * 之后只有【按键】能重新触发（不再自己醒过来反复试）。 */
+/* ★★★ 11-17 第三版：**改用"总尝试次数"硬上限**，不再依赖时间窗口。
+ * 前两版失败的原因：每次"建链失败→断开"都会触发一次 kick，而 kick 里会
+ * 重置各种计数/时间戳；只要有一个路径漏掉，60 秒就永远走不完
+ * （实测循环了 15 分钟、auto connect 从 #1 数到 #10 又回 #1）。
+ * 次数上限是**单调递增、只有两种事件能清零**（真正连上 / 用户按键），
+ * 不依赖任何可能被重置的时间戳，最坏情况也一定会停。
+ * 20 次 × 3 秒 ≈ 60 秒，正好符合"60 秒连不上就休眠"。 */
+#define CLS_CONN_MAX_TOTAL   20
+static uint16_t  g_cls_attempts = 0;      /* 本次断电周期内累计尝试次数(只增) */
+static uint8_t   g_cls_giveup = 0;        /* 1=已放弃, 只等按键 */
+/* ★★★ 11-17 关键：**只有"真的连上过"之后的断开，才重新给 60 秒**。
+ * 之前的 bug：每次 ACL 建链失败也会收到 `[APP] HFP disconnected`，
+ * 那段代码无条件重置窗口 ⇒ 60 秒永远走不完，日志里 auto connect 从 #1
+ * 循环了几十次、持续九百多秒，一直在唤醒主核。 */
+static rt_tick_t g_cls_link_up_tick = 0;  /* ACL 建立时刻(用于判断是否真的连上过) */
+
+#define CLS_CONN_TRIES_MAX   5
+/* ★ 11-21: 3s → 8s。经典寻呼一次超时就是 5.12s，3s 的间隔必然让第二条请求
+ * 落在第一条的窗口内 —— 实测崩溃日志里正是"auto connect #1 未结束就发 #2"，
+ * 随后 ACL 建起来后协议栈在 L2CAP 通道建立阶段跑飞(hard fault)。
+ * 8s > 5.12s，保证任一时刻最多一个连接请求在途。 */
+#define CLS_CONN_RETRY_MS    8000
+
+/* 该主动连谁：优先本次会话记下的经典对端地址，否则用当前槽位的已配对地址 */
+static const uint8_t *cls_target_addr(void)
+{
+    static uint8_t s_slot_addr[6];
+    const uint8_t *p = bt_cls_peer_addr();
+    if (p) return p;
+    if (bt_slot_get_addr(bt_multi_get_slot(), s_slot_addr)) return s_slot_addr;
+    return RT_NULL;
+}
+
+static void cls_autoconn_schedule(uint32_t ms);
+static void cls_autoconn_cb(void *param);
+void bt_classic_hid_kick_connect(void);   /* 定义在下方：排一次 HID 通道主动连接 */
+
+static void cls_autoconn_schedule(uint32_t ms)
+{
+    if (!g_cls_conn_timer) {
+        g_cls_conn_timer = rt_timer_create("cls_conn", cls_autoconn_cb, RT_NULL,
+            rt_tick_from_millisecond(ms),
+            RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
+        if (!g_cls_conn_timer) return;
+    } else {
+        rt_timer_control(g_cls_conn_timer, RT_TIMER_CTRL_SET_TIME,
+                         &(rt_tick_t){rt_tick_from_millisecond(ms)});
+    }
+    rt_timer_start(g_cls_conn_timer);
+}
+
+/* 按键唤醒/断连时调用：只有"没连上任何宿主"才排一次主动回连。
+ * 按键是明确的用户意图 ⇒ 重置重试计数，让"按一下就想连上"能真的重试。 */
+void bt_cls_autoconn_kick(uint32_t delay_ms);
+
+/* 用户按键 = 明确意图：清掉"已放弃"和累计次数，重新允许 20 次回连 */
+void bt_cls_autoconn_user_intent(void)
+{
+    g_cls_giveup = 0;
+    g_cls_attempts = 0;
+    g_cls_conn_tries = 0;
+}   /* 前向声明(下面按键入口要用) */
+
+/* 按键专用：用户明确要用 ⇒ 清掉"已放弃"并重新开一个 60 秒窗口 */
+void bt_cls_autoconn_kick_user(uint32_t delay_ms)
+{
+    g_cls_giveup = 0;
+    g_cls_attempts = 0;      /* 按键 = 用户明确要用: 次数清零，重新给 20 次 */
+    g_cls_conn_tries = 0;
+    bt_cls_autoconn_kick(delay_ms);
+}
+
+void bt_cls_autoconn_kick(uint32_t delay_ms)
+{
+    /* ★ 11-06: 关机流程中绝不能再拉起蓝牙。
+     * 实测日志: "shutdown: enter hibernate" 之后仍出现 `[CLS] auto connect #1 -> ...`
+     * 并真的发起了 HFP/ACL 连接 —— 关机倒计时里把协议栈又激活了一次，
+     * 直接妨碍 PMU 进关断。g_pm_shutting_down 由 power.c 的 pm_shutdown() 置位。 */
+    extern volatile int g_pm_shutting_down;
+    if (g_pm_shutting_down) return;
+    if (bt_host_linked()) { g_cls_conn_tries = 0; g_cls_giveup = 0; return; }
+
+    /* 已放弃 ⇒ 任何事件都不再触发，只有按键能唤醒重连 */
+    if (g_cls_giveup) return;
+
+    /* 次数用完 ⇒ 放弃（不再依赖任何时间戳，绝对会停） */
+    if (g_cls_attempts >= CLS_CONN_MAX_TOTAL) {
+        g_cls_giveup = 1;
+        g_cls_conn_tries = 0;
+        rt_kprintf("[CLS] gave up after %d attempts, sleep until key\n", (int)g_cls_attempts);
+        return;
+    }
+
+    g_cls_conn_tries = 0;
+    cls_autoconn_schedule(delay_ms);
+}
+
+static void cls_autoconn_cb(void *param)
+{
+    extern void *bt_cm_get_bonded_dev_by_addr(uint8_t *addr);
+    extern volatile int g_pm_shutting_down;
+
+    if (g_pm_shutting_down) return;                           /* 关机中: 不许再拉蓝牙 */
+    if (bt_host_linked()) { g_cls_conn_tries = 0; g_cls_giveup = 0; return; }
+    if (g_phone_acl_up) return;                               /* 手机正在来连，别抢 */
+    if (g_stale_bond_cleared) return;                         /* 等主机重新配对，别骚扰 */
+
+    const uint8_t *a = cls_target_addr();
+    if (!a) return;
+    if (!bt_cm_get_bonded_dev_by_addr((uint8_t *)a)) {
+        rt_kprintf("[CLS] auto connect skipped: no BR/EDR link key\n");
+        return;                                               /* 没 key：连了也认证不过 */
+    }
+    if (g_cls_giveup) return;
+    if (g_cls_attempts >= CLS_CONN_MAX_TOTAL) {
+        g_cls_giveup = 1;
+        g_cls_conn_tries = 0;
+        rt_kprintf("[CLS] gave up after %d attempts, sleep until key\n", (int)g_cls_attempts);
+        return;
+    }
+
+    g_cls_conn_tries++;
+    g_cls_attempts++;
+    rt_kprintf("[CLS] auto connect #%d -> %02x:%02x:%02x:%02x:%02x:%02x (%d/%d)\n",
+               g_cls_conn_tries, a[5], a[4], a[3], a[2], a[1], a[0],
+               (int)g_cls_attempts, CLS_CONN_MAX_TOTAL);
+    bt_interface_hfp_hf_start_connecting((uint8_t *)a);
+    /* 顺手把 HID 通道也排上：ACL 建起来之后（不管是 HFP 建的还是只建了 ACL）
+     * 都能把 HID 控制/中断通道拉起来。即使对端不接受 HFP，键鼠还有机会工作。 */
+    bt_classic_hid_kick_connect();
+
+    cls_autoconn_schedule(CLS_CONN_RETRY_MS);   /* 排下一次重试；成功后会因 host_linked 提前收敛 */
 }
 
 /* ===== HFP 主动连管理线程 (08-07 定案: 事件线程绝不做长等待) =====
@@ -671,6 +973,284 @@ static void hfp_retry_schedule(void)
     hfp_retry_schedule_delayed(HFP_RETRY_INTERVAL_MS);
 }
 
+/* ===================== 经典 HID 通道主动连接 =====================
+ * 背景(2026-10-31)：用户报"只有首次配对能用，设备重启后再也用不了"。
+ * 日志证据 —— 重启后 ACL/HFP 全部正常建立，但【从未出现】
+ * `[L-U]remote connect HID control channel success`，随后按键全是
+ * `[U-L]hid is not connect,can't send data`。
+ * 原因：BR/EDR HID 里通道是【主机】开的，Windows 只在"首次配对 / 用户手动点连接"
+ *      时开；设备自己为了 HFP 去 page 建立 ACL 后，Windows 不会顺带重开 HID。
+ * 解法：设备侧主动 hid_conn_req(真实蓝牙键盘就是这个行为)。
+ * 节奏：ACL 上来后 600ms 踢第一次，之后每 1.5s 重试，最多 4 次即收敛
+ *      (主机不认就等下次 ACL/按键再踢，不无限骚扰射频与功耗)。
+ * 线程：SDK 调用统一放到软定时器线程里做，避免发送线程(按键/鼠标)直接进协议栈。 */
+static rt_timer_t g_hid_kick_timer = RT_NULL;
+static uint8_t g_hid_kick_tries = 0;
+static volatile uint8_t g_hid_kick_pending = 0;   /* 已排上队/在途，防高频重复调度 */
+
+#define HID_KICK_TRIES_MAX   6
+#define HID_KICK_FIRST_MS    600
+#define HID_KICK_RETRY_MS    1500
+/* ★ 11-10: 4 次(约 5s)放弃后**再也不会重试** —— 实测"断连一次再自动回连后
+ * HID 发不上去"就是踩的这个坑：主机(Windows)重连后往往要好几秒才肯重开 HID
+ * 通道，等它反应过来我们已经放弃了，而 g_hid_kick_tries 只在 ACL 连接/
+ * PROFILE_CONNECTED 时清零 ⇒ 除非再断一次重连，这一辈子都不会再踢。
+ * 改为：放弃后进入 10s 退避，退避期一过重新武装再给一轮。 */
+#define HID_KICK_REARM_MS    10000
+
+static rt_tick_t g_hid_kick_last_tick = 0;   /* 最后一次尝试/放弃的时刻 */
+static uint8_t   g_hid_kick_warned = 0;      /* "已放弃"日志只打一次，重新武装时复位 */
+
+static void hid_kick_fire(void *parameter);
+
+/* 由 classic_hid.c 的发送闸门调用（可高频调用，已在途则直接返回） */
+void bt_classic_hid_kick_connect(void)
+{
+    extern unsigned char classic_hid_linked(void);
+
+    /* ★ 11-17: 60 秒窗口用完进入"放弃"状态后，**任何来源都不许再踢**，
+     * 否则 kick 状态机每 10s 自动重新武装，会一直把射频拉起来、反复唤醒主核。
+     * 只有按键（bt_cls_autoconn_kick_user）会清掉这个标志。 */
+    /* ★ 11-23 静默返回改成可观测 —— 之前这里一旦被挡住，日志里连一行提示都没有，
+     * 只能看到"HFP 连上了但 HID 没反应"，完全无法判断是没踢还是踢了没用。 */
+    if (g_cls_giveup) {
+        rt_kprintf("[CLS HID] kick SKIP: giveup flag set (wait user key)\n");
+        return;
+    }
+
+    if (g_hid_kick_pending || classic_hid_linked()) {
+        rt_kprintf("[CLS HID] kick SKIP: pending=%d linked=%d\n",
+                   g_hid_kick_pending, classic_hid_linked() ? 1 : 0);
+        return;
+    }
+
+    /* ★ 11-10 重新武装：用满次数后不是永久放弃，退避期满就再来一轮，
+     * 否则"主机重连后反应慢"会变成一次性的死局。 */
+    if (g_hid_kick_tries >= HID_KICK_TRIES_MAX) {
+        if (g_hid_kick_last_tick != 0 &&
+            (rt_tick_get() - g_hid_kick_last_tick) < rt_tick_from_millisecond(HID_KICK_REARM_MS))
+            return;                       /* 退避期内：不骚扰射频 */
+        rt_kprintf("[CLS HID] kick re-armed after %d ms idle\n", HID_KICK_REARM_MS);
+        g_hid_kick_tries = 0;
+        g_hid_kick_warned = 0;
+    }
+
+    g_hid_kick_pending = 1;
+    if (!g_hid_kick_timer) {
+        g_hid_kick_timer = rt_timer_create("hidkick", hid_kick_fire, RT_NULL,
+            rt_tick_from_millisecond(HID_KICK_FIRST_MS),
+            RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
+        if (!g_hid_kick_timer) { g_hid_kick_pending = 0; return; }
+    } else {
+        rt_timer_control(g_hid_kick_timer, RT_TIMER_CTRL_SET_TIME,
+                         &(rt_tick_t){rt_tick_from_millisecond(HID_KICK_FIRST_MS)});
+    }
+    rt_timer_start(g_hid_kick_timer);
+}
+
+/* ★★ 11-23 清掉 SDK HID 连接表里的陈旧槽位。
+ * SDK 的 bt_hid_connect_requset() 开头用 bt_hid_check_connection_by_addr() 判重：
+ *     for(i) if (bd_eq(&conn[i].rmt_bd, bd)) { 打印 "already connected or connecting"; return; }
+ * 它**只比地址**，而且 bt_hid_close() 并不会清这张表。
+ * 于是深睡唤醒后（我们 close+open 过），每次踢都会被判成"已连接"直接返回，
+ * HID 通道永远建不起来 —— 日志实证：kick connect #1..#6 后面全是
+ * "This address already connected or connecting"，最后次数耗尽放弃。
+ * 对策：发起连接前把该地址对应的槽位清空，让 SDK 的判重放行。 */
+static void hid_clear_stale_conn_slot(BTS2S_BD_ADDR *bd)
+{
+    bts2_app_stru *app = (bts2_app_stru *)bts2g_app_p;
+    if (!app || !bd) return;
+
+    for (int i = 0; i < CFG_MAX_HID_CONN_NUM; i++) {
+        if (bd_eq(&app->hid_inst.conn[i].rmt_bd, bd)) {
+            rt_kprintf("[CLS HID] clear stale hid conn slot #%d (%02x:%02x:%02x:%02x:%02x:%02x)\n",
+                       i, bd->lap & 0xFF, (bd->lap >> 8) & 0xFF, (bd->lap >> 16) & 0xFF,
+                       (bd->lap >> 24) & 0xFF, bd->uap, bd->nap & 0xFF);
+            memset(&app->hid_inst.conn[i].rmt_bd, 0, sizeof(app->hid_inst.conn[i].rmt_bd));
+        }
+    }
+}
+
+static void hid_kick_fire(void *parameter)
+{
+    extern unsigned char classic_hid_linked(void);
+    extern void bt_hid_connect_requset(BTS2S_BD_ADDR *bd);
+
+    g_hid_kick_pending = 0;
+    if (!bts2g_app_p) return;
+    if (classic_hid_linked()) {          /* 主机自己开了 ⇒ 收工 */
+        g_hid_kick_tries = 0;
+        return;
+    }
+    if (g_hid_kick_tries >= HID_KICK_TRIES_MAX) {
+        g_hid_kick_last_tick = rt_tick_get();     /* 记录放弃时刻，供重新武装计时 */
+        if (!g_hid_kick_warned) {
+            g_hid_kick_warned = 1;
+            rt_kprintf("[CLS HID] kick gave up after %d tries, will retry after %dms\n",
+                       HID_KICK_TRIES_MAX, HID_KICK_REARM_MS);
+        }
+        return;
+    }
+
+    g_hid_kick_tries++;
+    {
+        BTS2S_BD_ADDR bd;
+        const uint8_t *m = bt_cls_peer_addr();
+        if (!m) return;                       /* 还没有任何对端地址，等下次再踢 */
+        bt_addr_convert_to_bts((bd_addr_t *)m, &bd);
+        rt_kprintf("[CLS HID] kick connect #%d -> %02x:%02x:%02x:%02x:%02x:%02x\n",
+                   g_hid_kick_tries, m[5], m[4], m[3], m[2], m[1], m[0]);
+        hid_clear_stale_conn_slot(&bd);   /* 放行 SDK 的地址判重，见函数上方说明 */
+        bt_hid_connect_requset(&bd);
+    }
+
+    /* 排下一次重试 */
+    g_hid_kick_pending = 1;
+    rt_timer_control(g_hid_kick_timer, RT_TIMER_CTRL_SET_TIME,
+                     &(rt_tick_t){rt_tick_from_millisecond(HID_KICK_RETRY_MS)});
+    rt_timer_start(g_hid_kick_timer);
+}
+
+/* ============================================================================
+ * HID 链路标志自愈（11-10）
+ * ============================================================================
+ * 故障现场（用户日志）：
+ *     [KB] -> classic mod=0x00 n=6 keys=00 ...
+ *     [U-L]hid is not connect,can't send data
+ *     [hid_debug] bd 0-0-0, control_cid=0x0000, interrupt_cid=0x0000
+ * `[KB] -> classic` 说明**我们自己的 s_hid_linked 还是 1**（否则会走 BLE），
+ * 但 SDK 内部根本没有这条连接 —— 标志卡住了，于是 hid_tx_gate() 认为"已连"、
+ * 永远不去重踢通道，所有报文都被 SDK 丢掉。
+ *
+ * 为什么会卡：HID 通道的断开事件并不是每次都送到（链路突然消失、主机单方面
+ * 拆除、协议栈内部清理等情况），只靠事件维护标志必然会有残留。
+ *
+ * 对策：用 SDK 的真值定期校正（bt_hid_check_connection_by_addr 是公开 API，
+ * 同时覆盖"已连接"和"连接中"两种状态），不一致就纠正并重踢通道。
+ * 周期 2s：足够快，又不至于骚扰射频。
+ */
+int bt_classic_hid_sdk_connected(void)
+{
+    const uint8_t *m = bt_cls_peer_addr();
+    BTS2S_BD_ADDR bd;
+    U8 idx = 0;
+
+    if (!m) return 0;
+    bt_addr_convert_to_bts((bd_addr_t *)m, &bd);
+    return bt_hid_check_connection_by_addr(&bd, &idx) ? 1 : 0;
+}
+
+static rt_timer_t g_hid_sync_timer = RT_NULL;
+
+static void hid_link_sync_cb(void *parameter)
+{
+    extern unsigned char classic_hid_linked(void);
+    extern unsigned char classic_hid_ready(void);
+    extern void classic_hid_set_linked(unsigned char);
+
+    if (!classic_hid_ready()) return;          /* ACL 不在，没什么可校正的 */
+
+    int sdk = bt_classic_hid_sdk_connected();
+    int ours = classic_hid_linked() ? 1 : 0;
+
+    if (sdk == ours) return;
+
+    if (sdk) {
+        /* ★★ 11-23 关键修正：**不能**凭 sdk 恢复"已连接"标志。
+         * `bt_classic_hid_sdk_connected()` 底层是 bt_hid_check_connection_by_addr()，
+         * 而它的实现只是遍历 hid_inst.conn[] **比较一下对端地址**
+         *   for(i) if (bd_eq(&conn[i].rmt_bd, bd)) return TRUE;
+         * —— 它表示"这个地址还登记在 HID 槽位里"，**完全不反映 L2CAP 通道是否打开**。
+         * 深睡唤醒后我们刚 close+open 过，旧槽位地址仍在 ⇒ 它照样返回真，
+         * 于是这里把标志恢复成 1，报文被送进一个 PC 根本没建立的通道 → 静默丢失。
+         * 正确做法：只把"地址已登记但通道未知"当作**该去建通道**的信号，
+         * 踢一次 HID 连接，等 BT_NOTIFY_HID_PROFILE_CONNECTED 这个唯一可靠事件来置位。 */
+        bt_classic_hid_kick_connect();
+    } else {
+        classic_hid_set_linked(0);
+        rt_kprintf("[CLS HID] sync: SDK says NOT connected -> flag cleared, re-kick\n");
+        g_hid_kick_tries = 0;
+        g_hid_kick_warned = 0;
+        g_hid_kick_last_tick = 0;
+        bt_classic_hid_kick_connect();
+    }
+}
+
+static void hid_link_sync_start(void)
+{
+    if (!g_hid_sync_timer) {
+        g_hid_sync_timer = rt_timer_create("hidsync", hid_link_sync_cb, RT_NULL,
+            rt_tick_from_millisecond(2000),
+            RT_TIMER_FLAG_PERIODIC | RT_TIMER_FLAG_SOFT_TIMER);
+        if (!g_hid_sync_timer) return;
+    }
+    rt_timer_start(g_hid_sync_timer);
+}
+
+/* ===================== 经典 HID 鼠标报文（自己组包） =====================
+ * 为什么不再用 SDK 的 bt_hid_mouse_drag_page：
+ *   SDK 的鼠标报告 ID 是 2，而 SDK 在【每次 HID 连接成功】时都会调
+ *   bt_hid_mouse_reset_at_middle()：先 (-2047,-2047) 把光标拽到屏幕角，再 (+180,+300)
+ *   挪回来 —— 那是空中鼠标遥控器的绝对定位校准，副作用就是"每次重连光标飞到角落"。
+ *   这两条报文固定用报告 ID 2，无法从应用层拦。
+ * ⇒ 对策：我们的描述符里【不定义报告 ID 2】，鼠标改用 ID 3。主机按 HID 规范
+ *   丢弃未知报告 ID 的报文，跳变从根上消失（不需要改 SDK）。
+ * 报文：报告 ID 3，输入 4 字节 = [按键][X int8][Y int8][滚轮 int8]
+ * 缓冲区首字节是协议头（DATA|INPUT），栈会剥掉它并把 report_id 作为报文首字节。 */
+void bt_classic_hid_send_mouse_raw(unsigned char buttons, int dx, int dy, int wheel)
+{
+    extern unsigned char classic_hid_linked(void);
+
+    if (!bts2g_app_p || !classic_hid_linked()) return;
+
+    if (dx > 127) dx = 127; else if (dx < -127) dx = -127;
+    if (dy > 127) dy = 127; else if (dy < -127) dy = -127;
+    if (wheel > 127) wheel = 127; else if (wheel < -127) wheel = -127;
+
+    /* ⚠️ 目标地址取 bt_cls_peer_addr()：手机只用经典链路，BLE 地址恒为 0，
+     * 拿 g_hid_env.peer_addr 会让 SDK 查不到连接并丢弃报文（详见该函数注释）。 */
+    const uint8_t *peer = bt_cls_peer_addr();
+    if (!peer) return;
+    BTS2S_BD_ADDR bd;
+    bt_addr_convert_to_bts((bd_addr_t *)peer, &bd);
+
+    /* ★ 10-31 只在"手势报文"(按键/滚轮)时退出 sniff —— 这类报文低频、单发，
+     * 退出 sniff 的代价可以接受；移动报文每 10ms 一帧，若每帧都发一条
+     * HCI Exit Sniff 指令会形成指令风暴，反而把链路拖慢(加重掉帧)。
+     * 移动期的 sniff 由 air_mouse 活跃态统一处理(ble_app_mouse_sniff_ctl)。 */
+    if (buttons || wheel)
+        hcia_exit_sniff_mode(&bd, NULL);
+
+    unsigned char msg[6];
+    msg[0] = 0xA1;                    /* (HID_MSG_TYPE_DATA<<4) | HID_REPORT_TYPE_INPUT */
+    /* ★ 11-06: 报告 ID 改为 4。ID 3 已让给多媒体 —— SDK 的 bt_hid_send_consumer()
+     * 固定用 HID_CONSUMER_REPORT_ID(=0x03)，而早期版本把 ID 3 给了鼠标，
+     * 导致多媒体报文被主机当成鼠标报文解析 ⇒ 多媒体键完全没反应。 */
+    msg[1] = 0x04;                    /* 报告 ID 4（见 cls_hid_desc.c） */
+    msg[2] = buttons;
+    msg[3] = (unsigned char)(signed char)dx;
+    msg[4] = (unsigned char)(signed char)dy;
+    msg[5] = (unsigned char)(signed char)wheel;
+    /* 诊断(10-31): 只打印"带按键/滚轮"的报文（移动报文太多不打印），
+     * 用来确认按键报文到底发出去没有、内容对不对、发给谁。 */
+    if (buttons || wheel) {
+        static rt_tick_t last = 0;
+        rt_tick_t now = rt_tick_get();
+        if (last == 0 || (now - last) > rt_tick_from_millisecond(50)) {
+            last = now;
+            rt_kprintf("[MS] TX b=0x%02x x=%d y=%d w=%d -> %02x:%02x:%02x:%02x:%02x:%02x\n",
+                       buttons, dx, dy, wheel,
+                       peer[5], peer[4], peer[3], peer[2], peer[1], peer[0]);
+        }
+    }
+
+    /* ★ 10-31: 用【不带对端地址】的发送接口。
+     * 带地址的 hid_send_report_req_ext 会按 bd 去内部连接表里查，查不到就打
+     * "[U-L]hid is not connect,can't send data" 直接丢弃 —— 实测 PC/手机两端都会踩到
+     * （表里明明有连接）。本机只有一路经典 HID，用单连接接口即可，彻底绕开地址匹配。 */
+    hid_send_report_req(bts2g_app_p->phdl, sizeof(msg), msg, TRUE);
+}
+
 static void hfp_connect_timer_cb(void *parameter)
 {
     if (!g_hid_env.is_connected || g_hfp_connected)
@@ -733,10 +1313,13 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
         switch (msg->event_id) {
         case BT_NOTIFY_COMMON_BT_STACK_READY:   // bt蓝牙协议栈准备就绪事件
             g_br_ready = 1;
-            /* 经典蓝牙名 = 空白(与 BLE 名解耦), 见 bt_classic_name 的注释 */
-            bt_interface_set_local_name(strlen(bt_classic_name), (void *)bt_classic_name);
+            /* 经典蓝牙名: 默认与 BLE 名相同(bt_classic_name 为 NULL 时回落到 local_name) */
+            const char *cls_name = bt_classic_name ? bt_classic_name : local_name;
+            bt_interface_set_local_name(strlen(cls_name), (void *)cls_name);
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
-                  bt_classic_name, local_name);
+                  cls_name, local_name);
+            /* 10-31: 蓝牙栈就绪 ⇒ 使能经典 HID(键盘+鼠标+多媒体) */
+            { extern void classic_hid_open(void); classic_hid_open(); }
             /* 链路策略：入向 lp_in=0x0005(role switch+sniff) 保留——PC 主动连时
              * 设备可 role switch 成 master 省功耗；出向 lp_out=0x0004 禁用 role switch，
              * 设备主动发起 ACL 时拒绝手机的 role switch 请求、保持 master，
@@ -769,13 +1352,35 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
              *    进一步减少 SCO/BLE 共存错误。须早于通话建链，故放 stack ready。
              * SDK 接口语义：bt_interface_set_wbs_status(1)=启用 msbc / (0)=禁用(强制 CVSD)。 */
             bt_interface_set_wbs_status(1);
+            /* ★ 10-31: 手机只走经典蓝牙，BLE 不会来连 ⇒ 那套挂在 BLE 上的主动连
+             * 永远不会触发。这里排一次"仅经典链路"的主动回连（3s 后），
+             * 已配对的手机会被设备主动 page 起来，不用再在手机上点"连接"。 */
+            g_cls_conn_tries = 0;
+            bt_cls_autoconn_kick(3000);
             //hid_report_battery();
             break;
         case BT_NOTIFY_COMMON_ACL_CONNECTED:    // ACL 链路建立
             {
                 bt_notify_device_acl_conn_info_t *acl = (bt_notify_device_acl_conn_info_t *)msg->data;
+                /* ★★★ 11-17 修正：这个回调**失败也会进来**（res!=0 / handle=0xFFFF）。
+                 * 典型：PC 蓝牙关掉后设备一直 page，每次 5.12s 超时，
+                 * 回调带着 res=4(Page Timeout)、hdl=65535 到达。
+                 * 原来无条件打印 "ACL connected"，把"寻呼超时"伪装成"已连接"，
+                 * 还会把链路建立时刻记下来 ⇒ 后续判断全乱。
+                 * 只有 res==0 且 handle 有效才算真的连上。 */
+                if (acl->res != 0 || acl->handle == 0xFFFF || acl->handle == 0) {
+                    rt_kprintf("[HID] ACL connect FAILED: dir=%d res=%d handle=0x%04X (4=page timeout)\n",
+                               acl->acl_dir, acl->res, acl->handle);
+                    break;      /* 失败: 不计链路时刻、不当作已连接 */
+                }
                 rt_kprintf("[HID] ACL connected: dir=%d (0=device-init, 1=phone-init)\n",
                     acl->acl_dir);
+                /* ⚠️ 只记录"链路建立时刻"，**不能直接当作连上过**：
+                 * 日志实证 `[HID] ACL connected` 每次都会出现，但 HFP/HID 紧接着失败
+                 * （res:c / confirmation connect failed），几百毫秒就断。
+                 * 若在这里标记 had_link，断连时就会重置 60 秒窗口 → 永远走不完。
+                 * 改为记录时刻，断开时用"存活时长"判断是不是真的连上用过。 */
+                g_cls_link_up_tick = rt_tick_get();
                 /* 日志确认：设备发起 ACL(dir=0) 时手机会 role switch 让设备变 slave，
                  * 且手机拒绝设备 role switch 回 master 的请求(res=14 安全理由)。
                  * 设备作为 slave 在 active 模式下多耗 ~0.3mA（硬件特性）。
@@ -940,11 +1545,82 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
         default: break;
         }
     }
+    else if (msg->type == BT_NOTIFY_HID)
+    {
+        /* ★ 10-31 新增：主机真正把 HID 控制(PSM 0x11)+中断(0x13)通道开起来才会来这条。
+         * SDK 只在【中断通道】建立/失败时才派发 PROFILE_CONNECTED/DISCONNECTED，
+         * 所以这里置位就等于"键鼠真的能发了"，是判断链路的唯一可靠依据。 */
+        switch (msg->event_id) {
+        case BT_NOTIFY_HID_PROFILE_CONNECTED:
+            {
+                extern void classic_hid_set_linked(unsigned char);
+                classic_hid_set_linked(1);
+                g_hid_kick_tries = 0;
+                g_hid_kick_pending = 0;
+                g_hid_kick_warned = 0;
+                g_hid_kick_last_tick = 0;
+                /* ★ 10-31：手机只走经典蓝牙 ⇒ BLE 永远不连，而 IMU/编码器原先只在
+                 * BLE CONNECTED 分支启动 ⇒ 手机端空中鼠标完全不可用（日志里连
+                 * `[LSM] lsm_init` 都没有，按键只报 "HOLD ignored (still calibrating)"）。
+                 * 这里补一条：BLE 没连、但经典 HID 通道已建 ⇒ 把鼠标链路拉起来。
+                 * PC 路径(BLE 已连)完全不变，不会重复启动(air_mouse_start 内部有幂等判断)。 */
+                if (!g_hid_env.is_connected) {
+                    air_mouse_start();
+                    enc_start();
+                }
+            }
+            LOG_I("[CLS HID] host opened HID channels, keyboard/mouse ready");
+            break;
+        case BT_NOTIFY_HID_PROFILE_DISCONNECTED:
+            {
+                extern void classic_hid_set_linked(unsigned char);
+                classic_hid_set_linked(0);
+                /* 经典链路断了且 BLE 也没连 ⇒ 宿主彻底没了，关 IMU/编码器省电。
+                 * BLE 还连着时不动：那条链路的生命周期由 BLE 断开事件管。 */
+                if (!g_hid_env.is_connected) {
+                    air_mouse_stop();
+                    enc_stop();
+                }
+            }
+            LOG_I("[CLS HID] HID channels closed");
+            break;
+        default: break;   /* OPEN_COMPLETE / CLOSE_COMPLETE：HID 功能开关，与链路无关 */
+        }
+    }
     else if (msg->type == BT_NOTIFY_HFP_HF)
     {
         switch (msg->event_id) {
         case BT_NOTIFY_HF_PROFILE_CONNECTED:    // HFP免提配置文件连接完成事件
             LOG_I("[APP] HFP connected");
+            /* ★ 10-31: 记下【经典链路对端地址】。手机只走经典蓝牙、BLE 从不连
+             * （g_hid_env.peer_addr 恒为全 0），发鼠标报文时需要一个真实地址，
+             * 否则 SDK 查不到连接、每帧回 "[U-L]hid is not connect"。
+             * 这里的事件数据里就带着对端 MAC，是唯一可靠来源。 */
+            {
+                bt_notify_profile_state_info_t *pi = (bt_notify_profile_state_info_t *)msg->data;
+                if (pi) {
+                    memcpy(g_cls_peer_addr, pi->mac.addr, 6);
+                    rt_kprintf("[CLS HID] peer = %02x:%02x:%02x:%02x:%02x:%02x\n",
+                               g_cls_peer_addr[5], g_cls_peer_addr[4], g_cls_peer_addr[3],
+                               g_cls_peer_addr[2], g_cls_peer_addr[1], g_cls_peer_addr[0]);
+                }
+            }
+            { extern void classic_hid_set_ready(unsigned char); classic_hid_set_ready(1); }   /* 10-31: 经典 ACL 就绪 */
+            /* ★ 10-31: ACL/HFP 通了不等于 HID 通了 —— Windows 重启后不会自己
+             * 重开 HID 通道(详见 hid_kick_fire 上方注释)。这里主动踢一次，
+             * 主机 600ms 内没反应就按 1.5s 间隔重试，最多 4 次。 */
+            g_hid_kick_tries = 0;
+            g_hid_kick_warned = 0;
+            g_hid_kick_last_tick = 0;
+            /* ★ 11-23: ACL 已经建起来 = 主机就在那儿，之前"60 秒窗口用尽、放弃重连"
+             * 的判据已经不成立。必须在这里解除 giveup，否则 kick 会被永久挡住
+             * （只有按键能清），表现就是"链路连着但 HID 通道永远不重建"。 */
+            if (g_cls_giveup) {
+                g_cls_giveup = 0;
+                rt_kprintf("[CLS HID] giveup cleared (ACL is up, host reachable)\n");
+            }
+            bt_classic_hid_kick_connect();
+            hid_link_sync_start();     /* 11-10: 起 HID 标志自愈校正 */
             g_hfp_connected = 1;
             /* 三设备切换指示: HFP 建立成功, 熄灭模式指示(青闪结束) */
             extern void bt_multi_on_hfp_state(uint8_t hfp_on);
@@ -987,6 +1663,32 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             break;
         case BT_NOTIFY_HF_PROFILE_DISCONNECTED: // HFP免提配置文件断开完成事件
             LOG_I("[APP] HFP disconnected");
+            /* ★ 10-31: 经典链路断 ⇒ 排一次"仅经典"的主动回连（3s 后）。
+             * 手机场景 BLE 不会连，原来没有任何重连触发点 ⇒ 只能人手点。 */
+            g_cls_conn_tries = 0;
+            {
+                /* 只有链路**稳定存活超过 3 秒**才算"真的连上用过"⇒ 次数清零重新给 20 次。
+                 * 建链失败那种 100~500ms 就断的，**不动计数**，让它自然用满。 */
+                rt_tick_t up = (g_cls_link_up_tick && rt_tick_get() > g_cls_link_up_tick)
+                             ? (rt_tick_get() - g_cls_link_up_tick) : 0;
+                if (up > rt_tick_from_millisecond(3000)) {
+                    g_cls_attempts = 0;
+                    g_cls_giveup = 0;
+                    rt_kprintf("[CLS] real link lost (%ums), attempt counter reset\n", (unsigned)up);
+                }
+                g_cls_link_up_tick = 0;
+            }
+            bt_cls_autoconn_kick(3000);
+            { extern void classic_hid_set_ready(unsigned char); classic_hid_set_ready(0); }   /* 10-31: 经典 ACL 断开 */
+            if (g_hid_sync_timer) rt_timer_stop(g_hid_sync_timer);   /* 11-10: 停 HID 标志校正 */
+            /* ACL 断了 HID 通道必然也没了；复位踢连接的状态机，下次连上重新来 */
+            {
+                extern void classic_hid_set_linked(unsigned char);
+                classic_hid_set_linked(0);
+                g_hid_kick_tries = 0;
+                g_hid_kick_pending = 0;
+                if (g_hid_kick_timer) rt_timer_stop(g_hid_kick_timer);
+            }
             /* ⚠️ 区分【连接尝试失败】与【已连接后断开】(08-07 死循环定案)：
              * 连接失败时 SDK 同样发本事件, 但 g_hfp_connected==0(从未成功)。
              * 实测日志: 设备主动连 → 手机拒(res 0x0C Limited Resources 或
@@ -1390,6 +2092,14 @@ void ble_app_wakeup_advertise(void)
      * 用户在按键说明在用，多给一段回连时间；超时未回连再停广播深睡。
      * 断连/按键走 60s 窗口（ADV_GRACE_WINDOW_MS）。*/
     adv_grace_start(rt_tick_from_millisecond(ADV_GRACE_WINDOW_MS));
+    /* ★ 10-31: 按键唤醒 = 用户现在就要用 ⇒ 若连经典链路也没连，300ms 后主动 page
+     * 已配对的手机/电脑（手机场景没有 BLE 回连，不主动发起就只能人手点"连接"）。
+     * bt_cls_autoconn_kick 内部会判 bt_host_linked()，已连上则什么都不做。 */
+    /* ⚠️ 这里**不能**用 _user 版本：`ble_app_wakeup_advertise()` 在每次 BLE 断开
+     * 都会被调用（日志里 "[BLE] HFP down, restore advertise for re-connect"），
+     * 用 user 版本会把重连计数清零 ⇒ 20 次永远用不完（实测就是这样循环的）。
+     * 真正的"用户按键"由 main.c 的按键分发处调 bt_cls_autoconn_user_intent()。 */
+    bt_cls_autoconn_kick(300);
 }
 
 /* (2026-10-12) 原"语音中 BLE 断开延迟广播 + 30s 软定时器兜底"实现已在此删除,
@@ -1475,17 +2185,27 @@ void ble_app_conn_param_relax(void)
     if (!g_hid_env.is_connected) return;
     if (conn_param_throttled()) return;   /* 2s 内刚更新过, 跳过(协商风暴防护) */
     conn_param_throttle_enter();
-    /* 空闲态连接参数: interval 16~32(20~40ms), slave_latency 0, timeout 600(6s).
+    /* 空闲态连接参数: interval **40~64(50~80ms)**, slave_latency 0, timeout 600(6s).
      *
-     * 注意: 此处 slave_latency 必须为 0! 旧实现用 latency 4 (可跳过 4 个连接事件),
-     * 最坏每 5×100ms=500ms 才送达一次 HID 报告。空中鼠标每 10ms 累积一帧位移,
-     * 连接事件到来时控制器把 500ms 内攒的多帧一次性灌出 → 光标"跳变";
-     * 且 tighten 请求要等手机协商 1~2s 才生效, 这期间持续跳变 → 用户感知的
-     * "空闲→活跃卡顿跳变, 过一两秒才正常"。latency=0 让每帧及时送达, 消除跳变。
-     * interval 比活跃态(7.5~15ms)宽, 仍保留一定省电(射频活动更少)。 */
+     * ★★★ 11-06 调整: 原为 16~32(20~40ms)。原因是实测"进 Sniff 后电流在
+     * 1.4 / 2.7 / 3.1mA 之间反复横跳"—— 1.4mA 是经典蓝牙 sniff 的底噪，
+     * 而 **latency=0 ⇒ 手机每个连接事件从机都必须应答**，每 20~40ms 就有一次
+     * 射频唤醒（≈1~2ms、数 mA），叠加在底噪上就成了这种脉冲式横跳。
+     * 把间隔拉到 50~80ms，唤醒次数直接减半以上，平均电流显著下降。
+     *
+     * ⚠️ slave_latency 仍然必须为 0（不能靠它省电）：
+     *   旧实现用 latency 4（可跳过 4 个连接事件），最坏每 5×100ms=500ms 才送达一次
+     *   HID 报告。空中鼠标每 10ms 累积一帧位移，连接事件到来时控制器把 500ms 内
+     *   攒的多帧一次性灌出 → 光标"跳变"；且 tighten 要等手机协商 1~2s 才生效，
+     *   这期间持续跳变 → 用户感知"空闲→活跃卡顿跳变，过一两秒才正常"。
+     *   ⇒ 用"拉长间隔"省电，不用 latency —— 前者只影响首帧延迟(50~80ms, 基本无感)，
+     *     后者会造成可见的跳变。
+     *
+     * 数值换算: interval 单位 1.25ms ⇒ 40 = 50ms, 64 = 80ms。
+     * timeout 600 = 6s，远大于 (1+latency)×interval×2 = 160ms，满足规范约束。 */
     ble_gap_update_conn_param(BLE_GAP_CREATE_UPDATE_CONN_PARA(
-        g_hid_env.conn_idx, 16, 32, 0, 600));
-    LOG_I("[BLE] conn param relaxed (idle: 20~40ms, latency 0)");
+        g_hid_env.conn_idx, 40, 64, 0, 600));
+    LOG_I("[BLE] conn param relaxed (idle: 50~80ms, latency 0)");
 }
 
 /* 空闲深睡: 强制放松 BLE 连接间隔(绕过 2s 节流), 削 BLE 射频基线功耗.
@@ -1535,15 +2255,15 @@ void ble_app_conn_param_sco_quiet(void)
     /* ★ 2026-10-12: 一次语音只协商一次(见 g_sco_quiet_on 注释)。 */
     if (g_sco_quiet_on) return;
     g_sco_quiet_on = 1;
-    /* 10-30 实验: 通话期间不再拉长到 40~80ms, 改为与【空闲态一致】(20~40ms)。
-     * 依据: 实测主机根本不按 32~64 下发, applied 一直是 24(30ms) —— 也就是说
-     * "拉长给 SCO 让路"这个意图从未真正生效, 而 30ms 又对 HID 更友好。
-     * 索性直接对齐空闲参数, 让代码与实际行为一致; timeout 仍保留 3200(32s),
-     * 它才是真正生效、且防止 reason 8 断连的那一项。
-     * ★ 要恢复原值就把 16,32 改回 32,64。 */
+    /* 11-04: 按用户要求恢复为 40~80ms(32~64)，给 SCO 让更多射频余量。
+     * 历史: 10-30 曾改成与空闲一致的 20~40ms(16~32)，理由是实测主机不按
+     * 32~64 下发(applied 一直停在 30=37.5ms)，那版意图从未真正生效。
+     * ⚠️ 若这次观察到 applied 仍停在 30 左右，说明主机(手机/PC)自身限制，
+     *    不是固件没请求 —— 以日志 `[BLE] conn param applied:` 为准。
+     * timeout 仍保留 3200(32s): 它才是真正生效、且防 reason 8 断连的那一项。 */
     ble_gap_update_conn_param(BLE_GAP_CREATE_UPDATE_CONN_PARA(
-        g_hid_env.conn_idx, 16, 32, 0, 3200));
-    LOG_I("[BLE] conn param SCO-quiet (20~40ms 同空闲, to 32s)");
+        g_hid_env.conn_idx, 32, 64, 0, 3200));
+    LOG_I("[BLE] conn param SCO-quiet (40~80ms, to 32s)");
 }
 
 static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len, uint32_t context)
@@ -1695,8 +2415,15 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         /* 三设备切换: 断连后恢复槽位指示(等待回连蓝闪) */
         bt_multi_on_disconnected();
         power_set_bt_connected(0);
-        air_mouse_stop();   /* 阶段1：断开即关闭 IMU；内部释放 LIGHT 锁 + 逻辑回到空闲 */
-        enc_stop();         /* 断连即停编码器轮询，HPSYS 不再被 1ms 定时器唤醒，可进深睡 */
+        /* ★ 10-31: 判"经典链路是否还在"再关 —— 鼠标/旋钮现在走经典 HID，
+         * BLE 掉了但手机经典链路还活着时，不能把 IMU 停掉（否则鼠标立刻失灵）。 */
+        {
+            extern unsigned char classic_hid_linked(void);
+            if (!classic_hid_linked()) {
+                air_mouse_stop();   /* 阶段1：断开即关闭 IMU；内部释放 LIGHT 锁 + 逻辑回到空闲 */
+                enc_stop();         /* 断连即停编码器轮询，HPSYS 不再被 1ms 定时器唤醒，可进深睡 */
+            }
+        }
         ble_led_turn_off(); /* 断连即熄灭 app 经 BLE 推送的状态灯(LED2/3/4)，避免断连后仍亮 */
         /* 断连即复位 HFP 自动连接闩锁: 下次 BLE 重连会重新发起 HFP(否则只连一次、永不重连)。
          * 仅停 page scan 窗口定时器(取消 BLE 连接时的兜底主动连), 但【保持 page scan 开】——

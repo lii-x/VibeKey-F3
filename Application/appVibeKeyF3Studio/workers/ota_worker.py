@@ -123,12 +123,19 @@ def ota_upgrade(port, firmware_path):
     ser = serial.Serial(port, 115200, timeout=5, write_timeout=5)
     time.sleep(0.1)
 
+    # ★★ 11-17 关键修复：起始包**不能单独发一个 8 字节的包**。
+    # 设备端(旧固件)在 USB CDC 上会把这种"只有 8 字节头"的短包多计 8 字节
+    # （实测 recv 恒比 total 多 8 → 尾部 CRC 取错位置 → 必然 mismatch）。
+    # 把"头 + 首段固件体"拼成**一次写入**，设备就能在同一个 512 字节包里
+    # 正确剥离 8 字节头（magic 分支: q_write(buf+8, nbytes-8)）。
     print("STATUS:Sending header...", flush=True)
-    ser.write(header)
-    time.sleep(0.1)
+    chunk_size = 512
+    first_len = min(chunk_size - len(header), len(payload))
+    first_pkt = bytes(header) + payload[:first_len]
+    ser.write(first_pkt)
 
     chunk_size = 512
-    sent = 0
+    sent = first_len
     retries = 0
     while sent < len(payload):
         chunk = payload[sent:sent + chunk_size]
@@ -161,23 +168,40 @@ def ota_upgrade(port, firmware_path):
 
     print("STATUS:固件已发送(含CRC), 等待设备重启...", flush=True)
     ser.close()
-    time.sleep(5)   # 等待 reboot + USB 重新枚举
+    # ★ 11-23 验证提速：原来固定 sleep(5) + 每次失败再等 3 秒，最坏要 50 秒。
+    # 实测设备端启动 1.2 秒 USB 就绪（[BOOT] 埋点：start@18ms / vbus@1158ms），
+    # 那 5 秒纯属空等。改为"短等待 + 密探询"：0.8s 起探，每次判定只给 0.5s，
+    # 失败间隔 0.3s，次数加到 25 —— 正常情况 1~2 秒就能拿到版本，
+    # 慢枚举（Windows 重新分配串口）也有足够重试窗口。
+    time.sleep(0.8)
 
     # 重握手验证: 设备应已用新固件重新上线; 若超时无响应说明可能变砖
     print("STATUS:验证设备是否重新上线...", flush=True)
     new_version = None
-    for attempt in range(1, 16):
+    for attempt in range(1, 41):
+        # ★ 11-23 区分"端口打不开"与"没回应"：
+        # 设备重启后 COM 口会先消失再重新枚举，Windows 释放旧句柄需要时间。
+        # 实测：每 0.3s 硬撞会连续失败（上一版 25 次全废，而上位机自己的 probe
+        # 晚一步去开就好了）。这里打不开就退让 0.8s 再试；一旦能打开，
+        # 握手只需 ~0.16s，仍然是"快"的。
         try:
-            vser = serial.Serial(port, 115200, timeout=2)
-            time.sleep(0.3)
-            info = send_info_and_read(vser, timeout=2)
-            vser.close()
-            if info is not None:
-                new_model, new_version = info
-                break
+            vser = serial.Serial(port, 115200, timeout=1.0)
         except Exception:
-            pass
-        time.sleep(1)
+            time.sleep(0.8)
+            continue
+        info = None
+        try:
+            time.sleep(0.15)
+            info = send_info_and_read(vser, timeout=1.0)
+        finally:
+            try:
+                vser.close()          # 无论成败都释放，避免句柄泄漏
+            except Exception:
+                pass
+        if info is not None:
+            new_model, new_version = info
+            break
+        time.sleep(0.4)
 
     if new_version is None:
         print("VERIFY_FAIL", flush=True)

@@ -181,6 +181,13 @@ async def resolve_vibekey_address():
 
     addrs = find_vibekey_addresses()
     if not addrs:
+        # ★ 11-23 枚举不到时回退到上次成功用过的地址，而不是直接判失败。
+        # Get-PnpDevice 的 FriendlyName 过滤偶尔会漏（重连瞬间设备节点在重建、
+        # 或系统给的名字带了后缀），一次空结果不该等价于"设备不存在"。
+        if cached:
+            print("DEBUG: pnp enumeration empty, fallback to cached %s" % hex(cached),
+                  file=sys.stderr)
+            return cached
         return None
     if len(addrs) == 1:
         _cache_save(addrs[0])
@@ -249,20 +256,26 @@ async def is_vibekey_connected():
     and read BluetoothLEDevice.ConnectionStatus, which reflects the real radio link.
     """
     addr = await resolve_vibekey_address()
-    if not addr:
-        return False
-    try:
-        from winrt.windows.devices.bluetooth import BluetoothLEDevice, BluetoothConnectionStatus
-        dev = await BluetoothLEDevice.from_bluetooth_address_async(addr)
-        if dev is None:
-            return False
+    if addr:
         try:
-            return dev.connection_status == BluetoothConnectionStatus.CONNECTED
-        finally:
-            dev.close()
-    except Exception:
-        # winrt unavailable/failed — fall back to PnP property detection
-        return _is_vibekey_connected_pnp()
+            from winrt.windows.devices.bluetooth import BluetoothLEDevice, BluetoothConnectionStatus
+            dev = await BluetoothLEDevice.from_bluetooth_address_async(addr)
+            if dev is not None:
+                try:
+                    if dev.connection_status == BluetoothConnectionStatus.CONNECTED:
+                        return True
+                finally:
+                    dev.close()
+        except Exception:
+            pass   # winrt 不可用/失败：继续用下面的 PnP 兜底
+
+    # ★★ 11-23 关键修正：UWP 的 BluetoothLEDevice **只反映 BLE 链路**。
+    # 设备重启后常见情况是只连上了【经典 BR/EDR】（键鼠 HID + HFP），
+    # 此时 Windows 蓝牙设置里显示"已连接"，而 BLE 视图是断开的
+    # ⇒ 客户看到的就是"电脑明明连着，客户端却说未连接"，只能删掉重配。
+    # 改成把 PnP 的"系统认为已连接"也作为**并列信号**（原来只在异常时才用）：
+    #   任一为真即视为在线。宁可偶尔偏乐观，也不要让用户面对"假离线"。
+    return _is_vibekey_connected_pnp()
 
 
 async def connect_led_char(stop=None):
@@ -764,18 +777,32 @@ async def status():
     """
     addr = await resolve_vibekey_address()
     if not addr:
-        print("DISCONNECTED")
+        # ★ 11-23 解析不出地址 ≠ 设备不在线。以前这里直接 DISCONNECTED，
+        # 结果"Windows 显示已连接、客户端显示未连接"（客户只能删蓝牙重配）。
+        # 改为用 PnP（系统视角）兜底，并把原因写到 stderr 便于排查。
+        pnp = _is_vibekey_connected_pnp()
+        print("DEBUG: no addr resolved (pnp empty) -> pnp_status=%s" % pnp, file=sys.stderr)
+        print("CONNECTED -1" if pnp else "DISCONNECTED")
         return
 
     try:
         from winrt.windows.devices.bluetooth import BluetoothLEDevice, BluetoothConnectionStatus
         dev = await BluetoothLEDevice.from_bluetooth_address_async(addr)
         if dev is None:
-            print("DISCONNECTED")
+            # 同上：拿不到 device 对象也不代表离线（WinRT 偶发返回 null）
+            pnp = _is_vibekey_connected_pnp()
+            print("DEBUG: from_bluetooth_address_async(%s) = None -> pnp_status=%s"
+                  % (hex(addr), pnp), file=sys.stderr)
+            print("CONNECTED -1" if pnp else "DISCONNECTED")
             return
         try:
             if dev.connection_status != BluetoothConnectionStatus.CONNECTED:
-                print("DISCONNECTED")
+                # BLE 未连：可能只走了经典链路 —— 用 PnP 的"系统认为已连接"兜底，
+                # 与 Windows 蓝牙设置页保持一致（详见 is_vibekey_connected 的说明）。
+                if _is_vibekey_connected_pnp():
+                    print("CONNECTED -1")
+                else:
+                    print("DISCONNECTED")
                 return
             batt = await _read_battery_from_device(dev)
             print("CONNECTED %d" % batt)

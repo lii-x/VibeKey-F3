@@ -48,6 +48,19 @@ public:
     Q_INVOKABLE void pausePolling();
     Q_INVOKABLE void resumePolling();
 
+    /* ★ 11-23 USB 通道的 RGB 预览"直发"快路径。
+     * 原来每次点颜色都要起一个 python(config_worker.py) 进程 —— 解释器启动
+     * 50~150ms + 开关串口，实测手感明显发滞。这里用短连接直接写一帧
+     * CONF_CMD_RGB_APPLY（14 字节），耗时通常 1~5ms。
+     * 返回 false 表示端口被占用/打开失败，调用方回退到原来的 worker 路径。 */
+    bool sendUsbRgbPreview(const QString &portName, int idx, int en,
+                           int r, int g, int b, int bri);
+
+    /* ★ 11-23 状态灯(黄/绿/红/蓝/关)的 USB 直发。
+     * 这排按钮走的是 LightMonitor→config_worker.py led <n>，一次 ~1~2s；
+     * 这里直接写一帧 CONF_CMD_LED(0x05)，payload 只有 1 字节 state。 */
+    bool sendUsbLedState(const QString &portName, int state);
+
 signals:
     void portListChanged();
     void deviceConnectedChanged();

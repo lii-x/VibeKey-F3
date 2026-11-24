@@ -47,7 +47,7 @@ extern int usb_on;
  *   ✅ 验证已完成，**已复位为 10**。两条路径都读本宏:
  *     ① 活跃态 battery_monitor(power.c:2043): 连续 2 次确认 → pm_shutdown
  *     ② 待机态 standby_rtc_battery_check(power.c:992): 每次 RTC 唤醒检查 */
-#define BAT_SHUTDOWN_PCT      10   /* ≤X% 关机(09-09: 1%→5%; 09-16: 5%→10%) */
+#define BAT_SHUTDOWN_PCT      10   /* ≤X% 关机(09-09: 1%→5%; 09-16: 5%→10%; 11-06 曾试 20% 已回退) */
 #define BAT_SHUTDOWN_MV       37000 /* 电压地板: 低于 3.70V 直接关机(兜底, 略低于 10% 点 3.719V)。
                                      *
                                      * ★★★ 09-18 单位定案（此前写成 3700，是**漏了一位的死代码**）:
@@ -1257,6 +1257,22 @@ static rt_timer_t power_find_timer_by_name(const char *name)
  * ============================================================================ */
 static void power_enter_standby(void)
 {
+    /* ★★ 11-23 安全模式：绝不进入待机流程。
+     * 必须放在【这里】而不是 sleep_thread_entry 的入口 —— 那个线程在
+     * power_init() 里就创建了，早于 main 设置 g_boot_safe_mode，入口处读到
+     * 的永远是 0（实测 8 分钟后照样走到下面的 bt_interface_* → DACCVIOL）。
+     * 本函数里有一串 bt_interface_*（关扫描/断链/释放 PM 锁），而安全模式下
+     * 蓝牙栈从未初始化，任何一个都会踩空指针。 */
+    { extern volatile uint8_t g_boot_safe_mode;
+      if (g_boot_safe_mode) {
+          static uint8_t warned = 0;
+          if (!warned) {
+              warned = 1;
+              rt_kprintf("[SAFE] standby skipped (safe mode) — 后续静默\n");
+          }
+          return;
+      } }
+
     /* ★★★ 09-18：入口立刻置"准备期"标志 + 建立干净基线。
      * 必须在**任何耗时步骤之前**（BT 关闭 / ~20s RTC 校准都在后面）：它让
      * `power_standby_wakeup()` 在准备窗口内也能记下按键，从而可被中止检查捕获。
@@ -1630,6 +1646,9 @@ static void power_enter_standby(void)
     g_in_deep_sleep = 0;
 
     power_resume_from_deep();
+    /* ★ 11-23 重建经典 HID：DEEP 之后 SDK 的 HID 通道状态是陈旧的，
+     * 不重建会出现"PC 重启后连上了但按键鼠标全无反应"（详见 classic_hid.c 说明）。 */
+    { extern void classic_hid_reopen_after_wake(void); classic_hid_reopen_after_wake(); }
     rt_kprintf("[POWER] resumed from standby\n");
 }
 
@@ -1659,17 +1678,28 @@ static void sleep_thread_entry(void *param)
         if (usb_on || g_sco_active)
             continue;
 
-        if (!g_bt_connected)
+        /* ★ 10-31: 判据从"BLE 已连(g_bt_connected)"扩成"任一宿主已连(BLE 或 经典)"。
+         * 手机只走经典蓝牙、BLE 从不连 ⇒ g_bt_connected 恒为 0 ⇒ 本线程等 60s 后
+         * 直接 power_enter_standby() → bt_interface_close_bt() 把经典 ACL 掐断
+         * ⇒ 用户看到"手机用着用着就断连"(日志 [POWER] stopping BT for sleep /
+         *   close req / hfp_hf_gap_disc_ind_hdl res 6)。
+         * 经典链路在线时必须走下面的"空闲超时"分支(按 sleep_min)，不能 60s 就关。 */
+        extern int bt_host_linked(void);
+
+        if (!bt_host_linked())
         {
-            /* 未连接：60s 等待回连, 仍未连则进待机(原逻辑) */
-            rt_kprintf("[POWER] BT disconnected, waiting 60s\n");
+            /* 未连接：60s 等待回连, 仍未连则进待机(原逻辑)
+             * 安全模式下蓝牙根本没启动，这条会每 60s 刷一次，跳过。 */
+            { extern volatile uint8_t g_boot_safe_mode;
+              if (!g_boot_safe_mode)
+                  rt_kprintf("[POWER] BT disconnected, waiting 60s\n"); }
             uint32_t elapsed = 0;
-            while (elapsed < 60000 && !g_bt_connected)
+            while (elapsed < 60000 && !bt_host_linked())
             {
                 rt_thread_mdelay(1000);
                 elapsed += 1000;
             }
-            if (!g_bt_connected)
+            if (!bt_host_linked())
                 power_enter_standby();
         }
         else
@@ -2224,9 +2254,231 @@ static void led4_set(int on)
  *   该前提早已不成立（待机检查会武装 WUT），**必须改为关掉 RTC 唤醒源**，
  *   否则关机后被 RTC 闹钟唤醒→开机→再关机，无限重启。详见函数体内注释。
  * ★09-16 修: 进 hibernate 前必须"熄灯 + 断 LDO3 外设域"（见下方注释）。 */
+/* 关机进行中标志(11-06)。定义在此、供 ble_app.c 等模块 extern 引用：
+ * 关机倒计时/关断期间，任何"自动回连/重开广播"的软定时器都不得再拉起蓝牙。 */
+volatile int g_pm_shutting_down = 0;
+
+/* ============================================================================
+ * 自实现关机序列（2026-11-06）—— 唯一目的：把 SDK 里那个【无超时死等】换掉
+ * ============================================================================
+ * SDK `HAL_PMU_EnterShutdown()`（bf0_hal_pmu.c:261）第 282 行：
+ *     if (RCC_SYSCLK_HRC48 == HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_SYS)) {
+ *         HAL_HPAON_EnableXT48();          // ← 内部 while(!(ACR & HXT48_RDY)); 无超时
+ *         HAL_RCC_HCPU_ClockSelect(...HXT48);
+ *     }
+ * 而这一步是在 `HAL_DisableInterrupt()` **之后**执行的 ⇒ 一旦 48M 晶振起不来：
+ *   · 中断已关, 连日志都出不去（现象：日志停在 "calling HAL_PMU_EnterShutdown()"）
+ *   · CPU 停在全速空转, 永远走不到最后的 `PMUC_CR_HIBER_EN` ⇒ **实测 8mA**
+ *   · 低电量时晶振更难起振 ⇒ 这就是历史"时好时坏"(8 / 16.9 / 43.2mA)的根因形态
+ *
+ * 本函数逐句复刻 SDK, 只把那一处改成**带超时的探测**：
+ *   起来了 → 切到 HXT48（与 SDK 等价）；起不来 → 清掉 REQ 放弃，保持 RC48。
+ * 保持 RC48 完全不影响关断本身（低功耗时钟随后会切到 RC10）。
+ * ⚠️ 其余步骤（VBAT_LDO 降压 / 关 LDO2 / RC48 频率复位 / bootopt 上电延时 /
+ *    清 WSR / 切 RC10 / 关 XTAL32 / 关 RTC）都必须保留, 少一步都可能影响下次开机。
+ */
+#define PM_SHUTDOWN_BOUNDED  1     /* 置 0 = 回退到 SDK 的 HAL_PMU_EnterShutdown() */
+
+/* 带超时的 LCPU 唤醒（11-06）。SDK 的 HAL_HPAON_WakeCore() 内部是两处
+ * `while (!(ISSR & LP_ACTIVE));` **无超时**，而它是关机序列的第一步。
+ * LCPU 不应答（例如刚关掉蓝牙栈、小核已停机）⇒ 永久自旋 ⇒ CPU 全速空转 = 8mA，
+ * 且因为卡在最前面，后面所有探针/日志都不会出现（与实测现象完全一致）。
+ * 这里最多等约 2ms；超时就撤掉 HP2LP_REQ 并继续往下走（本来就要停机，不需要它应答）。 */
+#define PM_LCPU_WAIT_LOOPS  20000u
+
+static int pm_wake_lcpu_bounded(void)
+{
+    uint32_t k;
+
+    hwp_hpsys_aon->ISSR |= HPSYS_AON_ISSR_HP2LP_REQ;
+    HAL_Delay_us(230);
+    for (k = 0; k < PM_LCPU_WAIT_LOOPS; k++)
+    {
+        if (hwp_hpsys_aon->ISSR & HPSYS_AON_ISSR_LP_ACTIVE)
+            return 1;
+    }
+    hwp_hpsys_aon->ISSR &= ~HPSYS_AON_ISSR_HP2LP_REQ;   /* 没应答就别把请求挂在那儿 */
+    return 0;
+}
+
+/* 带超时的 LCPU 复位/停机（11-06 第二轮）。
+ * SDK 的 HAL_RCC_Reset_and_Halt_LCPU()（bf0_hal_rcc.c:1686）里有：
+ *     hwp_lpsys_rcc->RSTR1 = rst_flag;
+ *     while (!hwp_lpsys_rcc->RSTR1);          // ← 等复位自行完成，无超时
+ * 实测：`power-off now` 打出来之后既没有心跳、也没断电 ⇒ CPU 卡在这里全速空转（8mA）。
+ * 这里加超时：等不到就当它已经停住，继续往下断电（反正马上要掉电，不能卡在中间）。 */
+static void pm_halt_lcpu_bounded(void)
+{
+    uint32_t k;
+
+    if ((hwp_lpsys_aon->PMR & LPSYS_AON_PMR_CPUWAIT) != 0)
+        return;                                  /* SDK 同款前置守卫 */
+
+    {
+        uint32_t rst_flag = 0xFFFFFFFFu;         /* is_init = 1，与 SDK 一致 */
+        rst_flag |= LPSYS_RCC_RSTR1_MAC;
+
+        hwp_lpsys_aon->PMR |= LPSYS_AON_PMR_CPUWAIT;
+        hwp_lpsys_rcc->RSTR1 = rst_flag;
+
+        for (k = 0; k < 200000u; k++)
+        {
+            if (!hwp_lpsys_rcc->RSTR1)
+                break;                           /* 复位完成 */
+        }
+        /* 等不到也继续：不要卡在 while 里 */
+
+        if ((hwp_lpsys_aon->SLP_CTRL & LPSYS_AON_SLP_CTRL_SLEEP_STATUS) != 0)
+        {
+            hwp_lpsys_aon->SLP_CTRL |= LPSYS_AON_SLP_CTRL_WKUP_REQ;
+            for (k = 0; k < 200000u; k++)
+            {
+                if (!(hwp_lpsys_aon->SLP_CTRL & LPSYS_AON_SLP_CTRL_SLEEP_STATUS))
+                    break;
+            }
+        }
+        hwp_lpsys_rcc->RSTR1 &= ~rst_flag;
+    }
+}
+
+/* 纯 CPU 空转延时（11-06）。
+ * ⚠️ 关掉 LDO2(VDD33) 之后**不能再用 HAL_Delay_us/HAL_Delay**：它们靠外设/GTIMER 计时，
+ *    而那颗定时器也在被关掉的域里 ⇒ 延时函数会永久卡住。
+ *    这里用最简单的空转，精度不重要，只要"等一会儿"即可。 */
+static void pm_spin_us(uint32_t us)
+{
+    volatile uint32_t n = us * 8u;      /* 48MHz 下每次循环约 3~4 周期，取偏保守的系数 */
+    while (n--) { }
+}
+
+static void pm_enter_shutdown_bounded(void)
+{
+#define PM_STEP(msg)   do { __enable_irq(); rt_kprintf("[PWR] " msg "\n"); __disable_irq(); } while (0)
+
+    /* LCPU 已由调用方 pm_shutdown() 在**关中断之前**唤醒完毕。 */
+    pm_halt_lcpu_bounded();
+    PM_STEP("step1 halt lcpu ok");
+
+    /* ★★★ 11-06 关键认知：**LDO2(VDD33) 一关，console 和多数外设就没电了**。
+     * 实测：关 LDO2 后紧跟的那条 `step2` 还能打出来（电容余电），再下一条就永远出不来
+     * —— 不是程序卡在逻辑里，而是 rt_kprintf 卡在一个已经断电的 UART 上。
+     * ⇒ 所以本函数的结构是：**先把最后一条日志打完，再关 LDO2，之后全程不再打印**，
+     *   只做纯寄存器操作 + CPU 空转。 */
+
+    /* ★★★ XT48 探测必须放在**关 LDO2 之前**：
+     * 它要读 `hwp_hpsys_rcc`（`HAL_RCC_HCPU_GetClockSrc`），那是 HPSYS 域寄存器，
+     * 不属于 AON。VDD33 一断再去访问，同样会挂住总线 —— 和前面几次踩的是同一个坑。
+     * 因此顺序调整为：停 LCPU → XT48 探测 → 打最后一条日志 → 关 LDO2 → 只碰 AON。 */
+    if (RCC_SYSCLK_HRC48 == HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_SYS))
+    {
+        uint32_t k;
+        hwp_hpsys_aon->ACR |= HPSYS_AON_ACR_HXT48_REQ;
+        for (k = 0; k < 500000u; k++)
+        {
+            if (hwp_hpsys_aon->ACR & HPSYS_AON_ACR_HXT48_RDY)
+                break;
+        }
+        if (hwp_hpsys_aon->ACR & HPSYS_AON_ACR_HXT48_RDY)
+        {
+            HAL_RCC_HCPU_ClockSelect(RCC_CLK_MOD_SYS, RCC_SYSCLK_HXT48);
+        }
+        else
+        {
+            hwp_hpsys_aon->ACR &= ~HPSYS_AON_ACR_HXT48_REQ;
+        }
+    }
+
+    /* ★★★ 关机唤醒源：**只清看门狗，不要清空 WER**。
+     *
+     * === 11-06 实测（两次对照）===
+     *   · 只清 WDT1/WDT2                       ⇒ 关机正常，62.7µA
+     *   · 直接 `WER = 0`（把 CHG/LOWBAT 也清掉）⇒ **反而关不掉，16.1mA**
+     * ⇒ WER 里至少要有合法的唤醒条件，PMU 才肯走完关断流程；清空会让它停在
+     *   一个"醒着但什么都不做"的状态（CPU 空转，比 8mA 还高）。
+     *
+     * === 关于"关机后不要唤醒引脚" ===
+     * 查 sf32lb52x/pmuc.h 的位定义：`WER=0x184` 其实只包含
+     *   bit2 WDT2 / bit7 LOWBAT / bit8 CHG，
+     * **PIN0、PIN1 这两位本来就没使能** —— 也就是说"关机后按键唤不醒"这件事
+     * 一直是成立的，不需要额外处理。之前我以为 0x184 里有 PIN 位，是误读。
+     * ⇒ 保持原样：只清 WDT。 */
+    (void)HAL_PMU_DisablePinWakeup(0);
+    (void)HAL_PMU_DisablePinWakeup(1);
+    hwp_pmuc->WER &= ~(PMUC_WER_WDT1 | PMUC_WER_WDT2);
+    rt_kprintf("[POWER] shutdown: WER now 0x%x (PIN bits off by design)\n",
+               (unsigned)hwp_pmuc->WER);
+    PM_STEP("step2 last log before ldo2 off");
+
+    HAL_PMU_ConfigPeriLdo(PMUC_PERI_LDO_EN_VDD33_LDO2_Pos, false, false);
+
+    /* ================= 以下禁止任何打印 / 外设访问 ================= */
+
+    /* VBAT_LDO 降到 3V（SDK 同款，防外部 VCC 低于 3.3V 时反灌）。
+     * AON 域寄存器，断电后仍可访问。 */
+    MODIFY_REG(hwp_pmuc->AON_LDO, PMUC_AON_LDO_VBAT_LDO_SET_VOUT_Msk,
+               MAKE_REG_VAL(0, PMUC_AON_LDO_VBAT_LDO_SET_VOUT_Msk,
+                            PMUC_AON_LDO_VBAT_LDO_SET_VOUT_Pos));
+
+    /* 保证下次开机 flash 能正确切到 3 字节地址模式（SDK 同款） */
+    HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO2_3V3, 0, 1);
+    pm_spin_us(8000);
+
+    /* RC48 频率恢复默认（SDK 同款，影响下次开机的启动时钟精度） */
+    hwp_pmuc->HRC_CR = 0xA50C015;
+
+    /* 下次上电的 PD/PU 延时默认值（SDK 同款；未设置时才写）。RTC 属 AON 域，安全。 */
+    {
+        uint32_t bootopt = HAL_Get_backup(RTC_BACKUP_BOOTOPT);
+        if ((bootopt & (RTC_BACKUP_BOOTOPT_PD_DELAY_Msk | RTC_BACKUP_BOOTOPT_PU_DELAY_Msk)) == 0U)
+        {
+            HAL_Set_backup(RTC_BACKUP_BOOTOPT,
+                           (bootopt | RTC_BACKUP_BOOTOPT_PD_DELAY_MS(5) |
+                            RTC_BACKUP_BOOTOPT_PU_DELAY_MS(5)));
+        }
+    }
+
+    HAL_PMU_CLEAR_WSR(hwp_pmuc->WSR);
+
+    /* ★★★ 11-06 实测更新：切到 **RC10K**（置 0 = SDK 行为）。
+     * 之前为"保险"保留了 boot 时的 RC32K，结果关机后电流停在 **0.2mA**。
+     * 回头看 SDK 为什么特意在这里切 RC10：hibernate 要的是**准**（32K），
+     * shutdown 要的是**省**（RC10 是超低功耗 10kHz）—— 这 200µA 大概率就是 RC32K
+     * 还在跑。RC10 若在本板不可用，会退回到"卡住 + mA 级"，测一次就能判断。 */
+#define PM_SHUTDOWN_KEEP_LPCLK  1
+#if !PM_SHUTDOWN_KEEP_LPCLK
+    HAL_PMU_LpCLockSelect(PMU_LPCLK_RC10);
+    pm_spin_us(100);
+#endif
+    HAL_PMU_DisableXTAL32();
+#if PM_SHUTDOWN_KEEP_LPCLK
+    /* 保持 RC32K 时 RTC 时钟仍有效，可以安全关闭 RTC 省电 */
+    hwp_rtc->ISR |= RTC_ISR_INIT;
+#else
+    /* ★ 切到 RC10K 之后**绝对不要碰 RTC**：RTC 挂在被切走的那个低速时钟上，
+     * 访问 hwp_rtc 会让总线等一个已不存在的时钟 ⇒ 永久挂死（这正是上两次
+     * 切 RC10 后变成 7.9mA 的原因，而不是 RC10 本身不可用）。 */
+#endif
+
+
+    /* ⚠️ 11-06 实测：`HAL_PMU_HPSYS_POWER_OFF()`（置 PMUC_HPSYS_SWR_NORET）
+     * **不能用**在这里 —— 加上之后关机电流从 0.2mA 恶化到 8.8mA，说明它把 HCPU
+     * 的电源开关提前切断，后面的 HIBER_EN 流程反而走不完。已移除。 */
+
+    hwp_pmuc->CR &= ~PMUC_CR_HIBER_EN;
+    pm_spin_us(100000);                      /* 原 HAL_Delay(100)，改成 CPU 空转 */
+    hwp_pmuc->CR |= PMUC_CR_HIBER_EN;        /* 真正的断电请求 */
+
+    /* 到这里就该断电了。若还在跑，说明 PMU 拒绝关断；
+     * 此时 console 已断电，无法再打印，只能靠测电流判断（µA = 成功，mA = 失败）。 */
+    while (1) { }
+}
+
 void pm_shutdown(void)
 {
     rt_kprintf("[POWER] shutdown: enter hibernate (boot back via slide switch)\n");
+    /* ★ 11-06：把构建时间戳也打进来。前面因为"日志长得一样"误判过一次版本，
+     * 之后每条关机日志都能自证跑的是哪一版固件。 */
+    rt_kprintf("[POWER] build %s %s\n", __DATE__, __TIME__);
 
     /* ★★★ 09-18 修复：整个关机流程必须"钉住 PM、不许框架睡下去"。
      *
@@ -2255,6 +2507,41 @@ void pm_shutdown(void)
      *   ⚠️ 成功路径本函数不返回，无需 release；异常也只会停在下方 while(1)。
      *   ⚠️ 这是**必须**的，不是保险 —— 去掉它待机路径就又会被拽进 DEEP。 */
     rt_pm_request(PM_SLEEP_MODE_IDLE);
+
+    /* ★★★ 2026-11-06：关机前必须先把经典蓝牙关掉。
+     *
+     * === 实测依据（用户日志）===
+     *   [POWER] shutdown: enter hibernate (boot back via slide switch)
+     *   [CLS] auto connect #1 -> 00:e0:4c:23:99:87          ← 关机流程里 BT 还在建链！
+     *   [btapp_hf] bt_hfp_hf_connect_request
+     *   [bt_common] ACL connection request with BD: ...
+     *   [POWER] shutdown: calling HAL_PMU_EnterShutdown() ...
+     * 也就是说进 `HAL_PMU_EnterShutdown()` 时，协议栈正处在"发起连接"的中间态。
+     *
+     * === 为什么这会让关机电流变高 ===
+     * 待机路径 `power_enter_standby()` 有一整套拆除：scan off → `bt_interface_close_bt()`
+     * → 等 500ms → 断 BLE → 等 WSR 安静。**关机路径此前一条都没有**，小核(LCPU)带着
+     * 射频进关断。而 `HAL_PMU_EnterShutdown()` 末尾只是置 `PMUC_CR_HIBER_EN` 然后
+     * `while(1)` 空转 —— 一旦 PMU 因为 LCPU 仍在活动 / 有挂起唤醒源而没真正断电，
+     * CPU 就停在这个死循环里**全速跑**，电流正好是 mA 级（实测 8mA）。
+     *
+     * 做法与待机路径一致，顺序不能反：先停 page/inquiry scan（它自己会把 LCPU 拉起来），
+     * 再关栈，最后等链路真的消失（最多 1s，不无限等）。
+     * ⚠️ 先置 `g_pm_shutting_down`：否则 cls_autoconn 之类的软定时器会在关机倒计时里
+     *    再把蓝牙拉起来（就是上面那条 `[CLS] auto connect` 的由来）。 */
+    g_pm_shutting_down = 1;
+    {
+        extern void bt_interface_set_scan_mode(uint8_t scan_mode, uint8_t enable);
+        extern void bt_interface_close_bt(void);
+        extern int  bt_host_linked(void);
+
+        bt_interface_set_scan_mode(0, 0);
+        rt_thread_mdelay(100);
+        bt_interface_close_bt();
+        for (int w = 0; w < 10 && bt_host_linked(); w++)
+            rt_thread_mdelay(100);
+        rt_kprintf("[POWER] shutdown: BT closed before power-off\n");
+    }
 
 #if defined(SF32LB52X) || defined(SOC_SF32LB52X)
     /* ★★★ 09-18 关键修复：进 hibernate 前必须"停 RTC 闹钟 + 关 RTC 唤醒源"，
@@ -2446,17 +2733,40 @@ void pm_shutdown(void)
     rt_kprintf("[POWER] shutdown step5: prep done, irq disable + LDO2/1V8 off next\n");
 #endif
 
+    /* ★ 11-06 诊断：关机前把"系统时钟源 + HXT48 是否就绪"打出来。
+     * SDK 原版只在 src==HRC48 时去 EnableXT48，而那次等待**没有超时**。
+     * 若这里显示 src=0(HRC48)、RDY=0，就说明原版必然卡死在那儿（=历史 8mA 的直接证据）。 */
+    rt_kprintf("[POWER] shutdown: sysclk src=%d (0=HRC48 1=HXT48), HXT48_RDY=%d\n",
+               (int)HAL_RCC_HCPU_GetClockSrc(RCC_CLK_MOD_SYS),
+               (int)((hwp_hpsys_aon->ACR & HPSYS_AON_ACR_HXT48_RDY) ? 1 : 0));
+
+    /* ★★★ 11-06：**LCPU 唤醒必须在关中断之前做**。
+     * 踩过的坑：上一版把这段（以及它的打印）放在 `rt_hw_interrupt_disable()` 之后，
+     * 而关中断后 console 只有一条打印预算（09-18 教训）—— 第二条 rt_kprintf 会卡在
+     * TX 上空转，**反而制造出一个假的"卡住"**，把真正的问题挡得更死。
+     * 唤醒本身不需要关中断，挪到这里既安全又能把结果可靠打出来。 */
+    {
+        extern int pm_wake_lcpu_bounded(void);
+        int lcpu_ok = pm_wake_lcpu_bounded();
+        /* WER = 唤醒使能寄存器。bsp_init 里 HAL_PMU_SetWdt(hwp_wdt2) 会把 WDT2 位
+         * 置起来 —— 看门狗被登记成 PMU 唤醒源。若它还亮着，PMU 可能因此拒绝关断。 */
+        rt_kprintf("[POWER] shutdown: LCPU acked=%d, WER=0x%x\n",
+                   lcpu_ok, (unsigned)hwp_pmuc->WER);
+    }
+
     rt_hw_interrupt_disable();
 
-    /* 关外设 LDO 省电 */
-    HAL_PMU_ConfigPeriLdo(PMUC_PERI_LDO_EN_VDD33_LDO2_Pos, false, false);
-    HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO_1V8, false, false);
+    /* ★★★ 11-06：**不要在这里关 LDO2 / 1V8**。
+     * SDK `HAL_PMU_EnterShutdown()` 的顺序是：先 `HAL_RCC_Reset_and_Halt_LCPU(1)`
+     * **再** `HAL_PMU_ConfigPeriLdo(PMU_PERI_LDO2_3V3, 0, 1)`。
+     * 我们原来是反的（先关 LDO2/1V8，再去碰 LPSYS 寄存器）——实测就卡死在
+     * `pm_halt_lcpu_bounded()` 里连 `power-off now` 都打不出来：
+     * LPSYS 域一旦没电，访问 `hwp_lpsys_rcc` / `hwp_lpsys_aon` 会挂住 AHB 总线。
+     * ⇒ 停机必须在断电之前。LDO 的关闭挪进 pm_enter_shutdown_bounded()。
+     */
 
-    /* ★09-18 诊断：本行出现即证明整个关机流程**未被 PM 拽进 DEEP**、一气呵成。
-     * 判读：若 "shutdown: enter hibernate" 之后**没有**本行（而是直接 [pm]S:3），
-     *       说明 3s 延期内框架又睡了 —— 即 rt_pm_request(IDLE) 没生效或被提前释放。
-     * 定位完成后本行可删。 */
-    rt_kprintf("[POWER] shutdown: calling HAL_PMU_EnterShutdown() (RC10K path) ...\n");
+    /* ⚠️ 这条打印已移进 pm_enter_shutdown_bounded()、放在停机之后 ——
+     * 这样它出现在哪里就能直接定位卡点（见那里的说明）。 */
 
     /* ============================================================================
      * ★★★★ 09-18:改用 `HAL_PMU_EnterShutdown()`（**不是** `HAL_PMU_EnterHibernate()`）
@@ -2489,7 +2799,12 @@ void pm_shutdown(void)
      * 使 Shutdown 内部的 LCPU 复位/停机被守卫跳过，反而不干净。
      * ⚠️ 关键前置仍需本函数上方完成：VDD33_LDO2 / LDO_1V8 关闭、LDO3 与 analog 断开、
      * 以及 LDO3 标志/硬件一致性纠正。 */
+#if PM_SHUTDOWN_BOUNDED
+    /* 自实现版：跳过 SDK 里那个无超时的 XT48 等待（低电时会把 CPU 卡死在全速空转） */
+    pm_enter_shutdown_bounded();            /* 关机；不返回 */
+#else
     HAL_PMU_EnterShutdown();                /* 关机；不返回 */
+#endif
     while (1) { }                           /* 兜底 */
 #endif
 
@@ -2592,8 +2907,10 @@ static void battery_monitor_entry(void *param)
             {
                 if (++shutdown_cnt >= BAT_SHUTDOWN_CONFIRM)
                 {
-                    rt_kprintf("[POWER] battery critically low (%d%%, %umV), shutting down\n",
-                               pct, (unsigned)mv);
+                    /* ⚠️ mv 的单位是 0.1mV（见 BAT_SHUTDOWN_MV 的注释），
+                     * 原来直接 %umV 会打 "18389mV"（实为 1838.9mV），严重误导排查。 */
+                    rt_kprintf("[POWER] battery critically low (%d%%, %u.%umV), shutting down\n",
+                               pct, (unsigned)(mv / 10), (unsigned)(mv % 10));
                     led4_set(1);
                     rt_thread_mdelay(300);
                     pm_shutdown();      /* 不返回 */
@@ -2627,6 +2944,11 @@ static void battery_monitor_entry(void *param)
 
 void power_init(void)
 {
+    /* ★ 11-06：开机打一行构建时间戳。
+     * 踩过的坑：多次排查时无法确认设备上跑的是不是刚编的固件（日志一模一样），
+     * 白白多花一轮。以后看这一行就知道。 */
+    rt_kprintf("[POWER] build %s %s\n", __DATE__, __TIME__);
+
     /* ⚠️⚠️ 必须是本函数第一件事：立刻钉住 IDLE 锁，禁止框架在开机期误进 DEEP。
      *
      * 根因（2026-07-30 定位）：SDK 的 low_power_init() 是 INIT_COMPONENT_EXPORT，
@@ -2908,3 +3230,21 @@ static int psram_dbg(int argc, char **argv)
     return 0;
 }
 MSH_CMD_EXPORT(psram_dbg, PSRAM handle diagnostics);
+
+/* ============================================================================
+ * 手动关机命令（11-06）
+ * ============================================================================
+ * 为什么需要它：此前所有关机测试都是由"电量耗尽"触发的 —— 也就是说**每次都在
+ * 电池最虚的状态下测**。低电时电池内阻大、电压塌陷，PMU 很可能没有足够能量
+ * 完成关断状态机，表现为"同一固件时好时坏"(0.2mA / 7.9mA)。
+ * 有了这条命令，就能在**满电**状态下验证关机本身是否可靠，把电量这个变量摘掉。
+ *
+ * 用法：串口里敲 `shutdown`。 */
+static int shutdown_cmd(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    rt_kprintf("[POWER] manual shutdown requested (build %s %s)\n", __DATE__, __TIME__);
+    pm_shutdown();              /* 不返回 */
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(shutdown_cmd, shutdown, manual power off (test without low battery));
