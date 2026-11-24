@@ -517,6 +517,16 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
     int battery = -1;
 
     if (m_bleProc) {
+        /* ★ 11-23: 把 worker 的 stderr 也打出来 —— 里面是"为什么判成未连接"
+         * 的现场（DEBUG: no addr resolved / from_bluetooth_address_async=None
+         * / pnp enumeration empty ...）。不收集的话，客户端只能看到一句
+         * "未连接"，客户和我们都没法判断原因。 */
+        {
+            QByteArray err = m_bleProc->readAllStandardError();
+            if (!err.trimmed().isEmpty())
+                qDebug() << "[LightMonitor] BLE status stderr:"
+                         << QString::fromUtf8(err).trimmed();
+        }
         QByteArray out = m_bleProc->readAllStandardOutput();
         QString output = QString::fromUtf8(out).trimmed();
         {   /* ★ 11-23 只在输出变化时打印（轮询每 1.5s 一次，结果通常不变） */
