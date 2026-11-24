@@ -696,11 +696,20 @@ QString KeyConfigManager::findWorkerScript()
 }
 
 /* 09-03: BLE 通道配置 worker(一次性进程: 连接 -> 读写配置 -> 断开)。
- * 与 findWorkerScript 同策略搜索(workers/ 或 appDir 平级)。 */
+ * 与 findWorkerScript 同策略搜索(workers/ 或 appDir 平级)。
+ *
+ * macOS 用独立实现 `ble_config_worker_mac.py`：原版依赖 Windows UWP 的
+ * `winrt.windows.devices.bluetooth`，macOS 上无法运行。新版走 bleak/
+ * CoreBluetooth 访问同一个 0xFF00 服务，帧格式复用 config_worker 的编解码，
+ * 命令行接口与 Windows 版一致，故此处只需换脚本名。 */
 QString KeyConfigManager::findBleConfigWorker()
 {
     QString appDir = QCoreApplication::applicationDirPath();
+#ifdef Q_OS_MACOS
+    QString scriptName = "ble_config_worker_mac.py";
+#else
     QString scriptName = "ble_config_worker.py";
+#endif
     QStringList searchPaths = {
         appDir + "/" + scriptName,
         appDir + "/workers/" + scriptName,

@@ -131,28 +131,46 @@ target_link_libraries(appVibeKeyF3Studio
     PRIVATE Qt6::Quick Qt6::Widgets Qt6::SerialPort Qt6::QuickControls2
 )
 
-# Copy runtime files to build directory
-add_custom_command(TARGET appVibeKeyF3Studio POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/workers/ota_worker.py"
-        "$<TARGET_FILE_DIR:appVibeKeyF3Studio>/ota_worker.py"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/workers/config_worker.py"
-        "$<TARGET_FILE_DIR:appVibeKeyF3Studio>/config_worker.py"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/workers/workbuddy_status.py"
-        "$<TARGET_FILE_DIR:appVibeKeyF3Studio>/workbuddy_status.py"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/workers/ble_led_worker.py"
-        "$<TARGET_FILE_DIR:appVibeKeyF3Studio>/ble_led_worker.py"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/workers/ble_config_worker.py"
-        "$<TARGET_FILE_DIR:appVibeKeyF3Studio>/ble_config_worker.py"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        "${CMAKE_SOURCE_DIR}/workers/net_worker.py"
-        "$<TARGET_FILE_DIR:appVibeKeyF3Studio>/net_worker.py"
-    VERBATIM
+# Copy runtime files to build directory.
+#
+# ⚠️ 不能用 add_custom_command(TARGET ... POST_BUILD): 它只在目标【重新链接】时
+# 触发，改 workers/*.py 后直接 `cmake --build` 不会同步，导致应用跑的是旧脚本
+# （实测: 修好 macOS 串口路径后界面仍报 FileNotFoundError）。改为独立 custom
+# target，由 add_dependencies 挂在主目标上，每次构建都执行 copy_if_different。
+set(VIBEKEY_WORKER_SCRIPTS
+    ota_worker.py
+    config_worker.py
+    workbuddy_status.py
+    ble_led_worker.py
+    ble_config_worker.py
+    net_worker.py
+    # macOS 专用实现（Windows 上无害，仅是多拷两个小文件）：
+    #   ble_config_worker_mac.py  —— BLE 0xFF00 读写配置(bleak/CoreBluetooth)
+    #   ble_status_worker_mac.py  —— BLE 连接态 + 电池
+    ble_config_worker_mac.py
+    ble_status_worker_mac.py
 )
+
+set(_worker_deps "")
+foreach(script ${VIBEKEY_WORKER_SCRIPTS})
+    list(APPEND _worker_deps "${CMAKE_SOURCE_DIR}/workers/${script}")
+endforeach()
+
+add_custom_target(appVibeKeyF3Studio_workers ALL
+    DEPENDS ${_worker_deps}
+    COMMENT "Syncing workers/*.py into app bundle"
+)
+
+foreach(script ${VIBEKEY_WORKER_SCRIPTS})
+    add_custom_command(TARGET appVibeKeyF3Studio_workers POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/workers/${script}"
+            "$<TARGET_FILE_DIR:appVibeKeyF3Studio>/${script}"
+        VERBATIM
+    )
+endforeach()
+
+add_dependencies(appVibeKeyF3Studio appVibeKeyF3Studio_workers)
 
 install(TARGETS appVibeKeyF3Studio
     BUNDLE DESTINATION .

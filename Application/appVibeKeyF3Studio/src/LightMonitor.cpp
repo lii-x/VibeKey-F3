@@ -1,12 +1,14 @@
 #include "LightMonitor.h"
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QUrl>
 #include <QDebug>
 #include "PortDetector.h"
+#include "PythonLocator.h"
 
 // 蓝牙连接判定去抖阈值：连续这么多次探测为“断开”才真正判定断开。
-#include "PythonLocator.h"
 // BLE HID 设备空闲时无线电链接会瞬时掉线、有活动时重连，ConnectionStatus 会闪；
 // 用迟滞避免 UI 反复“连接/断开”，也避免每次断开都 kill 掉常驻 BLE 进程导致灯控失效。
 static const int kBleDiscThreshold = 2;
@@ -131,7 +133,15 @@ QString LightMonitor::findWorkerScript()
 QString LightMonitor::findBleWorkerScript()
 {
     QString appDir = QCoreApplication::applicationDirPath();
+#ifdef Q_OS_MACOS
+    /* macOS 用独立实现：原版 ble_led_worker.py 依赖 Windows UWP(winrt) +
+     * PowerShell(Get-PnpDevice)，在 macOS 上必然返回 DISCONNECTED（误报）。
+     * macOS 版基于 bleak/CoreBluetooth，用 retrieveConnectedPeripheralsWithServices
+     * (0xFF00) 判定连接态 + 读 0x180F 电池，输出格式与 Windows 版一致。 */
+    QString scriptName = "ble_status_worker_mac.py";
+#else
     QString scriptName = "ble_led_worker.py";
+#endif
     QStringList searchPaths = {
         appDir + "/" + scriptName,
         appDir + "/workers/" + scriptName,
@@ -450,6 +460,17 @@ void LightMonitor::setPortName(const QString &port)
 void LightMonitor::refreshBle()
 {
     checkBleConnection();
+}
+
+void LightMonitor::openBluetoothSettings()
+{
+#ifdef Q_OS_MACOS
+    /* 实测 macOS 26：com.apple.settings.Bluetooth 会落到“通用”，
+     * com.apple.Bluetooth 才正确打开蓝牙面板（14/15 也兼容）。 */
+    QDesktopServices::openUrl(QUrl(QStringLiteral("x-apple.systempreferences:com.apple.Bluetooth")));
+#else
+    qDebug() << "[LightMonitor] openBluetoothSettings: 当前平台无需系统蓝牙设置页";
+#endif
 }
 
 /* 探测 VibeKey 蓝牙设备是否已配对/在线。通过独立的 QProcess 运行

@@ -1314,6 +1314,31 @@ ApplicationWindow {
                                         }
                                     }
                                     Loader { sourceComponent: batteryIndicator; Layout.alignment: Qt.AlignVCenter; visible: root.effectiveBatteryPercent >= 0 }
+                                    /* macOS：设备未通过 USB/蓝牙连接时，给一个直达系统蓝牙设置入口。
+                                     * macOS 的 CoreBluetooth 只暴露"系统已连接"的外设，App 无法自己配对；
+                                     * 没有这个提示时，用户只会看到"未连接"却不知去哪里配对。 */
+                                    Rectangle {
+                                        Layout.alignment: Qt.AlignVCenter
+                                        Layout.preferredWidth: 112
+                                        Layout.preferredHeight: 24
+                                        radius: 12
+                                        visible: root.isMacOS && !portDetector.deviceConnected && !lightMonitor.bleConnected
+                                        color: btHintMa.containsMouse ? "#e6f4ff" : "#f0f7ff"
+                                        border.color: "#91caff"; border.width: 1
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "蓝牙未连接？去配对"
+                                            font.pointSize: 9
+                                            color: "#1677ff"
+                                        }
+                                        MouseArea {
+                                            id: btHintMa
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: lightMonitor.openBluetoothSettings()
+                                        }
+                                    }
                                     Item { Layout.fillWidth: true }
                                     Rectangle { width: 50; height: 26; radius: 13; color: rBtnMa.pressed ? "#e6f5ec" : "transparent"; border.color: "#07c160"; border.width: 1
                                         Text { anchors.centerIn: parent; text: "读取"; font.pointSize: 10; color: "#07c160" }

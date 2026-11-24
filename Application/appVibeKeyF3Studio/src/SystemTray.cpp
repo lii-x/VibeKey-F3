@@ -3,10 +3,12 @@
 #include "AppVersion.h"
 
 #include <QGuiApplication>
+#include <QDesktopServices>
 #include <QMenu>
 #include <QAction>
 #include <QPainter>
 #include <QFont>
+#include <QUrl>
 
 SystemTray::SystemTray(QObject *parent)
     : QObject(parent)
@@ -88,6 +90,15 @@ void SystemTray::init()
     m_updateAct->setVisible(false);
     menu->addSeparator();
     auto *showAct = menu->addAction("显示主窗口");
+#ifdef Q_OS_MACOS
+    /* macOS 的 CoreBluetooth 只暴露系统已连接的外设，配对必须去系统设置；
+     * 托盘里放一个直达入口，避免用户找不到“为什么蓝牙设备没出现”。 */
+    auto *btAct = menu->addAction("蓝牙设置…");
+    connect(btAct, &QAction::triggered, this, []() {
+        QDesktopServices::openUrl(QUrl(QStringLiteral(
+            "x-apple.systempreferences:com.apple.Bluetooth")));
+    });
+#endif
     menu->addSeparator();
     auto *quitAct = menu->addAction("退出");
     m_tray->setContextMenu(menu);

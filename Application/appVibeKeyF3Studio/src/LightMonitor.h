@@ -33,6 +33,9 @@ public:
     Q_INVOKABLE void sendState(int state);
     Q_INVOKABLE void setPortName(const QString &port);
     Q_INVOKABLE void refreshBle();
+    /* macOS：打开系统“蓝牙”设置页，引导用户先把设备配对/连接。
+     * macOS 的 CoreBluetooth 只暴露系统已连接的外设，App 本身无法发起配对。 */
+    Q_INVOKABLE void openBluetoothSettings();
     /* 注入共享的设备探测器，用于蓝牙未连接时走 USB 发送 */
     void setPortDetector(PortDetector *detector);
 
