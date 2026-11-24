@@ -1045,6 +1045,47 @@ function waitForLine(timeout) {
   });
 }
 
+// ============================================================
+// 串口写入与失效自愈（11-25）
+// ------------------------------------------------------------
+// 背景：某些主机（不供电的测试台）在设备侧完全正常的情况下**不再下发 OUT 数据**，
+//       设备日志显示 out 计数停住、IN 端点空闲。
+// 关键现象：Chrome 的 writer.write() 在这种"半死管道"上**依然 resolve** ——
+//       数据进了内核缓冲就返回，页面无从知道它没真的发出去。
+// 因此页面必须自己判断"发了但没人回"，并主动重开端口（close + 重新 open），
+//       让内核丢弃旧句柄上的残留缓冲、重建管道。
+// ============================================================
+let serialFailStreak = 0;
+let serialRecovering = false;
+
+async function serialWrite(bytes) {
+  if (!port || !port.writable) throw new Error('串口不可写');
+  const w = port.writable.getWriter();
+  try {
+    await w.write(bytes);
+  } finally {
+    /* 必须 finally：write 抛异常时不释放锁，后续 getWriter() 会一直失败
+       （表现为"发不出也收不到"，且错误信息很隐蔽） */
+    try { w.releaseLock(); } catch (e) {}
+  }
+}
+
+async function serialRecover(reason) {
+  if (serialRecovering || !port) return;
+  serialRecovering = true;
+  serialFailStreak = 0;
+  log('串口疑似失效（' + reason + '），正在重开端口…', 'warn');
+  try {
+    keepReading = false;
+    try { await port.close(); } catch (e) {}
+  } catch (e) {}
+  port = null;
+  await new Promise(r => setTimeout(r, 300));
+  serialRecovering = false;
+  keepReading = true;
+  autoConnectUsb();          /* 会重新 getPorts → open → verify */
+}
+
 // 从 rxBuffer 提取一行并移除
 function extractLine() {
   const idx = rxBuffer.indexOf(0x0A);
@@ -1074,10 +1115,8 @@ async function sendAndReceive(data, expectLen = 16, timeout = 3000) {
   // 清空接收缓冲区
   rxBuffer = new Uint8Array(0);
 
-  // 发送
-  writer = port.writable.getWriter();
-  await writer.write(data);
-  writer.releaseLock();
+  // 发送（11-25: 走 serialWrite，异常也必定释放锁）
+  await serialWrite(data);
   log('→ 发送: ' + bytesToHex(data), 'info');
 
   // 等待响应
@@ -1101,15 +1140,16 @@ async function sendQuery() {
   try {
     rxBuffer = new Uint8Array(0);
     const q = buildHeader(CMD_QUERY, 0, 0);
-    writer = port.writable.getWriter();
-    await writer.write(q);
-    writer.releaseLock();
+    await serialWrite(q);                 /* 11-25: 统一写入，异常必定释放锁 */
     log('→ 查询设备信息: ' + bytesToHex(q), 'info');
     const got = await waitForLine(1500);
     if (!got) {
       log('设备未响应信息查询', 'warn');
+      serialFailStreak++;                 /* 连续无响应 → 交给看门狗重开端口 */
+      if (serialFailStreak >= 3) serialRecover('信息查询连续无响应');
       return null;
     }
+    serialFailStreak = 0;
     const line = extractLine();
     log('← 设备信息: ' + line, 'success');
     return parseDeviceInfo(line);
@@ -1269,9 +1309,7 @@ function parseKeyBlock(dv, off) {
 async function sendRaw(data) {
   if (!port || !port.writable) throw new Error('设备未连接');
   rxBuffer = new Uint8Array(0);
-  writer = port.writable.getWriter();
-  await writer.write(data);
-  writer.releaseLock();
+  await serialWrite(data);        /* 11-25: 唯一写入口，异常必释放锁 */
   log('→ 发送: ' + bytesToHex(data), 'info');
 }
 
@@ -1303,7 +1341,12 @@ async function readConfig() {
     const resp = rxBuffer.slice();
     rxBuffer = new Uint8Array(0);
 
-    if (resp.length < 8) throw new Error('响应太短 (' + resp.length + ' 字节)');
+    if (resp.length < 8) {
+      /* 11-25: 空响应也算一次失效，连续 3 次交给自愈（见 serialRecover） */
+      serialFailStreak++;
+      if (serialFailStreak >= 3) serialRecover('读取配置无响应');
+      throw new Error('响应太短 (' + resp.length + ' 字节)');
+    }
 
     const dv = new DataView(resp.buffer, resp.byteOffset, resp.byteLength);
     const magic = dv.getUint32(0, true);
