@@ -2500,6 +2500,7 @@ window.addEventListener('load', () => {
   updateOtaUI();
   updateOtaControls();
   log('VibeKey-F3 已就绪 (C/L/EC 三手势 · 摇一摇 · 空中鼠标 · 槽位 · 休眠 · LED · OTA)', 'success');
+  log('[自愈] 串口断线自动重连已启用 (build 1125-2)', 'info');
   if (!('serial' in navigator)) {
     log('警告: 当前浏览器不支持 Web Serial API', 'error');
     toast('请使用 Chrome 或 Edge 浏览器', 'error');
@@ -2513,6 +2514,17 @@ window.addEventListener('load', () => {
   }
   // 08-31: 周期轮询设备信息(电量/槽位同步)
   setInterval(pollDeviceInfo, 5000);
+
+  /* ★★ 11-25 周期性"确保连接"（对齐客户端行为）。
+   * 客户端（Qt/pyserial）是**短连接 + 不断重试打开端口**：每次配置操作
+   * 开→写→读→关，失败就再试。网页端原来只在页面加载和 USB 插拔事件时尝试，
+   * 一旦读取循环报错把 port 置空，而设备在系统层面并没有断开（不会触发
+   * connect 事件），页面就永久停在"设备未连接"——自愈计数也永远到不了 3。
+   * 这里每 3 秒兜底重连一次，等价于客户端的重试 */
+  setInterval(() => {
+    if (!port && !isBusy && !otaTransferring && !capturingPath && !serialRecovering)
+      autoConnectUsb();
+  }, 3000);
 });
 
 
