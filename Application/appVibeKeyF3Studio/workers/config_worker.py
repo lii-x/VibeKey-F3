@@ -53,7 +53,8 @@ SHAKE_OFF, SHAKE_ON = 0, 1
 #   兼容性: 旧固件 READ 仍回 304B、WRITE 按阈值 data_len>= 逐段判定, 多出的 18B
 #   尾部被忽略(不污染 flash) -> 新字段读回"缺失" -> 回落默认(滚轮上/下);
 #   旧上位机短 payload 写入时固件保留按压滚动现值(双向兼容)。
-CFG_READ_LEN_NEW = 324   # 10-04: 追加 EC 按压滚动两键, sizeof 304->324
+CFG_READ_LEN_NEW = 332   # 11-24: 再加蓝牙开关字节 + 3B 对齐, sizeof 328->332
+CFG_READ_LEN_1031 = 324   # 兼容: 无 hid_transport 的固件(10-04~11-23)
 CFG_READ_LEN_OLD = 40
 CFG_WRITE_LEN_NEW = 315   # 10-04: payload 297->315(+2x9B EC 按压滚动上/下)
 
@@ -533,6 +534,28 @@ def build_write_payload(config):
         else:
             payload += struct.pack("BBBBBBBBB", 0xFF, 0xFF, 0xFF,
                                    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF)
+
+    # ★ 11-24 HID 通道（每槽）：payload[315]，紧跟 EC 按压滚动[297..314]。
+    # 0=BLE HID，1=经典 HID；缺字段/非法 -> 0xFF = 设备保持 flash 现值（旧固件也忽略）。
+    ht = config.get("hid_transport", 0xFF)
+    try:
+        ht = int(ht)
+    except Exception:
+        ht = 0xFF
+    if ht not in (0, 1):
+        ht = 0xFF
+    payload += struct.pack("B", ht)
+
+    # ★ 11-24 蓝牙开关（每槽）：payload[316]，bit0=经典 bit1=BLE。
+    # 缺字段/非法 -> 0xFF = 设备保持现值（旧固件也忽略）。
+    bf = config.get("bt_en_flags", 0xFF)
+    try:
+        bf = int(bf)
+    except Exception:
+        bf = 0xFF
+    if bf < 0 or bf > 3:
+        bf = 0xFF
+    payload += struct.pack("B", bf)
     return payload
 
 
@@ -686,8 +709,18 @@ def parse_read_response(resp):
     ep.update(eges)
     ep.update(etap)
 
+    # ★ 11-24 HID 通道：结构体偏移 324（READ 回包 324 → 328 → 332）
+    hid_transport = resp[324] if len(resp) > 324 else 1
+    if hid_transport not in (0, 1):
+        hid_transport = 1          # 0xFF/越界 -> 经典，与旧固件行为一致
+    # ★ 11-24 蓝牙开关：偏移 328，bit0=经典 bit1=BLE；缺省/非法 -> 3(都开)
+    bt_en_flags = resp[328] if len(resp) > 328 else 3
+    if bt_en_flags > 3:
+        bt_en_flags = 3
     return {
         "keys": keys,
+        "hid_transport": hid_transport,
+        "bt_en_flags": bt_en_flags,
         "air_mouse_mode": AIR_MOUSE_MODE_NAMES.get(am_mode, "toggle"),
         "air_mouse_speed": AIR_MOUSE_SPEED_NAMES.get(am_speed, "medium"),
         "sleep_min": sleep_min,
@@ -824,18 +857,24 @@ def _parse_ec_press_tap(resp, off):
 
 
 def parse_info_response(text):
-    """解析 INFO 回包 "VibeKey-F3|<ver>|<bat>|<slot>\n" → dict。
+    """解析 INFO 回包 "VibeKey-F3|<ver>|<bat>|<slot>[|诊断字段...]\n" → dict。
+
+    ⚠️ 11-25 修：原来要求 **正好 4 段**。新固件在尾部追加了诊断字段
+    （|out=..,conf=..|R..|H=..），段数变成 7 ⇒ 整条解析失败 ⇒ 上位机兜底成槽1，
+    于是"蓝牙2/3 时自动读会读错槽"，并在日志里刷 WARN。
+    现在只取前 4 段，多余字段忽略（旧固件/新固件都兼容）。
     电量 255=未知; 槽位 1~3。格式不符返回 None(由调用方兜底)。"""
     parts = text.strip().split("|")
-    if len(parts) != 4:
+    if len(parts) < 4:
         return None
-    model, version, battery, slot = parts
+    model, version, battery, slot = parts[0], parts[1], parts[2], parts[3]
     try:
         battery = int(battery)
         slot = int(slot)
     except ValueError:
         return None
-    return {"model": model, "version": version, "battery": battery, "slot": slot}
+    return {"model": model, "version": version, "battery": battery, "slot": slot,
+            "extra": parts[4:]}      # 诊断字段留着，暂不使用
 
 
 def conf_read(port, slot=0):

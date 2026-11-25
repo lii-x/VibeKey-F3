@@ -32,6 +32,10 @@ class KeyConfigManager : public QObject
     Q_PROPERTY(int slot READ slot NOTIFY slotChanged)
     /* 08-27: 连接态空闲休眠时间(分钟)。0=永不; 档位 45/60/90/120/180 */
     Q_PROPERTY(int sleepMin READ sleepMin NOTIFY sleepMinChanged)
+    /* 11-24: HID 传输通道（每槽独立）0=BLE 1=经典，默认经典(与旧固件一致) */
+    Q_PROPERTY(int hidTransport READ hidTransport NOTIFY hidTransportChanged)
+    /* 11-24: 蓝牙开关（每槽独立）bit0=经典 bit1=BLE，默认 3(都开) */
+    Q_PROPERTY(int btEnFlags READ btEnFlags NOTIFY btEnFlagsChanged)
     /* 08-31: 配置是否已读取（QML 绑定用，避免只依赖 configReadComplete 信号时机） */
     Q_PROPERTY(bool configRead READ configRead NOTIFY configReadChanged)
     /* 09-03: 摇一摇(晃动设备触发快捷键)。shakeEnabled 0=关/1=开; shakeSens
@@ -76,6 +80,8 @@ public:
     int airMouseSpeed() const { return m_airMouseSpeed; }
     int slot() const { return m_slot; }
     int sleepMin() const { return m_sleepMin; }
+    int hidTransport() const { return m_hidTransport; }
+    int btEnFlags() const { return m_btEnFlags; }
     bool configRead() const { return m_configRead; }
     int shakeEnabled() const { return m_shakeEnabled; }
     int shakeSens() const { return m_shakeSens; }
@@ -107,6 +113,8 @@ public:
     Q_INVOKABLE void setSlot(int slot);
     /* 08-27: 设置休眠时间(分钟)。0=永不; 档位 45/60/90/120/180 */
     Q_INVOKABLE void setSleepMin(int minutes);
+    Q_INVOKABLE void setHidTransport(int transport);
+    Q_INVOKABLE void setBtEnabled(int classicOn, int bleOn);
     /* 09-07: C 键三手势 —— gesture 0=单击(tap) 1=双击(dbl) 2=长按(lng),
      * 分别读写 action/dbl_action/lng_action 及 modifier/keycode 字段 */
     Q_INVOKABLE void setKeyAction(int keyIndex, int gesture, const QString &action);
@@ -215,6 +223,8 @@ signals:
     void airMouseSpeedChanged();
     void slotChanged();
     void sleepMinChanged();
+    void hidTransportChanged();
+    void btEnFlagsChanged();
     /* 09-03: 摇一摇任意一项变化(开关/灵敏度/快捷键), QML 只读绑定此信号刷新 */
     void shakeChanged();
     /* 09-05: L2/L3 侧键快捷键变化 */
@@ -300,6 +310,8 @@ private:
     int m_airMouseSpeed;
     int m_slot;                 /* 08-27: 当前编辑槽位 0~2 */
     int m_sleepMin;             /* 08-27: 休眠分钟(0=永不), 默认 45 */
+    int m_hidTransport = 1;     /* 11-24: 0=BLE HID, 1=经典 HID（默认经典） */
+    int m_btEnFlags = 3;        /* 11-24: bit0=经典 bit1=BLE（默认都开） */
     bool m_autoReadDone;        /* 08-31: 本轮连接是否已自动读过一次配置(断开时复位) */
     /* ★ 10-04: 启动"无响应"修复 —— 自动读推迟到常驻 serve READY 之后。
      * 见 onLightChannelChanged() 的注释。等待期间靠 onBleServeReady() 唤醒，

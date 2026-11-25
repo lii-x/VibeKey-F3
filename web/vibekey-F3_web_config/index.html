@@ -1023,6 +1023,21 @@ function waitForLine(timeout) {
 let serialFailStreak = 0;
 let serialRecovering = false;
 
+/* ★ 11-25 实验：短连接模式（URL 加 ?shortconn=1 开启）
+ * 依据：客户端（Qt/pyserial）每次操作都"打开→写→读→关闭"，稳定；
+ * 网页端长期占用端口，在部分主机上几次交互后 OUT 就彻底停（设备侧无任何事件）。
+ * 开启后每次查询结束都关闭并立即重开端口，模拟客户端的短连接行为。 */
+const SHORT_CONN = (typeof location !== 'undefined')
+  && new URLSearchParams(location.search).has('shortconn');
+
+async function shortConnCycle() {
+  if (!SHORT_CONN || !port) return;
+  try { try { await port.close(); } catch (e) {} } catch (e) {}
+  port = null;
+  await new Promise(r => setTimeout(r, 30));
+  await autoConnectUsb();
+}
+
 async function serialWrite(bytes) {
   if (!port || !port.writable) throw new Error('串口不可写');
   const w = port.writable.getWriter();
@@ -1117,7 +1132,9 @@ async function sendQuery() {
     serialFailStreak = 0;
     const line = extractLine();
     log('← 设备信息: ' + line, 'success');
-    return parseDeviceInfo(line);
+    const info = parseDeviceInfo(line);
+    if (SHORT_CONN) await shortConnCycle();   /* 11-25 实验：短连接 */
+    return info;
   } catch (e) {
     log('设备信息查询失败: ' + e.message, 'warn');
     return null;

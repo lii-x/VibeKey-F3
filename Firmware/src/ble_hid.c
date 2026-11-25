@@ -10,6 +10,7 @@
 #include "att.h"
 
 #include "ble_hid.h"
+#include "key_config.h"
 #include "ble_led_service.h"
 #define LOG_TAG "ble_hid"
 #include "ulog.h"
@@ -275,6 +276,9 @@ static void kb_held_dump(const char *tag)
 
 static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len)
 {
+    /* ★ 11-24 按槽位选择 HID 通道：经典(默认) / BLE。见 key_config.h 说明。 */
+    extern uint8_t key_config_hid_transport(void);
+    if (key_config_hid_transport() == KEY_CONFIG_HID_CLASSIC) {
     /* ★ 10-31 经典 HID 路由: 经典 ACL 在就优先走经典。
      * 原因: SCO(语音)期间 BLE 空口被饿死, 报告提交成功(tx rsp=0)但主机收不到;
      *       经典 ACL 与 SCO 同一套时隙调度, 不受影响。
@@ -296,6 +300,7 @@ static void ble_hid_keyboard_send(uint8_t modifier, uint8_t *keys, uint8_t len)
         classic_hid_send_keyboard(modifier, keys, len);
         return;
     }
+    }   /* end: classic transport branch */
     if (!g_hid_env.is_connected || !g_hid_env.kb_ntf_enabled) {
 #if KB_TX_LOG
         /* 被丢弃也要留痕: 否则"没发出去"和"发了没回执"在日志上完全一样 */
@@ -433,12 +438,15 @@ void ble_hid_flush_pending(void)
 
 static void ble_hid_mouse_send(int8_t dx, int8_t dy, uint8_t buttons)
 {
+    extern uint8_t key_config_hid_transport(void);
+    if (key_config_hid_transport() == KEY_CONFIG_HID_CLASSIC) {
     /* ★ 10-31 鼠标也走经典：复合描述符已包含鼠标(Report ID 3) */
     {
         extern void classic_hid_send_mouse(unsigned char, short, short, signed char);
         classic_hid_send_mouse(buttons, dx, dy, 0);
         return;
     }
+    }   /* end: classic transport branch */
     if (!g_hid_env.is_connected) return;
     if (!g_hid_env.ms_ntf_enabled) {
         rt_kprintf("[BLE HID] MS send skipped (ntf=0)\n");
@@ -487,12 +495,15 @@ void ble_hid_mouse_button(uint8_t button)
 static void ble_hid_mouse_scroll(int8_t wheel)
 {
     rt_kprintf("[MS] wheel=%d\n", wheel);   /* 诊断(10-31): 滚轮事件是否到达 */
+    extern uint8_t key_config_hid_transport(void);
+    if (key_config_hid_transport() == KEY_CONFIG_HID_CLASSIC) {
     /* ★ 10-31 滚轮也走经典 */
     {
         extern void classic_hid_send_mouse(unsigned char, short, short, signed char);
         classic_hid_send_mouse(0, 0, 0, wheel);
         return;
     }
+    }   /* end: classic transport branch */
     if (!g_hid_env.is_connected || !g_hid_env.ms_ntf_enabled) return;
     ble_hid_wait_tx_pkt();   /* 通话中 TX 池易满: 等归还再发, 防静默丢包 */
     uint8_t report[5] = {0, 0, 0, 0, (uint8_t)wheel};

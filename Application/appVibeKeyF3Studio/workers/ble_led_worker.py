@@ -624,7 +624,13 @@ async def serve():
         await asyncio.sleep(2.0)
 
     def _close_and_exit(code):
-        """干净释放 BLE 设备再退出 —— 强杀进程会留半开句柄污染后续发现(09-03)。"""
+        """干净释放 BLE 设备再退出 —— 强杀进程会留半开句柄污染后续发现(09-03)。
+
+        ⚠️ 11-25 修：本函数既读 g_ble_dev 又给它赋 None，Python 会把它当成**局部变量**，
+        读取时就抛 UnboundLocalError（实测：LED 服务找不到 → 崩溃信息被这个
+        UnboundLocalError 盖住，真正的 "LED service not found" 反而被淹没）。
+        必须显式 global。"""
+        global g_ble_dev
         dev = g_ble_dev
         if dev is not None:
             try:

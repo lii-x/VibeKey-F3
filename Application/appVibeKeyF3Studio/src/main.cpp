@@ -1,4 +1,10 @@
 #include <QApplication>
+#include <QFile>
+#include <QDir>
+#include <QDateTime>
+#include <QMutex>
+#include <cstdio>
+#include <cstdlib>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickWindow>
@@ -14,9 +20,46 @@
 #include "ReleasesModel.h"
 #include "AppUpdater.h"
 
+/* ★ 11-24 崩溃/断言落盘。
+ * 背景: Debug 版 abort() 时，Qt Creator 的"应用程序输出"经常被截断，命令行又会丢，
+ * 结果只知道崩了、不知道崩在哪。这里接管消息处理器：所有 qDebug/qWarning/qFatal
+ * 都写进 %TEMP%/vibekey_studio.log。**qFatal 仍然要 abort**（不 abort 会带着
+ * 半初始化状态继续跑，比崩更危险）。 */
+static void vkMsgHandler(QtMsgType type, const QMessageLogContext &ctx, const QString &msg)
+{
+    static QMutex mtx;
+    QMutexLocker lock(&mtx);
+
+    const char *lvl = (type == QtFatalMsg)   ? "FATAL"
+                    : (type == QtWarningMsg) ? "WARN "
+                    : (type == QtCriticalMsg)? "CRIT "
+                    :                          "INFO ";
+
+    QFile f(QDir::tempPath() + "/vibekey_studio.log");
+    if (f.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        QString line = QString("[%1] %2 %3:%4  %5\n")
+                .arg(QDateTime::currentDateTime().toString("HH:mm:ss.zzz"))
+                .arg(QString::fromLatin1(lvl))
+                .arg(ctx.file ? QString::fromUtf8(ctx.file) : QStringLiteral("-"))
+                .arg(ctx.line)
+                .arg(msg);
+        f.write(line.toUtf8());
+        f.flush();
+    }
+
+    /* 控制台照旧输出（Qt Creator 里还能看） */
+    fprintf(stderr, "%s\n", msg.toLocal8Bit().constData());
+    fflush(stderr);
+
+    if (type == QtFatalMsg)
+        abort();
+}
+
 int main(int argc, char *argv[])
 {
     // 使用 QApplication（而非 QGuiApplication），因为系统托盘右键菜单用到了 QWidget（QMenu）
+    qInstallMessageHandler(vkMsgHandler);
+
     QApplication app(argc, argv);
 
     // 强制使用非 native 风格（Fusion）。本工程大量自定义了 Slider/ProgressBar 等控件的
