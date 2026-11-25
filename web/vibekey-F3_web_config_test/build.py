@@ -32,6 +32,7 @@ for ph, fn in repl.items():
 import re as _re
 _css_dir = os.path.join(WS, "css")
 for _href in _re.findall(r'<link rel="stylesheet" href="css/([^"]+)">', html):
+    _href = _href.split("?")[0]      # 去掉 ?v= 缓存参数再校验文件是否存在
     _p = os.path.join(_css_dir, _href)
     if not os.path.exists(_p) or os.path.getsize(_p) == 0:
         raise SystemExit("FATAL: index.html 引用了不存在或为空的 CSS -> " + _href)
