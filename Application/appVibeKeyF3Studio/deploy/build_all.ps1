@@ -108,12 +108,58 @@ function Resolve-SdkBin {
     return ""
 }
 
+# Windows SDK 的库目录（um/ucrt）。
+# vcvarsall 只认标准安装位置，SDK 在 D 盘时不会挂 LIB —— 链接阶段就会报
+# `LNK1181: 无法打开输入文件 user32.lib`（实测）。
+function Resolve-SdkLib([string]$sdkBin) {
+    if (-not $sdkBin) { return "" }
+    # sdkBin 形如 D://Windows Kits\10\bin\10.0.22621.0\x64
+    $ver = Split-Path $sdkBin -Parent | Split-Path -Leaf      # 10.0.22621.0
+    # sdkBin = <root>\bin\<ver>\x64 ⇒ 连上三层才到 <root>（D://Windows Kits\10）
+    $root = Split-Path (Split-Path (Split-Path $sdkBin -Parent) -Parent) -Parent
+    $um   = Join-Path $root "Lib\$ver\um\x64"
+    $ucrt = Join-Path $root "Lib\$ver\ucrt\x64"
+    if ((Test-Path $um) -and (Test-Path $ucrt)) { return "$um;$ucrt" }
+    return ""
+}
+
+# Windows SDK 的 include 目录（ucrt/shared/um）。
+# 与 Lib 同理：SDK 不在标准位置时 vcvarsall 不会挂 INCLUDE，
+# 编译阶段就会报 C1083 找不到 stddef.h。
+function Resolve-SdkInc([string]$sdkBin) {
+    if (-not $sdkBin) { return "" }
+    $ver  = Split-Path $sdkBin -Parent | Split-Path -Leaf
+    $root = Split-Path (Split-Path (Split-Path $sdkBin -Parent) -Parent) -Parent
+    $inc  = Join-Path $root "Include\$ver"
+    $ucrt = Join-Path $inc "ucrt"
+    if (Test-Path $ucrt) { return "$ucrt;$inc\shared;$inc\um" }
+    return ""
+}
+
 # 在 cmd 里跑：加载 vcvars -> 补 SDK -> 执行命令
 # 用 cmd /v:on 延迟展开 !PATH!（执行期才展开，含 vcvarsall 加上的 nmake/cl.exe）。
 # 关键修复：原先的 `set Path=%PATH%` 会在 cmd 解析整行时就展开，把 vcvarsall
 # 刚加上的 nmake/cl.exe 抹掉，导致 cmake 探测 `nmake -?` 失败。
 function Invoke-WithMSVC([string]$vcvars, [string]$sdkBin, [string]$cmdTail) {
-    cmd /v:on /c "call `"$vcvars`" x64 && set PATH=$sdkBin;!PATH! && $cmdTail"
+    $sdkLib = Resolve-SdkLib $sdkBin
+    # ★ 11-25 显式指定资源编译器路径。
+    # 现象：CMake 报 `Could not find compiler set in environment variable RC: 0.`
+    # 原因：本机环境里 RC 被别的东西污染成 "0"（VS/SDK 都装在非标准盘符，
+    #       vcvarsall 没有把它改回来），而 CMake 用 RC 环境变量定位 rc.exe。
+    # 处理：不管环境里是什么，都在调用 cmake 之前把它钉成 SDK 里的真实路径；
+    #       找不到时退回 "rc.exe"（依赖下面补的 PATH）。
+    $rcExe = if ($sdkBin -and (Test-Path (Join-Path $sdkBin "rc.exe"))) {
+        (Join-Path $sdkBin "rc.exe")
+    } else { "rc.exe" }
+    # LIB 必须**显式拼全**，不能只追加。
+    # 实测：本机 vcvarsall 没把 LIB 配好 —— 先是缺 SDK 的 user32.lib，
+    # 补了 SDK 又缺 MSVC 自己的 msvcprt.lib。干脆两段都自己写：
+    #   ① MSVC 运行时库（VCToolsInstallDir 由 vcvarsall 提供）
+    #   ② Windows SDK 的 um / ucrt
+    $libPrefix = if ($sdkLib) { $sdkLib + ";" } else { "" }
+    $sdkInc    = Resolve-SdkInc $sdkBin
+    $incPrefix = if ($sdkInc) { $sdkInc + ";" } else { "" }
+    cmd /v:on /c "call `"$vcvars`" x64 && set RC=$rcExe && set PATH=$sdkBin;!PATH! && set LIB=!VCToolsInstallDir!lib\x64;$libPrefix!LIB! && set INCLUDE=!VCToolsInstallDir!include;$incPrefix!INCLUDE! && $cmdTail"
 }
 
 # 找现成的 Release exe（跳过 Debug —— Debug 需要 VS debug CRT，干净 PC 上跑不起来）

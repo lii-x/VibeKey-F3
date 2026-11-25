@@ -192,8 +192,12 @@ static int qtKeyToHid(int key)
     return -1;
 }
 
-#ifndef Q_OS_WIN
-/* ================= macOS/Linux 快捷键捕获(Qt 事件过滤) =================
+/* ================= 快捷键捕获(Qt 事件过滤) ================
+ * ★ 11-25 修：本段原本被 #ifndef Q_OS_WIN 整体包住，但 eventFilter /
+ * onPlatformKeyEvent 在头文件里是**无条件声明**的（且 onPlatformKeyEvent 是
+ * moc 会引用的槽），Windows 下就变成"有声明无定义" ⇒ LNK2019/LNK2001。
+ * 这两个函数体本身与平台无关（mac 专有部分自有 #ifdef Q_OS_MACOS 保护），
+ * 因此取消平台限制，全平台编译；Windows 侧不装事件过滤器，仍走全局钩子。
  * Windows 用 WH_KEYBOARD_LL 全局钩子捕获任意前台窗口按键; macOS 没有免权限的
  * 等价机制(CGEventTap 需辅助功能授权, 且会被 TCC 拦), 所以改用应用级事件过滤:
  * VibeKey 是标准 HID 键盘, 按键会作为普通 QKeyEvent 进入本应用。
@@ -398,7 +402,6 @@ void KeyConfigManager::onPlatformModGraceExpired()
     finishCapture(bits, 0);
 }
 #endif   // Q_OS_MACOS
-#endif   // !Q_OS_WIN
 
 #ifdef Q_OS_WIN
 static int vkToHid(int vk)
