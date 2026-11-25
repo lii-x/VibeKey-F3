@@ -23,6 +23,24 @@ int main(int argc, char *argv[])
      * 这里设置的环境变量会被 QProcess 子进程继承（所有 worker 都生效）。 */
     qputenv("PYTHONDONTWRITEBYTECODE", "1");
 
+#ifdef Q_OS_MACOS
+    /* 内置 Python 必须自包含：忽略用户级 site-packages（~/.local/lib/pythonX.Y/）。
+     *
+     * CPython 默认把用户级 site-packages 排在 bundle 自带目录**之前**，于是用户
+     * 为别的项目装过的旧版本会劫持内置依赖。真实事故：机器 ~/.local 里残留
+     * bleak 3.0.2，而 bundle 内置的是 3.1.0；worker 里 `from bleak import
+     * BleakAdapter`（3.1 才有的 API）直接 ImportError，每个 BLE worker 都崩在
+     * stderr，C++ 侧只读到空 stdout ⇒ 界面永远"未连接"。同一份 DMG 在构建机上
+     * 正常，因为那台机器的 ~/.local 是干净的 —— 这就是"换一台 Mac 就看不到设备"
+     * 里最隐蔽的一层。
+     *
+     * 环境变量会被 QProcess 子进程继承，所有 worker 一并生效；两套架构的内置
+     * 运行时都装了 pyserial + bleak，不需要 user site 补充。
+     * 只在 macOS 设置：Windows 版允许用户用 `pip install --user` 给系统 Python
+     * 补依赖（没有内置运行时的回退路径），不能切断 user site。 */
+    qputenv("PYTHONNOUSERSITE", "1");
+#endif
+
     // 使用 QApplication（而非 QGuiApplication），因为系统托盘右键菜单用到了 QWidget（QMenu）
     QApplication app(argc, argv);
 

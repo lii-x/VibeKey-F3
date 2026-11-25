@@ -56,8 +56,18 @@ ditto "$APP" "$STAGING/$APP_NAME.app"
 ln -s /Applications "$STAGING/Applications"
 if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
     SIGN_NOTE="当前构建为 ad-hoc 签名；对外正式分发需 Developer ID 签名 + 公证。"
+    QUARANTINE_NOTE="注意（ad-hoc 签名的包才会有）：
+  从网络/AirDrop 收到的 DMG 带 com.apple.quarantine 隔离标记。App 本身
+  可以用\"右键 → 打开\"放行，但内置的 Python worker 不走这条豁免：它会被
+  Gatekeeper 挂住（进程卡在 _dyld_start 永不返回），表现为一直\"设备未连接\"。
+  装到 /Applications 后执行一次：
+
+    xattr -dr com.apple.quarantine \"/Applications/$APP_NAME.app\"
+
+  再打开 App 即可。彻底解决需要 Developer ID 签名 + 公证，届时无需用户操作。"
 else
     SIGN_NOTE="当前构建已使用 Developer ID 签名。"
+    QUARANTINE_NOTE=""
 fi
 cat > "$STAGING/安装说明.txt" <<EOF
 $APP_NAME v$VERSION
@@ -68,6 +78,8 @@ $APP_NAME v$VERSION
 首次打开：
   如果 macOS 提示“无法验证开发者”，请在 Finder 中右键 App → 打开。
   $SIGN_NOTE
+
+$QUARANTINE_NOTE
 EOF
 
 echo "==> 生成 DMG: $DMG"

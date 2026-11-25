@@ -137,7 +137,10 @@ runtime_ok() {
     local arch="$1" dir="$2"
     local py="$dir/python/bin/python3"
     [[ -x "$py" ]] || return 1
-    runtime_run "$arch" "$py" -c \
+    # -s：忽略用户级 site-packages。运行期 main.cpp 给 worker 设了
+    # PYTHONNOUSERSITE=1，校验必须用同样的隔离语义，否则构建机上残留的
+    # 旧依赖（如 ~/.local 里的 bleak 3.0.2）会掩盖 bundle 自身缺件。
+    runtime_run "$arch" "$py" -s -c \
         'import serial, bleak; from bleak import BleakAdapter' >/dev/null 2>&1
 }
 
@@ -256,6 +259,50 @@ find "$APP/Contents/MacOS" "$APP/Contents/Resources/python" \
     -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 find "$APP/Contents/MacOS" "$APP/Contents/Resources/python" \
     -type f -name '*.pyc' -delete 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# 校验 bundle 内的运行时是自包含的
+# ---------------------------------------------------------------------------
+# 这一步是"换一台 Mac 就看不到设备"事故的守门员：
+#   内置运行时的依赖必须能从 bundle 自己解析出来。CPython 默认会把
+#   用户级 site-packages(~/.local) 排在 bundle 目录之前，用户机器上残留的
+#   旧版本会劫持内置依赖（实测 bleak 3.0.2 vs 内置 3.1.0 → BleakAdapter
+#   ImportError → 所有 BLE worker 崩 → 界面永远"未连接"）。
+#   运行期已用 PYTHONNOUSERSITE=1 隔离，这里用同样的 -s 复验，并额外确认
+#   模块确实来自 bundle 内部而非任何外部路径。
+echo "==> 校验内置 Python 自包含"
+BUNDLE_REAL="$(cd "$APP" && pwd -P)"
+for arch in "${BUILD_ARCHS[@]}"; do
+    PYBIN="$APP/Contents/Resources/python/$arch/bin/python3"
+    if [[ ! -x "$PYBIN" ]]; then
+        echo "[ERROR] 缺少内置 Python: $PYBIN" >&2
+        exit 1
+    fi
+    # 注意用 realpath 比对：构建常发生在 /tmp 或符号链接目录下，
+    # 直接比字符串会把 /tmp/x 和 /private/tmp/x 判成不同。
+    if ! PROBE_OUT="$(VK_EXPECT_BUNDLE="$BUNDLE_REAL" \
+            runtime_run "$arch" "$PYBIN" -s -c '
+import os, sys
+import serial, bleak
+from bleak import BleakAdapter
+root = os.path.realpath(os.environ["VK_EXPECT_BUNDLE"])
+paths = [os.path.realpath(sys.prefix),
+         os.path.realpath(serial.__file__),
+         os.path.realpath(bleak.__file__)]
+outside = [p for p in paths if not p.startswith(root + os.sep)]
+if outside:
+    print("NOT_SELF_CONTAINED")
+    for p in paths:
+        print("  " + p)
+    raise SystemExit(1)
+print(bleak.__file__)
+' 2>&1)"; then
+        echo "[ERROR] 内置 Python $arch 不能自包含（依赖被 bundle 外路径劫持）：" >&2
+        echo "$PROBE_OUT" >&2
+        exit 1
+    fi
+    echo "    内置 Python $arch OK"
+done
 
 # ---------------------------------------------------------------------------
 # 重新签名（macdeployqt / Python 拷贝都会让原链接期签名失效）

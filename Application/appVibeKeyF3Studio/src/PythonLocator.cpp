@@ -95,13 +95,46 @@ static QString probeCode(const QStringList &requiredModules)
 }
 
 /* 用 requiredModules 实际 import 一次作为可用性判据。
- * 探测脚本走 -c 而不是临时文件：不落盘、不受 cwd 影响。 */
-static bool probe(QProcess &proc, const QString &path, const QStringList &requiredModules)
+ * 探测脚本走 -c 而不是临时文件：不落盘、不受 cwd 影响。
+ *
+ * 必带 -s（禁用用户级 site-packages）：
+ *   内置运行时的依赖必须来自 bundle 自己。若探测时不加 -s，而本机 ~/.local
+ *   里恰好有旧版依赖（实测 bleak 3.0.2 vs bundle 的 3.1.0），探测结果与
+ *   worker 实际运行环境就不一致：要么误判"内置运行时不可用"退回系统 Python，
+ *   要么反过来。二者必须用同一套隔离语义，否则构建机/用户机的结论会分叉。
+ *   这也与 main.cpp 给 worker 进程设置的 PYTHONNOUSERSITE=1 保持一致。
+ *
+ * 仅 macOS 用 -s：Windows 没有内置运行时，允许用户用 `pip install --user`
+ * 补依赖，探测必须和运行期一样看得到 user site。 */
+static QStringList probeArgs(const QStringList &requiredModules)
 {
-    proc.start(path, {"-c", probeCode(requiredModules)});
-    if (!proc.waitForFinished(2500))
+    QStringList args;
+#ifdef Q_OS_MACOS
+    args << QStringLiteral("-s");
+#endif
+    args << QStringLiteral("-c") << probeCode(requiredModules);
+    return args;
+}
+
+static bool probe(QProcess &proc, const QString &path, const QStringList &requiredModules,
+                  QString *why = nullptr)
+{
+    proc.start(path, probeArgs(requiredModules));
+    if (!proc.waitForFinished(2500)) {
+        if (why)
+            *why = QStringLiteral("超时(2.5s)");
         return false;
-    return proc.exitCode() == 0;
+    }
+    if (proc.exitCode() == 0)
+        return true;
+    if (why) {
+        /* 只取最后一行：ModuleNotFoundError / ImportError 那一行才是原因 */
+        const QStringList lines = QString::fromUtf8(proc.readAllStandardError())
+                                      .trimmed().split('\n', Qt::SkipEmptyParts);
+        *why = lines.isEmpty() ? QStringLiteral("exit=%1").arg(proc.exitCode())
+                               : lines.last().trimmed();
+    }
+    return false;
 }
 
 QString findPythonInterpreter(const QStringList &requiredModules)
@@ -119,9 +152,14 @@ QString findPythonInterpreter(const QStringList &requiredModules)
     QString startableFallback;
 
     QProcess proc;
+    QStringList failures;   /* 每个候选的失败原因，回退时一次性打出来 */
     for (const QString &path : candidates) {
-        if (!probe(proc, path, requiredModules))
+        QString why;
+        if (!probe(proc, path, requiredModules, &why)) {
+            if (!requiredModules.isEmpty() && !why.isEmpty())
+                failures << QStringLiteral("%1 -> %2").arg(path, why);
             continue;
+        }
         qDebug() << "PythonLocator: 采用" << path
                  << (requiredModules.isEmpty() ? QStringLiteral("(无依赖要求)")
                                                : QStringLiteral("(已验证 %1)").arg(requiredModules.join(",")));
@@ -143,6 +181,8 @@ QString findPythonInterpreter(const QStringList &requiredModules)
     qWarning() << "PythonLocator: 没有找到安装了" << requiredModules
                << "的解释器，回退到" << startableFallback
                << "（相关功能会失败：pip3 install" << requiredModules.join(" ") << "）";
+    for (const QString &f : failures)
+        qWarning() << "  探测失败:" << f;
     cache.insert(key, startableFallback);
     return startableFallback;
 }

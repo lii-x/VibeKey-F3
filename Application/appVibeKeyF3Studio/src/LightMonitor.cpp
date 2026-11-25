@@ -506,6 +506,12 @@ void LightMonitor::probeBleDiagnostics()
 
     m_bleProbeProc = new QProcess(this);
     connect(m_bleProbeProc, &QProcess::finished, this, &LightMonitor::onBleProbeFinished);
+    connect(m_bleProbeProc, &QProcess::readyReadStandardError, this, [this]() {
+        if (!m_bleProbeProc) return;
+        const QByteArray err = m_bleProbeProc->readAllStandardError();
+        if (!err.isEmpty())
+            qDebug() << "[LightMonitor] BLE probe stderr:" << QString::fromUtf8(err).trimmed();
+    });
 
     const QString worker = findBleWorkerScript();
     m_bleProbeProc->setWorkingDirectory(QCoreApplication::applicationDirPath());
@@ -575,6 +581,16 @@ void LightMonitor::checkBleConnection()
 
     m_bleProc = new QProcess(this);
     connect(m_bleProc, &QProcess::finished, this, &LightMonitor::onBleCheckFinished);
+    /* worker 把真正的原因（ModuleNotFoundError / 蓝牙未授权 / 适配器错误）
+     * 都打在 stderr，stdout 只剩一句 DISCONNECTED。不读 stderr 的话，界面
+     * 只显示"未连接"，日志里也查不到为什么 —— 实测过一个案例：本机
+     * ~/.local 的旧 bleak 劫持了内置版本，所有 BLE 功能静默失效。 */
+    connect(m_bleProc, &QProcess::readyReadStandardError, this, [this]() {
+        if (!m_bleProc) return;
+        const QByteArray err = m_bleProc->readAllStandardError();
+        if (!err.isEmpty())
+            qDebug() << "[LightMonitor] BLE status stderr:" << QString::fromUtf8(err).trimmed();
+    });
 
     QString worker = findBleWorkerScript();
     QString appDir = QCoreApplication::applicationDirPath();
