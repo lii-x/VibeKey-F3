@@ -137,6 +137,19 @@
           </div>
         </div>
 
+        <!-- ★ 11-25 HID 通道（对齐 Studio 左上角）
+             蓝牙开关已移除：两套协议栈固定全开、用户不可改（与固件侧一致），
+             写入时恒发 bt_en_flags=0x03。本卡片按槽独立，随「写入」下发。 -->
+        <div class="bthid-row">
+          <div class="bthid-card">
+            <div class="bthid-title">HID 通道:</div>
+            <div class="bthid-pills">
+              <button class="bthid-pill" id="hidBleBtn" onclick="setHidTransport(0)" disabled>BLE</button>
+              <button class="bthid-pill" id="hidClsBtn" onclick="setHidTransport(1)" disabled>BR/EDR</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 设备居中 + Summary 卡片环绕 (对齐 Studio; 点击卡片跳转完整编辑器) -->
         <div class="studio-layout" id="studioLayout">
           <svg class="connectors" aria-hidden="true"></svg>
