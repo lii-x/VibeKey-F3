@@ -145,16 +145,10 @@
           </div>
         </div>
 
-        <!-- ★ 11-25 蓝牙开关 / HID 通道（对齐 Studio 左上角两块卡片）
-             两块都是 **每槽独立** 的配置，随「写入」下发到当前槽位。 -->
+        <!-- ★ 11-25 HID 通道（对齐 Studio 左上角）
+             蓝牙开关已移除：两套协议栈固定全开、用户不可改（与固件侧一致），
+             写入时恒发 bt_en_flags=0x03。本卡片按槽独立，随「写入」下发。 -->
         <div class="bthid-row">
-          <div class="bthid-card">
-            <div class="bthid-title">蓝牙:</div>
-            <div class="bthid-pills">
-              <button class="bthid-pill" id="btClassicBtn" onclick="toggleBtFlag(1)" disabled>BR/EDR</button>
-              <button class="bthid-pill" id="btLeBtn" onclick="toggleBtFlag(2)" disabled>BLE</button>
-            </div>
-          </div>
           <div class="bthid-card">
             <div class="bthid-title">HID 通道:</div>
             <div class="bthid-pills">
