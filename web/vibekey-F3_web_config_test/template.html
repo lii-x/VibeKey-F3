@@ -145,6 +145,25 @@
           </div>
         </div>
 
+        <!-- ★ 11-25 蓝牙开关 / HID 通道（对齐 Studio 左上角两块卡片）
+             两块都是 **每槽独立** 的配置，随「写入」下发到当前槽位。 -->
+        <div class="bthid-row">
+          <div class="bthid-card">
+            <div class="bthid-title">蓝牙:</div>
+            <div class="bthid-pills">
+              <button class="bthid-pill" id="btClassicBtn" onclick="toggleBtFlag(1)" disabled>BR/EDR</button>
+              <button class="bthid-pill" id="btLeBtn" onclick="toggleBtFlag(2)" disabled>BLE</button>
+            </div>
+          </div>
+          <div class="bthid-card">
+            <div class="bthid-title">HID 通道:</div>
+            <div class="bthid-pills">
+              <button class="bthid-pill" id="hidBleBtn" onclick="setHidTransport(0)" disabled>BLE</button>
+              <button class="bthid-pill" id="hidClsBtn" onclick="setHidTransport(1)" disabled>BR/EDR</button>
+            </div>
+          </div>
+        </div>
+
         <!-- 设备居中 + Summary 卡片环绕 (对齐 Studio; 点击卡片跳转完整编辑器) -->
         <div class="studio-layout" id="studioLayout">
           <svg class="connectors" aria-hidden="true"></svg>

@@ -240,3 +240,40 @@
     border-color: var(--accent);
     box-shadow: 0 0 0 3px rgba(7,193,96,0.35);
   }
+
+/* ===== 11-25 蓝牙开关 / HID 通道卡片（对齐 Studio 左上角）===== */
+.bthid-row {
+  display: flex;
+  gap: 10px;
+  margin: 10px 0 6px 12px;
+}
+.bthid-card {
+  background: #fff;
+  border: 1px solid #ececec;
+  border-radius: 8px;
+  padding: 6px 10px 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.05);
+  min-width: 116px;
+}
+.bthid-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: #666;
+  margin-bottom: 4px;
+}
+.bthid-pills { display: flex; gap: 4px; }
+.bthid-pill {
+  border: 0;
+  border-radius: 9px;
+  height: 18px;
+  padding: 0 10px;
+  font-size: 11px;
+  line-height: 18px;
+  cursor: pointer;
+  background: #f4f5f4;
+  color: #555;
+  transition: background .15s, color .15s;
+}
+.bthid-pill.on { background: #07c160; color: #fff; }
+.bthid-pill.off { background: #f4f5f4; color: #999; }
+.bthid-pill:disabled { cursor: not-allowed; opacity: .6; }

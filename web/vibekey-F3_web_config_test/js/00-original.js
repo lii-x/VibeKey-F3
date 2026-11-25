@@ -289,6 +289,9 @@ let config = {
   ec_ccw_press: mkKey('EC 按压滚动下', 'keyboard', 0x30, false, 0x01),
   // ---- 诊断: 本次 READ 回包实际长度(用于判断固件新旧, 不参与写入) ----
   raw_len: 0,
+  /* 11-25: 每槽独立的蓝牙开关与 HID 通道（默认与固件兜底一致） */
+  hid_transport: 1,     /* 0=BLE 1=BR/EDR */
+  bt_en_flags: 3,       /* bit0=BR/EDR bit1=BLE */
 };
 
 // ---- 路径访问工具（'c_dbl.0' → config.c_dbl[0]）----
@@ -1031,6 +1034,15 @@ async function readConfig() {
     //   旧固件回包不到这个长度 ⇒ has() 为假 ⇒ 保持 config 里的默认值（与上位机同策略）
     if (has(313)) config.ec_cw_press  = rd(304);
     if (has(322)) config.ec_ccw_press = rd(313);
+    // ---- 11-25: HID 通道 @324, 蓝牙开关 @328（回包 332B 的新固件才有）----
+    if (has(325)) {
+        const t = dv.getUint8(324);
+        config.hid_transport = (t === 0) ? 0 : 1;
+    }
+    if (has(329)) {
+        const f = dv.getUint8(328);
+        config.bt_en_flags = (f >= 0 && f <= 3) ? f : 3;
+    }
 
     // ---- 同步头部/摇一摇的 UI 控件（键块由 renderKeys 统一渲染）----
     const _amMode = document.getElementById('airMouseMode'); if (_amMode) _amMode.value = config.air_mouse_mode;
@@ -1042,6 +1054,7 @@ async function readConfig() {
     const elShkSens = document.getElementById('shakeSens');
     if (elShkSens) elShkSens.value = String(config.shake_sens);
     updateSleepUI();
+    updateBtHidUI();
 
     renderKeys();
     log('✓ 配置读取成功 (蓝牙' + (currentSlot + 1) + ', 回包 ' + len + 'B' +
@@ -1058,6 +1071,51 @@ async function readConfig() {
   }
 }
 
+// ============================================================
+// 11-25 蓝牙开关 / HID 通道（每槽独立，随「写入」下发）
+// ============================================================
+function bthidBtns() {
+  return {
+    classic: document.getElementById('btClassicBtn'),
+    ble:     document.getElementById('btLeBtn'),
+    hidBle:  document.getElementById('hidBleBtn'),
+    hidCls:  document.getElementById('hidClsBtn'),
+  };
+}
+
+function updateBtHidUI() {
+  const b = bthidBtns();
+  if (!b.classic) return;
+  const on = (el, flag) => {
+    if (!el) return;
+    el.classList.toggle('on', flag);
+    el.classList.toggle('off', !flag);
+    el.disabled = !port;
+  };
+  on(b.classic, (config.bt_en_flags & 1) !== 0);
+  on(b.ble,     (config.bt_en_flags & 2) !== 0);
+  if (b.hidBle) { b.hidBle.classList.toggle('on', config.hid_transport === 0);
+                  b.hidBle.classList.toggle('off', config.hid_transport !== 0);
+                  b.hidBle.disabled = !port; }
+  if (b.hidCls) { b.hidCls.classList.toggle('on', config.hid_transport === 1);
+                  b.hidCls.classList.toggle('off', config.hid_transport !== 1);
+                  b.hidCls.disabled = !port; }
+}
+
+function toggleBtFlag(bit) {
+  config.bt_en_flags = (config.bt_en_flags & bit) ? (config.bt_en_flags & ~bit)
+                                                  : (config.bt_en_flags | bit);
+  updateBtHidUI();
+  log('蓝牙开关: BR/EDR=' + ((config.bt_en_flags & 1) ? '开' : '关') +
+      ' BLE=' + ((config.bt_en_flags & 2) ? '开' : '关') + '（写入后生效，重启应用）', 'info');
+}
+
+function setHidTransport(v) {
+  config.hid_transport = (v === 0) ? 0 : 1;
+  updateBtHidUI();
+  log('HID 通道: ' + (config.hid_transport === 0 ? 'BLE' : 'BR/EDR') + '（写入后立即生效）', 'info');
+}
+
 async function writeConfig() {
   if (isBusy) { toast('正在处理中...', 'info'); return; }
   isBusy = true;
@@ -1069,7 +1127,9 @@ async function writeConfig() {
     //   紧凑布局，无 padding，payload 索引 + 8 = buf 索引。
     //   固件按 data_len 分段判读 ⇒ 发全量对旧固件同样安全（超出部分被忽略），
     //   因此这里总是发满，不做版本协商。
-    const payload = new Uint8Array(315);
+    /* 11-25: 315 -> 317：尾部追加 hid_transport(315) 与 bt_en_flags(316)。
+     * 旧固件按 data_len 分段判读，多发 2 字节会被忽略，安全。 */
+    const payload = new Uint8Array(317);
     payload[0] = config.air_mouse_mode & 0xFF;
     payload[1] = config.air_mouse_speed & 0xFF;
 
@@ -1143,6 +1203,10 @@ async function writeConfig() {
     // 297..305 / 306..314: EC 按压滚动（10-05 新增，对应固件结构体 @304 / @313）
     putKeyBlock(payload, 297, config.ec_cw_press);
     putKeyBlock(payload, 306, config.ec_ccw_press);
+
+    // 315: HID 通道（0=BLE 1=BR/EDR）  316: 蓝牙开关位（bit0 经典 bit1 BLE）
+    payload[315] = config.hid_transport & 0xFF;
+    payload[316] = config.bt_en_flags & 0xFF;
 
     const header = buildHeader(CMD_WRITE, payload.length, currentSlot);
     const data = new Uint8Array(header.length + payload.length);
@@ -1226,6 +1290,8 @@ function setControlsBusy(busy) {
     b.disabled = busy || !port;
   });
   document.getElementById('sleepMin').disabled = busy || !port;
+  /* 11-25: 蓝牙/HID 两块卡片的按钮跟随连接状态 */
+  if (typeof updateBtHidUI === 'function') updateBtHidUI();
 }
 
 // ============================================================
