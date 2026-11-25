@@ -59,6 +59,32 @@ if [[ "$MODE" == "clean" ]]; then
     MODE=all
 fi
 
+# ---------------------------------------------------------------------------
+# 构建互斥：同一个 build 目录只允许一个构建在跑
+# ---------------------------------------------------------------------------
+# 两个构建并发时后果不只是"慢"——它们会互相覆盖 .app：
+#   A 在 codesign 前 B 刚 ditto 完 Python，A 签的封条和磁盘内容对不上，
+#   失败信息还极其误导（实测只报一句 "No such file or directory"）。
+# 用 mkdir 做原子锁（macOS 自带，不依赖 flock）。
+LOCK_DIR="$BUILD_DIR/.build.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    OWNER_PID="$(cat "$LOCK_DIR/pid" 2>/dev/null || echo '?')"
+    if [[ "$OWNER_PID" =~ ^[0-9]+$ ]] && kill -0 "$OWNER_PID" 2>/dev/null; then
+        cat >&2 <<EOF
+[ERROR] 已有构建在运行（PID $OWNER_PID），同一个 $BUILD_DIR 不能并发构建。
+        等它结束后重试，或先执行: kill $OWNER_PID
+        锁目录: $LOCK_DIR
+EOF
+        exit 1
+    fi
+    echo "    [warn] 发现陈旧构建锁（PID $OWNER_PID 已退出），接管"
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR"
+fi
+echo "$$" > "$LOCK_DIR/pid"
+cleanup_lock() { rm -rf "$LOCK_DIR"; }
+trap cleanup_lock EXIT INT TERM
+
 if [[ ! -d "$QT_PREFIX/lib/cmake/Qt6Quick" ]]; then
     cat >&2 <<EOF
 [ERROR] 未找到官方 Qt6: $QT_PREFIX
@@ -261,6 +287,26 @@ find "$APP/Contents/MacOS" "$APP/Contents/Resources/python" \
     -type f -name '*.pyc' -delete 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
+# 剔除运行时里与发布无关的调试/测试产物
+# ---------------------------------------------------------------------------
+# 1) PyObjC 的 wheel 自带 *.dSYM 调试符号（每个架构 24M，双架构共 48M）。
+#    它们是 Mach-O，但 string table 不在文件尾部，install_name_tool 处理
+#    bundle 内每个 Mach-O 时会逐个报错：
+#      string table not at the end of the file (can't be processed)
+#    实测一次构建刷出 2.4 万行，真正的问题被彻底淹掉；换成系统版
+#    install_name_tool（/usr/bin）报错完全相同，所以不是工具被 Anaconda 劫持。
+# 2) PyObjCTest 是 PyObjC 的自测套件（每个架构 16M），worker 从不 import。
+# 3) .DS_Store 是 Finder 残留，进包只让签名封条变脏。
+# 三者都不参与运行，删掉可省约 80M，并让 macdeployqt 日志重新可读。
+SITE_PKGS="$(find "$APP/Contents/Resources/python" -type d -name site-packages -maxdepth 6)"
+for sp in $SITE_PKGS; do
+    [[ -d "$sp" ]] || continue
+    rm -rf "$sp/PyObjCTest"
+done
+find "$APP/Contents/Resources/python" -type d -name '*.dSYM' -prune -exec rm -rf {} + 2>/dev/null || true
+find "$APP" -name '.DS_Store' -delete 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
 # 校验 bundle 内的运行时是自包含的
 # ---------------------------------------------------------------------------
 # 这一步是"换一台 Mac 就看不到设备"事故的守门员：
@@ -304,18 +350,58 @@ print(bleak.__file__)
     echo "    内置 Python $arch OK"
 done
 
+# 上面的自包含校验会真的 import serial/bleak，Python 因此写出一批 __pycache__。
+# 这些 .pyc 是在"清理 __pycache__"之后、codesign 之前生成的，会被封进签名的
+# 资源封条里；运行期一旦解释器重新生成/更新任何一个，封条立刻失效（TCC 授权
+# 也会跟着重弹）。所以校验之后必须再清一遍。
+find "$APP/Contents/Resources/python" \
+    -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+find "$APP/Contents/Resources/python" -type f -name '*.pyc' -delete 2>/dev/null || true
+find "$APP" -name '.DS_Store' -delete 2>/dev/null || true
+if [[ -n "$(find "$APP/Contents/Resources/python" -name '__pycache__' -o -name '*.pyc' \
+        -o -name '.DS_Store' 2>/dev/null | head -1)" ]]; then
+    echo "[ERROR] 签名前仍有 __pycache__/*.pyc/.DS_Store 残留" >&2
+    exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # 重新签名（macdeployqt / Python 拷贝都会让原链接期签名失效）
 # ---------------------------------------------------------------------------
 echo "==> codesign"
 xattr -cr "$APP" || true
 if [[ "$CODESIGN_IDENTITY" == "-" ]]; then
+    # ★ 11-25: ad-hoc 签名必须显式固定 identifier + designated requirement，
+    #   否则蓝牙授权（TCC）在每次重新构建后都会失效。
+    #
+    # 原因：`codesign --sign -` 默认的 designated requirement 是
+    #     designated => cdhash H"<当前二进制哈希>"
+    # 而 cdhash **每次重新构建都会变**。TCC 里存的蓝牙授权正是绑定这条 DR 的，
+    # 新构建一对不上就被当作全新请求、重新弹窗。tccd 日志实证：
+    #     Failed to match existing code requirement ... cdhash H"9dc7..."
+    #     AUTHREQ_PROMPTING: service=kTCCServiceBluetoothAlways
+    # 叠加"每 3 秒新起一个 python 进程去碰 CoreBluetooth"，就是用户看到的
+    # "关掉就马上又弹、永远点不完"（实测 6 小时 160 次弹窗，无一次成功授权）。
+    #
+    # 改成基于 identifier 的 DR 后，只要 bundle id 不变，授权就能跨重建复用：
+    #     designated => identifier "com.vibekey.f3studio"
+    # 说明：这条 DR 比 cdhash 宽松（同 identifier 的任何构建都视为同一主体），
+    # 对本地开发/自用足够；对外分发仍应使用 Developer ID + 公证。
+    BUNDLE_ID="$(plutil -extract CFBundleIdentifier raw "$APP/Contents/Info.plist")"
+    # 第一遍 --deep：给 Frameworks / PlugIns / 内置 python 等嵌套组件各自签名
     codesign --force --deep --sign - "$APP"
+    # 第二遍只签主 bundle：覆写主可执行文件的 identifier 与 DR，
+    # 且**不加 --deep**，避免把嵌套组件的 identifier 也一起改掉。
+    codesign --force --sign - \
+        --identifier "$BUNDLE_ID" \
+        -r="designated => identifier \"$BUNDLE_ID\"" \
+        "$APP"
 else
     codesign --force --deep --options runtime --timestamp \
         --sign "$CODESIGN_IDENTITY" "$APP"
 fi
 codesign --verify --deep --strict --verbose=2 "$APP"
+echo "    designated requirement:"
+codesign -d -r- "$APP" 2>&1 | tail -1 | sed 's/^/      /'
 
 # ---------------------------------------------------------------------------
 # DMG（可拖拽安装）
