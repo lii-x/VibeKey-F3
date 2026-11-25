@@ -1314,29 +1314,52 @@ ApplicationWindow {
                                         }
                                     }
                                     Loader { sourceComponent: batteryIndicator; Layout.alignment: Qt.AlignVCenter; visible: root.effectiveBatteryPercent >= 0 }
-                                    /* macOS：设备未通过 USB/蓝牙连接时，给一个直达系统蓝牙设置入口。
-                                     * macOS 的 CoreBluetooth 只暴露"系统已连接"的外设，App 无法自己配对；
-                                     * 没有这个提示时，用户只会看到"未连接"却不知去哪里配对。 */
+                                    /* macOS：设备未通过 USB/蓝牙连接时给出**针对性**引导。
+                                     *
+                                     * 光说"未连接"帮不上忙 —— 换一台没配过的 Mac 时用户根本
+                                     * 不知道是设备睡了、要去配对、还是设备槽位绑在老电脑上
+                                     * （固件白名单只放行已记录的那一个地址）。按 bleDiagnostic
+                                     * 区分三种情况：
+                                     *   found  -> 设备就在旁边广播，但系统没连：去系统设置配对，
+                                     *             若无效则说明槽位绑在别的电脑上，需在设备上按住
+                                     *             L1/L2/L3 进入配对模式（会清该槽位旧配对）。
+                                     *   absent -> 附近扫不到设备：先按键唤醒（固件广播只维持
+                                     *             60s 就进深睡），再刷新。
+                                     *   ""     -> 还没诊断过：先给一个"检查"入口。 */
                                     Rectangle {
+                                        id: btHintBtn
                                         Layout.alignment: Qt.AlignVCenter
-                                        Layout.preferredWidth: 112
+                                        Layout.preferredWidth: btHintText.implicitWidth + 18
                                         Layout.preferredHeight: 24
                                         radius: 12
                                         visible: root.isMacOS && !portDetector.deviceConnected && !lightMonitor.bleConnected
                                         color: btHintMa.containsMouse ? "#e6f4ff" : "#f0f7ff"
                                         border.color: "#91caff"; border.width: 1
                                         Text {
+                                            id: btHintText
                                             anchors.centerIn: parent
-                                            text: "蓝牙未连接？去配对"
+                                            text: {
+                                                if (lightMonitor.bleDiagnostic === "found")
+                                                    return "已发现设备，去配对 / 换槽位"
+                                                if (lightMonitor.bleDiagnostic === "absent")
+                                                    return "未发现设备：按键唤醒后再试"
+                                                return "蓝牙未连接？检查设备"
+                                            }
                                             font.pointSize: 9
-                                            color: "#1677ff"
+                                            color: lightMonitor.bleDiagnostic === "absent" ? "#d48806" : "#1677ff"
                                         }
                                         MouseArea {
                                             id: btHintMa
                                             anchors.fill: parent
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
-                                            onClicked: lightMonitor.openBluetoothSettings()
+                                            /* 点一次做两件事：先重新诊断（拿到最新结论），
+                                             * 已判定"设备在附近"时再直接把用户送到系统蓝牙面板。 */
+                                            onClicked: {
+                                                lightMonitor.probeBleDiagnostics()
+                                                if (lightMonitor.bleDiagnostic === "found")
+                                                    lightMonitor.openBluetoothSettings()
+                                            }
                                         }
                                     }
                                     Item { Layout.fillWidth: true }
@@ -1351,6 +1374,43 @@ ApplicationWindow {
                                     Rectangle { width: 50; height: 26; radius: 13; color: rstBtnMa.pressed ? "#fef0e6" : "transparent"; border.color: "#fa9d3b"; border.width: 1
                                         Text { anchors.centerIn: parent; text: "恢复"; font.pointSize: 10; color: "#fa9d3b" }
                                         MouseArea { id: rstBtnMa; anchors.fill: parent; onClicked: keyConfig.resetConfig() }
+                                    }
+                                }
+
+                                /* macOS 诊断说明条：只在"扫到设备却连不上"或"扫不到设备"时出现，
+                                 * 把下一步该按哪个键写清楚。这两条是换机场景的必要信息：
+                                 *   · 固件连接模式有白名单，只放行本槽位已记录的地址 —— 换一台
+                                 *     电脑必然连不上，必须在设备上按住 L 键进配对模式（会清该槽
+                                 *     位旧配对），这不是软件能绕过的。
+                                 *   · 固件只在开机/按键后广播 60s 就停播进深睡 —— 新电脑上打开
+                                 *     客户端时设备多半已经睡了，表现为"扫不到"。 */
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.leftMargin: 12
+                                    Layout.rightMargin: 12
+                                    Layout.bottomMargin: 6
+                                    height: btDiagText.implicitHeight + 12
+                                    radius: 6
+                                    visible: root.isMacOS && !portDetector.deviceConnected
+                                             && !lightMonitor.bleConnected
+                                             && lightMonitor.bleDiagnostic !== ""
+                                    color: lightMonitor.bleDiagnostic === "found" ? "#f0f7ff" : "#fffbe6"
+                                    border.width: 1
+                                    border.color: lightMonitor.bleDiagnostic === "found" ? "#bae0ff" : "#ffe58f"
+                                    Text {
+                                        id: btDiagText
+                                        anchors.fill: parent
+                                        anchors.margins: 6
+                                        wrapMode: Text.WordWrap
+                                        font.pointSize: 9
+                                        color: "#555"
+                                        text: lightMonitor.bleDiagnostic === "found"
+                                              ? "已扫描到 VibeKey，但系统未连接。请打开「系统设置 → 蓝牙」连接它；"
+                                                + "若列表里没有或连接失败，说明设备绑定在另一台电脑上 —— "
+                                                + "按住设备 L1/L2/L3（对应蓝牙1/2/3）开机进入配对模式（黄灯闪），"
+                                                + "再在此重新连接。"
+                                              : "附近没有扫描到 VibeKey。设备空闲 60 秒会停止广播进入休眠，"
+                                                + "请先按任意键唤醒设备（或短按开机），再点上方按钮重新检查。"
                                     }
                                 }
 

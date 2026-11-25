@@ -64,14 +64,78 @@ async def _connected_device():
 
     用 retrieveConnectedPeripheralsWithServices 而不是扫描：设备连上后停止广播，
     扫描看不到；而这条 API 正好回答"系统层面是不是真的连着"。
+
+    带 6s 硬超时：蓝牙适配器被关闭或权限未授予时，CoreBluetooth 的回调不会
+    到达，不兜超时会让每 3s 一次的 status 轮询堆积成僵尸进程。
     """
     from bleak import BleakAdapter
 
-    adapter = await BleakAdapter.get()
-    for d in await adapter.get_connected_devices([LED_SVC]):
+    async def _query():
+        adapter = await BleakAdapter.get()
+        return await adapter.get_connected_devices([LED_SVC])
+
+    try:
+        devs = await asyncio.wait_for(_query(), timeout=6.0)
+    except asyncio.TimeoutError:
+        log("get_connected_devices hard-timeout (蓝牙关闭或未授权?)")
+        return None
+
+    for d in devs:
         if "vibekey" in (d.name or "").lower() or not d.name:
             return d
     return None
+
+
+async def _scan_device(timeout=8.0):
+    """主动扫描发现【未连接】的 VibeKey（配对前/换机后就是这种状态）。
+
+    为什么必须补这一步
+    ==================
+    retrieveConnectedPeripherals 只返回"系统已经配对并连着"的外设。换一台
+    从没配过的 Mac，列表永远是空的 —— 但设备其实就在旁边开着、广播着。
+    只查已连接列表会把"看得见但没连"误报成"设备不存在"，用户完全无从下手。
+
+    固件的 0xFF00 服务是 SVC_AUTH/NO_AUTH（Firmware/src/ble_led_service.c），
+    不需要加密链路；而且广播里带 0x1812(HID)，据此可在配对前认出设备。
+
+    注意设备只在开机/按键唤醒后广播 60s 就停（ADV_GRACE_WINDOW_MS），
+    所以扫描为空并不代表"没有设备"，只代表"此刻没在广播"——UI 文案要能区分。
+    """
+    from bleak import BleakScanner
+
+    # ⚠️ 必须自己兜一层超时：没有蓝牙权限（TCC 未授权）或适配器不可用时，
+    # BleakScanner.discover(timeout=...) 的 timeout **不会生效** —— 它在等
+    # CoreBluetooth 的回调，那条回调永远不来，进程会无限挂起（实测 >2min）。
+    # C++ 侧进程不会卡死，但 UI 会一直停在旧状态，用户只觉得"点了没反应"。
+    # 这里用 asyncio.wait_for 强制到点返回，把"扫不到"当成正常结论上报。
+    try:
+        seen = await asyncio.wait_for(
+            BleakScanner.discover(timeout=timeout, return_adv=True),
+            timeout=timeout + 6.0)
+    except asyncio.TimeoutError:
+        log(f"scan hard-timeout after {timeout + 6.0:.0f}s "
+            f"(蓝牙权限未授予? 系统设置→隐私与安全性→蓝牙)")
+        return None, []
+    except Exception as e:
+        log(f"scan failed: {e}")
+        return None, []
+
+    found = []
+    for addr, (d, adv) in seen.items():
+        nm = (d.name or adv.local_name or "")
+        uuids = [u.lower() for u in (getattr(adv, "service_uuids", None) or [])]
+        is_vibekey = ("vibekey" in nm.lower()
+                      or LED_SVC in uuids
+                      or "00001812-0000-1000-8000-00805f9b34fb" in uuids)
+        if is_vibekey:
+            found.append((d, nm or "(no name)", adv.rssi))
+
+    if found:
+        d, nm, rssi = found[0]
+        log(f"found by scan: {d.address} {nm} rssi={rssi}")
+        return d, found
+    log(f"scan finished, no VibeKey advertisement (total {len(seen)} devices)")
+    return None, []
 
 
 def build_conf_frame(cmd, slot, payload=b""):
@@ -88,7 +152,14 @@ def build_rgb_frame(idx, en, r, g, b, bri):
 
 
 async def status():
-    dev = None
+    """快速连接态检查（<1s）—— 供 C++ 每 3s 轮询。
+
+        CONNECTED <battery>    系统已配对且已连接
+        DISCONNECTED           不在已连接列表（**不代表设备不在旁边**）
+
+    ⚠️ 这里刻意**不做扫描**：扫描要 8s+，塞进 3s 轮询会让探测互相堆积。
+    "设备在不在附近"由独立的 probe 子命令回答（见下）。
+    """
     try:
         dev = await _connected_device()
     except Exception as e:
@@ -113,6 +184,53 @@ async def status():
         log(f"battery read failed: {e}")
 
     out(f"CONNECTED {batt}")
+    return 0
+
+
+async def probe():
+    """深度诊断：已连接列表 + 主动扫描，回答"看不到设备到底卡在哪"。
+
+        CONNECTED <battery>          正常，直接用
+        FOUND <name> <rssi>          设备就在旁边广播，但系统没连 —— 需要配对/
+                                     换槽位（这是"换一台 Mac 就看不到"的典型态）
+        PAIRED_NOT_ADVERTISING       本机有配对记录但设备此刻不广播（已进深睡）
+        DISCONNECTED                 附近没有设备在广播（没开机 / 按键唤醒一下）
+
+    只在"已确认连不上"时才跑（C++ 侧低频触发或用户点刷新），不要进 3s 轮询。
+    """
+    try:
+        dev = await _connected_device()
+    except Exception as e:
+        log(f"adapter error: {e}")
+        dev = None
+
+    if dev is not None:
+        batt = -1
+        try:
+            from bleak import BleakClient
+            async with BleakClient(dev, timeout=15.0) as c:
+                if c.services.get_characteristic(BATT_CHAR) is not None:
+                    raw = await c.read_gatt_char(BATT_CHAR)
+                    if raw:
+                        batt = int(raw[0])
+        except Exception as e:
+            log(f"battery read failed: {e}")
+        out(f"CONNECTED {batt}")
+        return 0
+
+    dev2, found = await _scan_device()
+    if dev2 is not None:
+        _, nm, rssi = found[0]
+        safe = (nm or "VibeKey").replace(" ", "_")
+        out(f"FOUND {safe} {rssi}")
+        return 0
+
+    # 扫描为空 = 设备此刻没在广播。两种可能无法用 bleak 区分
+    # （3.1 的 BleakAdapter 只有 get_connected_devices，没有枚举已配对设备的 API）：
+    #   ① 设备睡着了（固件广播宽限 60s 后停播进深睡）→ 按键唤醒即可
+    #   ② 从没在本机配对过
+    # 两者对用户的动作都是"先按键唤醒设备、再试"，所以合并上报。
+    out("DISCONNECTED")
     return 0
 
 
@@ -256,12 +374,14 @@ async def serve():
 
 def main():
     if len(sys.argv) < 2:
-        out("Usage: ble_status_worker_mac.py status|serve")
+        out("Usage: ble_status_worker_mac.py status|probe|serve")
         return 1
     cmd = sys.argv[1]
     try:
         if cmd == "status":
             return asyncio.run(status())
+        if cmd == "probe":
+            return asyncio.run(probe())
         if cmd == "serve":
             return asyncio.run(serve())
     except Exception as e:

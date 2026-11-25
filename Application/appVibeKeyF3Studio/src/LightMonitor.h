@@ -18,6 +18,12 @@ class LightMonitor : public QObject
     Q_PROPERTY(QString channel READ channel NOTIFY channelChanged)
     /* 蓝牙连接时通过 BLE Battery Service 读到的电量；<0 表示未知/未读成功 */
     Q_PROPERTY(int bleBatteryPercent READ bleBatteryPercent NOTIFY bleBatteryPercentChanged)
+    /* ★ 蓝牙诊断状态 —— 回答"看不到设备到底卡在哪"，用于给出**针对性**引导。
+     *   空串     = 未知（还没探测过 / 非 macOS）
+     *   "found"  = 设备正在广播但系统没连 -> 多半没配对 / 槽位不匹配
+     *   "absent" = 附近没有设备在广播 -> 设备睡了（按键唤醒）或没开机
+     * 只有 macOS 的 probe 会给出非空值；其余平台恒为空，UI 据空串隐藏提示。 */
+    Q_PROPERTY(QString bleDiagnostic READ bleDiagnostic NOTIFY bleDiagnosticChanged)
 
 public:
     explicit LightMonitor(QObject *parent = nullptr);
@@ -29,10 +35,16 @@ public:
     void setBleDeviceVersion(const QString &v);   /* 09-03: 由 KeyConfigManager 解析 BLE worker 的 VERSION 行设置 */
     QString channel() const { return m_channel; }
     int bleBatteryPercent() const { return m_bleBatteryPercent; }
+    QString bleDiagnostic() const { return m_bleDiagnostic; }
 
     Q_INVOKABLE void sendState(int state);
     Q_INVOKABLE void setPortName(const QString &port);
     Q_INVOKABLE void refreshBle();
+    /* ★ macOS 深度诊断：已连接列表查不到时主动扫描，区分
+     *   "设备在广播但没配对" 与 "设备压根不在附近"。
+     * 低频调用（用户点刷新 / 首次发现连不上），**不要**进 3s 轮询 ——
+     * 一次扫描要 8s，塞进轮询会堆积。 */
+    Q_INVOKABLE void probeBleDiagnostics();
     /* macOS：打开系统“蓝牙”设置页，引导用户先把设备配对/连接。
      * macOS 的 CoreBluetooth 只暴露系统已连接的外设，App 本身无法发起配对。 */
     Q_INVOKABLE void openBluetoothSettings();
@@ -62,6 +74,7 @@ signals:
     void bleDeviceVersionChanged();
     void channelChanged();
     void bleBatteryPercentChanged();
+    void bleDiagnosticChanged();
     /* ★ 10-04: 常驻 serve 进程【连接就绪】状态变化。
      * 启动时序关键：channel=="ble" 早于 serve READY，若此时就自动读配置，
      * 会把"正在连接中的 serve"杀掉去抢连接 ⇒ AccessDenied ⇒ 表现为
@@ -76,6 +89,8 @@ private slots:
     void onBleServeFinished(int exitCode, QProcess::ExitStatus exitStatus);
     /* 常驻 BLE 进程上报真实断连（连续多次 ConnectionStatus 非 CONNECTED） */
     void onServeLinkLost();
+    /* probe 诊断子进程结束：解析 CONNECTED/FOUND/DISCONNECTED 到 m_bleDiagnostic */
+    void onBleProbeFinished(int exitCode, QProcess::ExitStatus exitStatus);
 
 private:
     QString findPython();
@@ -93,6 +108,10 @@ private:
     int m_bleBatteryPercent = -1;  // 通过 BLE Battery Service 读到的电量，<0 表示未知
     int m_bleDiscStreak = 0;       // 曾连接后连续探测为"断开"的次数(去抖, 见 onBleCheckFinished);
                                    // 从未连接时首次 DISCONNECTED 直接判定断开, 不攒计数
+    /* 蓝牙诊断状态（仅 macOS 的 probe 会写）：
+     *   ""/"found"/"absent"，含义见 Q_PROPERTY 注释。 */
+    QString m_bleDiagnostic;
+    QProcess *m_bleProbeProc = nullptr;   // probe 诊断子进程（同一时刻只允许一个）
 
     PortDetector *m_portDetector;   // 蓝牙未连接时走 USB 发送用
     QString m_channel;              // "ble" / "usb" / "none"

@@ -59,6 +59,18 @@ LightMonitor::LightMonitor(QObject *parent)
     m_bleTimer->start();
     checkBleConnection(); // 立即探一次
 
+    /* ★ 启动后 6s 做一次深度诊断（仅 macOS）。
+     * 时机原因：启动瞬间快速 status 还没回来、USB 也还没枚举完，此时扫描
+     * 容易和它们抢时间；6s 后状态已稳定，若仍连不上就值得给用户一个
+     * "到底卡在哪"的结论（换一台没配过的 Mac 时这几乎是必经路径）。
+     * 单次 singleShot，不进轮询。 */
+#ifdef Q_OS_MACOS
+    QTimer::singleShot(6000, this, [this]() {
+        if (!m_bleConnected && !m_bleServeReady)
+            probeBleDiagnostics();
+    });
+#endif
+
     // 09-03: serve 延迟恢复(见 resumeBleServe 注释)。singleShot 天然防抖:
     // 若 2s 窗口内又 pause(新一轮配置), 定时器被停掉, 不会与配置 worker 抢连接。
     m_serveResumeTimer.setSingleShot(true);
@@ -90,6 +102,12 @@ LightMonitor::~LightMonitor()
         m_bleProc->waitForFinished(1000);
     }
     stopBleServe();
+    /* 诊断扫描要跑 8~15s，退出时必须主动杀掉，否则 python 子进程会成为孤儿
+     * 继续占用 CoreBluetooth（与 serve/config worker 争连接）。 */
+    if (m_bleProbeProc && m_bleProbeProc->state() != QProcess::NotRunning) {
+        m_bleProbeProc->kill();
+        m_bleProbeProc->waitForFinished(1000);
+    }
     if (m_process && m_process->state() != QProcess::NotRunning) {
         m_process->kill();
         m_process->waitForFinished(1000);
@@ -460,6 +478,66 @@ void LightMonitor::setPortName(const QString &port)
 void LightMonitor::refreshBle()
 {
     checkBleConnection();
+    /* 刷新按钮同时做一次深度诊断：用户点刷新通常正是因为"看不到设备"，
+     * 只跑快速 status 仍然只能得到"未连接"，无从判断下一步做什么。 */
+    probeBleDiagnostics();
+}
+
+/* ★ 深度诊断（仅 macOS 有意义）。
+ *
+ * 为什么需要它：macOS 的 CoreBluetooth 只能拿到"系统已配对且已连接"的外设
+ * （retrieveConnectedPeripheralsWithServices）。换一台从没配对过的 Mac，
+ * 该列表恒为空 —— 旧实现据此报"未连接"，用户完全不知道是
+ *   · 设备没开机/睡着了，
+ *   · 还是该去系统设置里配对，
+ *   · 还是设备槽位绑在老电脑上（固件白名单只放行已记录的那一个地址）。
+ * 这里让 worker 主动扫描一次，把"设备其实就在旁边广播"这种情况识别出来，
+ * UI 才能给出正确引导。
+ *
+ * 一次扫描 8~15s，因此**只允许低频触发**，不进 3s 轮询；同一时刻只跑一个。 */
+void LightMonitor::probeBleDiagnostics()
+{
+#ifdef Q_OS_MACOS
+    if (m_bleProbeProc && m_bleProbeProc->state() != QProcess::NotRunning)
+        return;   // 已有诊断在跑，丢弃本次
+    // 已连接就不必诊断（已连接是终态，扫描只会浪费 8s 无线电时间）
+    if (m_bleConnected)
+        return;
+
+    m_bleProbeProc = new QProcess(this);
+    connect(m_bleProbeProc, &QProcess::finished, this, &LightMonitor::onBleProbeFinished);
+
+    const QString worker = findBleWorkerScript();
+    m_bleProbeProc->setWorkingDirectory(QCoreApplication::applicationDirPath());
+    qDebug() << "[LightMonitor] BLE 深度诊断(扫描)启动";
+    m_bleProbeProc->start(m_pythonPath, {worker, "probe"});
+#else
+    qDebug() << "[LightMonitor] probeBleDiagnostics: 仅 macOS 需要";
+#endif
+}
+
+void LightMonitor::onBleProbeFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    Q_UNUSED(exitStatus);
+    QString diag;
+    if (m_bleProbeProc) {
+        const QString output = QString::fromUtf8(m_bleProbeProc->readAllStandardOutput()).trimmed();
+        qDebug() << "[LightMonitor] BLE probe exit=" << exitCode << "out=" << output;
+        if (output.startsWith("CONNECTED", Qt::CaseInsensitive)) {
+            diag.clear();          // 能连上就不需要任何引导
+        } else if (output.startsWith("FOUND", Qt::CaseInsensitive)) {
+            diag = QStringLiteral("found");
+        } else {
+            diag = QStringLiteral("absent");
+        }
+        m_bleProbeProc->deleteLater();
+        m_bleProbeProc = nullptr;
+    }
+    if (diag != m_bleDiagnostic) {
+        m_bleDiagnostic = diag;
+        emit bleDiagnosticChanged();
+        qDebug() << "[LightMonitor] BLE 诊断状态:" << (diag.isEmpty() ? "connected/none" : diag);
+    }
 }
 
 void LightMonitor::openBluetoothSettings()
@@ -568,6 +646,12 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
         emit bleConnectedChanged();
         emit bleDeviceNameChanged();
         updateChannel();
+        /* 连上即清除诊断态：之前的"设备在附近但没连"引导已过期，
+         * 留着会让 UI 在已连接时仍显示配对提示。 */
+        if (m_bleConnected && !m_bleDiagnostic.isEmpty()) {
+            m_bleDiagnostic.clear();
+            emit bleDiagnosticChanged();
+        }
         qDebug() << "[LightMonitor] BLE" << (m_bleConnected ? "CONNECTED" : "DISCONNECTED")
                  << "(discStreak=" << m_bleDiscStreak << ")";
     }
