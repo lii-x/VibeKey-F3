@@ -279,7 +279,33 @@ typedef struct {
     key_config_t ec_ccw_press_key;  /* 按压滚动·下 */
     /* 显式尾 padding: 304+18=322 非 4 的倍数 -> 补 2B 到 324(上位机 READ 按 324 读) */
     uint8_t reserved_ecscroll_pad[2];
+    /* ---- 11-24: HID 传输通道（**每槽独立**）----
+     * 0 = BLE HID（GATT 报告），1 = 经典 HID（BR/EDR 中断通道）。
+     * 背景: 同一套键鼠在 macOS 上只能走经典（BLE HID 需 macOS 侧配对与 GATT 支持），
+     *   而 Windows 走经典更稳（SCO 期间 BLE 空口会被饿死）；用户希望按槽区分。
+     * 未写入(0xFF)/越界 ⇒ 按【经典】处理，与既有行为完全一致，不会因升级而变。
+     * ⚠️ 与 reserved 不同，这是**真实字段**：READ 回包 324 → 328，
+     *   WRITE 紧凑 payload 315 → 316（末字节）。 */
+    uint8_t hid_transport;          /* @324: 0=BLE, 1=经典 */
+    uint8_t reserved_hid_pad[3];    /* 补到 328(4 的倍数) */
+    /* ---- 11-24: 蓝牙开关（**每槽独立**）----
+     * bit0 = 经典蓝牙(BR/EDR) 使能；bit1 = BLE 使能。
+     * 0xFF/未写入 ⇒ 按 0x03（都开）处理，与升级前行为一致。
+     * ⚠️ 只在**启动时**按当前槽位的值决定要不要拉起对应协议栈；
+     *   已连接的链路不会被中途拆掉（避免保存配置的瞬间把自己弄断）。
+     * 关闭 BLE 后配置只能走 USB —— 这是无法回避的，UI 需明确提示。 */
+    uint8_t bt_en_flags;            /* @328: bit0 经典, bit1 BLE */
+    uint8_t reserved_bt_pad[3];     /* 补到 332(4 的倍数) */
 } key_config_storage_t;
+
+#define KEY_CONFIG_BT_CLASSIC_EN  0x01
+#define KEY_CONFIG_BT_BLE_EN      0x02
+#define KEY_CONFIG_BT_ALL         0x03
+#define KEY_CONFIG_BT_DEFAULT     KEY_CONFIG_BT_ALL
+
+#define KEY_CONFIG_HID_BLE      0
+#define KEY_CONFIG_HID_CLASSIC  1
+#define KEY_CONFIG_HID_DEFAULT  KEY_CONFIG_HID_CLASSIC   /* 与 11-24 之前的固件行为一致 */
 
 /* 休眠时间默认值/档位(08-27) */
 #define KEY_CONFIG_SLEEP_MIN_DEFAULT  45    /* 默认(也是最小档): 45 分钟 */
@@ -288,6 +314,10 @@ typedef struct {
 
 void key_config_init(void);
 key_config_storage_t *key_config_get(void);       /* 当前蓝牙槽位的配置 */
+/* 当前槽位的 HID 通道偏好(0=BLE 1=经典)。未写入/非法值回落到默认(经典)。 */
+uint8_t key_config_hid_transport(void);
+/* 当前槽位的蓝牙开关位(bit0 经典 / bit1 BLE)。未写入/非法 ⇒ 0x03(都开)。 */
+uint8_t key_config_bt_flags(void);
 void key_config_save(void);                       /* 保存当前槽位 */
 void key_config_reset(void);                      /* 重置当前槽位为默认 */
 key_config_storage_t *key_config_get_slot(uint8_t slot);  /* 指定槽 0~2 (CONF 协议用) */

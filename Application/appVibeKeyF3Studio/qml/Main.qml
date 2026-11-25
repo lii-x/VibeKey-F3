@@ -1659,6 +1659,7 @@ ApplicationWindow {
 
                                 }
 
+
                             }
                         }
                         /* Device visual + settings popup */
@@ -2285,6 +2286,85 @@ ApplicationWindow {
                                     onExited: parent.hovered = false
                                 }
                             }
+
+                            /* ★ 11-25 HID 通道卡片（左上角）。
+                             * 原「蓝牙」开关卡片已按需求移除 —— 经典 + BLE 两套协议栈
+                             * **固定全开**，不给用户改（固件侧 key_config_bt_flags()
+                             * 也常量返回 0x03，双保险）。
+                             * 这里只剩一张卡，直接给 x/y，不需要 Row 容器
+                             * （早期两块卡互相引用导致首帧 NaN → Debug 版 abort）。 */
+                                /* ---- HID 传输通道（键鼠报文走哪条链路）---- */
+                                Rectangle {
+                                    id: hidTransportCard
+                                    x: 12
+                                    y: 12
+                                    visible: keyConfigArea.hasRead
+                                    width: 136; height: 52
+                                    radius: 8
+                                    color: "#ffffff"
+                                    border.color: hidMa.containsMouse ? "#07c160" : "#ececec"
+                                    border.width: hidMa.containsMouse ? 0.5 : 0
+
+                                    Rectangle {
+                                        anchors.fill: parent; anchors.margins: -2
+                                        radius: parent.radius + 2; color: "#0d000000"; z: -1
+                                    }
+                                    Rectangle {
+                                        anchors.fill: parent; anchors.margins: -4
+                                        radius: parent.radius + 4; color: "#04000000"; z: -1
+                                    }
+
+                                    Column {
+                                        anchors.centerIn: parent
+                                        spacing: 3
+                                        Text {
+                                            text: "HID 通道:"
+                                            font.pointSize: 10
+                                            font.bold: true
+                                            color: "#666"
+                                        }
+                                        Row {
+                                            spacing: 4
+                                            Rectangle {
+                                                width: 54; height: 18; radius: 9
+                                                color: keyConfig.hidTransport === 0 ? "#07c160" : "#f4f5f4"
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: "BLE"
+                                                    font.pointSize: 8
+                                                    color: keyConfig.hidTransport === 0 ? "white" : "#555"
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: keyConfig.setHidTransport(0)
+                                                }
+                                            }
+                                            Rectangle {
+                                                width: 54; height: 18; radius: 9
+                                                color: keyConfig.hidTransport === 1 ? "#07c160" : "#f4f5f4"
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: "BR/EDR"
+                                                    font.pointSize: 8
+                                                    color: keyConfig.hidTransport === 1 ? "white" : "#555"
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    cursorShape: Qt.PointingHandCursor
+                                                    onClicked: keyConfig.setHidTransport(1)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: hidMa
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        acceptedButtons: Qt.NoButton
+                                    }
+                                }
 
                             /* KEY C1/C2/C3 配置卡片（可拖动，红线连接） */
                             Repeater {

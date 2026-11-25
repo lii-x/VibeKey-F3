@@ -87,9 +87,35 @@ static void usb_init_once(void)
         rt_thread_startup(ota_tid);
 }
 
+/* ★ 11-25 开机 3 秒 USB 宽限期状态（见启动处的说明） */
+volatile int g_usb_grace_active = 0;
+
+/* 前向声明：这两个函数定义在下方。
+ * ⚠️ usb_stop 不能带 static —— power.c 的待机流程也要调它（全局符号）。 */
+void usb_stop(void);
+static int  usb_vbus_read(void);
+
+static void usb_grace_end_cb(void *param)
+{
+    (void)param;
+    g_usb_grace_active = 0;
+
+    extern volatile rt_tick_t g_usb_last_rx_tick;   /* dfu_device.c: 最近一次通信时刻 */
+    int vbus = usb_vbus_read();
+    int talked = (g_usb_last_rx_tick != 0);
+
+    if (usb_on && !talked && vbus <= 0) {
+        rt_kprintf("[USB] grace over: no traffic, no VBUS -> stop (save power)\n");
+        usb_stop();
+    } else {
+        rt_kprintf("[USB] grace over: keep ON (talked=%d vbus=%d)\n", talked, vbus);
+    }
+}
+
 static void usb_start(void)
 {
     rt_kprintf("[USB] Type-C detected, (re)starting USB...\r\n");
+    { extern void usb_hist(char); usb_hist('S'); }
     extern void cdc_acm_disable(void);
     extern void cdc_acm_enable(void);
     if (usb_on) {
@@ -99,20 +125,31 @@ static void usb_start(void)
         cdc_acm_disable();
         rt_thread_mdelay(20);
     }
-    HAL_RCC_EnableModule(RCC_MOD_USBC);
-    cdc_acm_enable();
-    usb_on = 1;
-
-    /* 保持 DLL2(USB 时钟源)常开：持有 UI 场景使 PM 不降到 MEDIUM_SPEED，
-     * 从而不会 DisableDLL2 让 USB 失钟。仅在第一次插入时持有，避免重复调用。 */
+    /* ★★ 11-25 顺序修正（关键）：**先把 PM 顶回 HIGH_SPEED，再使能 USB 控制器**。
+     *
+     * 原实现是先 HAL_RCC_EnableModule + cdc_acm_enable()，之后才 pm_scenario_start(UI)。
+     * 而 USB 的 48MHz 时钟源是 DLL2 —— 系统刚在 main 里降过频(MEDIUM_SPEED 会
+     * DisableDLL2)。也就是说控制器可能在**时钟尚未恢复/未锁定**的状态下初始化：
+     *   · 碰上时钟已稳 → 一切正常
+     *   · 碰上未稳   → 能枚举、能收发几个包，随后 OUT 端点不再完成
+     * 这正是"有时候重启就蛮正常的"的来源，也是排查中反复出现的"4 个包后哑火"。
+     *
+     * 现在：① 先持场景+请求 IDLE（把 DLL2 拉开）→ ② 使能 USBC 模块 → ③ 等 10ms
+     * 让 PLL/DLL2 锁定 → ④ 再 enable 控制器。 */
     if (!usb_pm_held) {
         pm_scenario_start(PM_SCENARIO_UI);
-        rt_pm_request(PM_SLEEP_MODE_IDLE);  /* USB 插入期间钉 IDLE：HCPU 时钟常开，
+        rt_pm_request(PM_SLEEP_MODE_IDLE);  /* USB 期间钉 IDLE：HCPU 时钟常开，
                                                HUSB 控制器才能维持 CDC 通信，深睡会让 COM 口失联 */
         usb_pm_held = 1;
         /* USB 在线期间 WFI 不宜降到 4MHz（CDC 时延敏感），保持 SDK 默认 ~20MHz(div 12) */
         HAL_RCC_HCPU_SetDeepWFIDiv(12, 0, 1);
+        rt_thread_mdelay(5);        /* 让频率切换生效 */
     }
+
+    HAL_RCC_EnableModule(RCC_MOD_USBC);
+    rt_thread_mdelay(10);           /* 等 48MHz 时钟稳定后再初始化 PHY */
+    cdc_acm_enable();
+    usb_on = 1;
 }
 
 void usb_stop(void)
@@ -120,6 +157,7 @@ void usb_stop(void)
     if (!usb_on) return;
     usb_on = 0;
     rt_kprintf("[USB] Type-C removed, stopping USB...\r\n");
+    { extern void usb_hist(char); usb_hist('P'); }
     extern void cdc_acm_disable(void);
     cdc_acm_disable();
     HAL_RCC_DisableModule(RCC_MOD_USBC);
@@ -193,7 +231,10 @@ static void usb_vbus_thread(void *param)
 
     int v0 = usb_vbus_read();
     g_usb_vbus_prev = (v0 > 0) ? 1 : 0;
-    if (v0 > 0)
+    /* ★ 11-25 已经开着就不要再 start：usb_start() 在 usb_on 时会先
+     * cdc_acm_disable() 再 enable，若主机正在枚举，这一下会让它放弃并
+     * 不再重试（"拔插一次才恢复"）。开机宽限期已强制开启，这里只需让位。 */
+    if (v0 > 0 && !usb_on)
         usb_start();                /* 插着开机也可用 CDC */
     rt_kprintf("[USB] vbus thread started, vbus=%d\n", v0);
     BOOT_T("vbus_thread");
@@ -212,7 +253,25 @@ static void usb_vbus_thread(void *param)
         if (vbus && !usb_on) {
             rt_kprintf("[USB] vbus inserted -> usb_start\r\n");
             usb_start();
-        } else if (!vbus && usb_on) {
+        }
+
+        if (!vbus && usb_on) {
+            /* ★ 11-25 开机宽限期内不关：这 3 秒是"无条件先开"的窗口，
+             * 让 vbus 线程一进来就关掉的话，强制开启等于白做。 */
+            if (g_usb_grace_active) continue;
+            /* ★★ 11-25 "主机在线"锁存：有些主机（测试台/某些扩展坞）**不供 VBUS
+             * 但数据线可通**，VBUS 检测永远是 0。只要 DTR 还拉着（串口开着）
+             * 或收到过数据，就说明对面确实有个活主机在用，不能按 VBUS=0 关掉 ——
+             * 实测症状正是"能通信几秒就断"（宽限期一过就被这里关掉）。
+             * 主机主动关串口时 DTR 落下，锁存清除，才允许关断。 */
+            /* ★ 11-25 放宽到 120 秒（原 30 秒）。
+             * 依据：上位机/网页端每 5 秒轮询一次，正常绝不会静默 2 分钟；
+             * 真静默 2 分钟基本等于"没人用了/线拔了"，此时关掉省电是合理的。
+             * 不采用"永不关"——那是拿功耗换稳定，用户明确否掉了。 */
+            { extern volatile rt_tick_t g_usb_last_rx_tick;
+              if (g_usb_last_rx_tick &&
+                  (rt_tick_get() - g_usb_last_rx_tick) < rt_tick_from_millisecond(120000))
+                  continue; }
             rt_kprintf("[USB] vbus removed -> usb_stop\r\n");
             usb_stop();
         }
@@ -1239,8 +1298,15 @@ static void air_mouse_set_active(int active, int cold)
         enc_enter_idle();                   /* 编码器停轮询, 改引脚边沿唤醒 */
         /* 空闲退回 48MHz。通话(SCO)期间不动 —— 音频链路需要高频,
          * 由协议栈自己的 PM 场景管理，这里插手会把音质/断音搞坏。 */
+        /* ★★ 11-25 USB 在线时**绝不降频**。
+         * 这是"蓝牙一连上，USB 就几次交互后假死"的真正根因：
+         *   空中鼠标只在蓝牙连接后启动 → 静止十几秒进入 IDLE → 走这里降频
+         *   → MEDIUM_SPEED 会 DisableDLL2 → USB 的 48MHz 时钟没了 → 假复位/失联。
+         * 不连蓝牙时本函数不会被调用，所以"不连蓝牙就没事"；安全模式同理。
+         * 代价：蓝牙 + USB 同时在线时保持高频，功耗略高；拔掉 USB 后照常降频。 */
         { extern volatile uint8_t g_sco_active;
-          if (!g_sco_active) rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED); }
+          extern volatile int usb_on;
+          if (!g_sco_active && !usb_on) rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED); }
         /* 记录当前重力方向作为唤醒检测基线 */
         g_idle_acc_base_x = (int32_t)g_acc_x;
         g_idle_acc_base_y = (int32_t)g_acc_y;
@@ -3100,6 +3166,9 @@ int main(void)
     }
 
     BOOT_T("start");
+    /* ★ 11-24 控制台镜像到 USB：尽早接管，之后的 [BT]/[HID] 日志网页端都能看到。
+     * 真正的 USB 发送由 dfu_device.c 里的转发线程门控（cdc_acm_init 之后才发）。 */
+    { extern void usb_log_init(void); usb_log_init(); }
     power_init();
     BOOT_T("power_init");
     key_config_init();
@@ -3123,13 +3192,23 @@ int main(void)
         rt_kprintf("==========================================================\n");
         g_boot_safe_mode = 1;            /* 通知电源管理：不要碰任何蓝牙接口 */
         usb_init_once();                 /* CDC 接口/端点 + OTA 线程 */
-        usb_sem = rt_sem_create("usbvbus", 0, RT_IPC_FLAG_FIFO);
-        {
-            rt_thread_t tid = rt_thread_create("usbvbus", usb_vbus_thread,
-                                               RT_NULL, 1024, 16, 10);
-            if (tid) rt_thread_startup(tid);
-        }
-        rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED);
+        /* ★★ 11-24 安全模式**直接开 USB**，不看 VBUS/充电检测。
+         * 理由：安全模式是刷砖自救的最后手段，此时最怕"检测电路本身有问题"
+         * （VBUS 分压/充电 IC 异常、只有数据线的劣质线缆、某些主机的 C 口不给
+         * VBUS 信号）—— 一旦检测读不到，USB 就永远不开，救砖通道也就没了。
+         * 所以这里无条件 usb_start()，并且**不创建 vbus 监控线程**：
+         * 那个线程的逻辑是"没 VBUS 就 usb_stop()"，会把这里的强制开启又关掉。
+         * 代价：不插线时 USB 控制器也保持使能（安全模式本就是插着线用的场景）。 */
+        usb_start();
+        rt_kprintf("[SAFE] USB forced ON (no VBUS check)\n");
+        /* ★★ 11-24 **安全模式不要降到 MEDIUM_SPEED**。
+         * PM 降到 MEDIUM 会 HAL_RCC_HCPU_DisableDLL2()，而 DLL2 正是 USB 的
+         * 48MHz 时钟源 ⇒ USB 立刻静默挂死（枚举不出、串口消失）。
+         * 之前没暴露是因为旧流程由 vbus 线程在 run_enter(MEDIUM) **之后**才开 USB，
+         * usb_start() 里的 PM_SCENARIO_UI + IDLE 锁会把频率顶回 HIGH_SPEED；
+         * 现在改成直接开 USB（在 run_enter 之前），随后又被降频掐掉时钟。
+         * 安全模式本来就是插着线刷机的场景，功耗让位于可用性。 */
+        /* rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED);  ← 删除：会让 USB 失去时钟 */
         /* ★ 11-23 黄灯慢闪 = 安全模式的可视标识。
          * 用【独立 LED2(黄)】而不是 WS2812B 彩灯 —— RGB 链路的初始化(ws2812b
          * 设备节点)在安全模式下被跳过了，碰它就是 NULL 断言。
@@ -3229,8 +3308,42 @@ int main(void)
     /* 开局 CPU 降到 48MHz（广播/空闲无需 240MHz）。
      * HFP 音频激活时 SDK 自动 pm_scenario_start(AUDIO)→切回 240MHz，
      * 音频停止后回到 48MHz。 */
-    rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED);
-    rt_kprintf("[POWER] CPU set to 48MHz (MEDIUM_SPEED), HFP bumps to 240MHz on demand\n");
+    /* ★★ 11-25 开机 USB 宽限期（3 秒）——放在 PM 降频**之前**，
+     * 这样下面的降频判断能看到 usb_on=1 而跳过降频。
+     * 踩过的坑：先 usb_start() 再 rt_pm_run_enter(MEDIUM_SPEED)，
+     * 显式降频会 DisableDLL2 ⇒ USB 失去 48MHz 时钟而静默挂死；
+     * 且此时主机可能已经开始枚举，之后再 disable/enable 会让它放弃重试，
+     * 表现正是"OTA 之后串口没了，必须拔插一次"。
+     * 放在这里：usb_start() 内部的 pm_scenario_start(UI) 会把频率重新顶回 HIGH_SPEED。
+     * 目的：VBUS 检测在部分主机/线缆上不可靠（Mac 的 C 口、只有数据线的劣质线），
+     * 所以开机无条件先跑 3 秒：
+     *   · 有 DTR / 有数据 / VBUS 有电 ⇒ 保持
+     *   · 三者皆无 ⇒ 关掉省电 */
+    if (!usb_on)
+        usb_start();
+    g_usb_grace_active = 1;
+    {
+        rt_timer_t gt = rt_timer_create("usbgrace", usb_grace_end_cb, RT_NULL,
+                                        rt_tick_from_millisecond(3000),
+                                        RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
+        if (gt) rt_timer_start(gt);
+    }
+    rt_kprintf("[USB] boot grace: forced ON for 3s (VBUS=%d)\n", usb_vbus_read());
+
+    /* ★★ 11-25 实验性修正：**USB 在线时不降频**。
+     * 证据：安全模式（完全不启动蓝牙/音频、也不执行本次降频）在 Win 和 Mac 上
+     * 都能稳定跑 20+ 次交互；正常模式则 3~5 次后假死，且出现 R>C（复位后没重配）。
+     * USB 的 48MHz 时钟源是 DLL2，而 MEDIUM_SPEED / 240MHz 切换都会动 DLL2 ——
+     * 频繁切换足以在 USB 事务中途把时钟搅乱，引发"假复位"。
+     * 因此：只要 USB 已经开着（插着线），就保持 HIGH_SPEED，不做这次降频。
+     * 代价：插着 USB 时空载电流略高；拔掉后照常降频省电。 */
+    if (!usb_on) {
+        rt_pm_run_enter(PM_RUN_MODE_MEDIUM_SPEED);
+        rt_kprintf("[POWER] CPU set to 48MHz (MEDIUM_SPEED), HFP bumps to 240MHz on demand\n");
+    } else {
+        rt_kprintf("[POWER] USB online -> keep HIGH_SPEED (no PM downshift)\n");
+    }
+
 
     /* 音频省电：关 EQ（免提通话不需要音效处理）、降麦克风增益已在 power.c 覆写为 0dB */
     extern void bf0_audprc_eq_enable_offline(uint8_t is_enable);

@@ -31,6 +31,11 @@ static const key_config_storage_t default_config = {
     .air_mouse_speed = AIR_MOUSE_SPEED_MEDIUM,   /* 默认：中速 */
     .sleep_min = KEY_CONFIG_SLEEP_MIN_DEFAULT,   /* 默认：45 分钟空闲休眠(08-27) */
     .air_mouse_dir = KEY_CONFIG_AIR_MOUSE_DIR_DEFAULT, /* 默认：正常方向(09-01) */
+    /* ★ 11-25 新增字段的默认值必须显式写在这里：
+     * 指定初始化器未列出的字段一律为 0 —— 而 0 恰好是"关 BLE / HID 走 BLE"，
+     * 于是新槽位默认变成"蓝牙全关、HID 通道 BLE"（实测槽2 读出来就是这样）。 */
+    .hid_transport = KEY_CONFIG_HID_DEFAULT,   /* 1 = 经典(与旧行为一致) */
+    .bt_en_flags   = KEY_CONFIG_BT_DEFAULT,    /* 3 = 经典+BLE 都开 */
     /* 09-03 摇一摇: 默认【关闭】(新功能不主动改变既有使用习惯);
      * 快捷键留空(action=KEY_ACTION_NONE) —— 用户在上位机打开开关时必须先捕获一个键,
      * UI 会阻止"开了开关却没设键"的空配置下发。 */
@@ -106,6 +111,9 @@ static const key_config_storage_t default_config_slot1 = {
     .air_mouse_speed = AIR_MOUSE_SPEED_MEDIUM,
     .sleep_min = KEY_CONFIG_SLEEP_MIN_DEFAULT,
     .air_mouse_dir = KEY_CONFIG_AIR_MOUSE_DIR_DEFAULT,
+    /* 11-25 同 default_config：新槽位默认"经典 HID + 蓝牙全开" */
+    .hid_transport = KEY_CONFIG_HID_DEFAULT,
+    .bt_en_flags   = KEY_CONFIG_BT_DEFAULT,
     .shake_enabled = KEY_CONFIG_SHAKE_OFF,
     .shake_sens = KEY_CONFIG_SHAKE_SENS_DEFAULT,
     .shake_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0x20, 0xA0, 0xFF, 15 },
@@ -188,7 +196,7 @@ _Static_assert(sizeof(key_config_t) == 9,
  *        0..303 布局不变 —— 全在旧 304B 写界之外, 旧槽页此区恒 0xFF,
  *        两个 getter 据此回落对应的常规滚动键, 见结构体注释;
  *        322 非 4 的倍数 -> 显式 reserved_ecscroll_pad[2] 补到 324) */
-_Static_assert(sizeof(key_config_storage_t) == 324,
+_Static_assert(sizeof(key_config_storage_t) == 332,
                "key_config_storage_t must be 324B (READ 回包长度 = sizeof, 上位机按 324 读)");
 _Static_assert(offsetof(key_config_storage_t, sleep_min) == 36,
                "sleep_min offset 36 (uint16 需 2 对齐, keys[3] 后插了 1B padding)");
@@ -437,6 +445,26 @@ key_config_storage_t *key_config_get_slot(uint8_t slot)
 }
 
 /* 当前蓝牙槽位的配置(按键处理/空中鼠标参数随槽切换) */
+uint8_t key_config_bt_flags(void)
+{
+    /* ★★ 11-25 固定"两套蓝牙全开"，不再读配置。
+     * 原因：需求变更 —— 蓝牙开关从界面移除，不允许用户关闭任一协议栈。
+     * 保留字段与协议(WRITE payload[316])只为向前兼容：老配置里可能残留 0，
+     * 若仍按其执行，那些槽位会表现为"蓝牙莫名其妙全关"，且界面已无入口可改。
+     * 这里直接常量返回，等于把所有历史配置一次性纠正过来。
+     * 若将来要恢复该功能，改回读 cfg->bt_en_flags 即可。 */
+    return KEY_CONFIG_BT_ALL;
+}
+
+uint8_t key_config_hid_transport(void)
+{
+    key_config_storage_t *cfg = key_config_get();
+    if (!cfg) return KEY_CONFIG_HID_DEFAULT;
+    /* 0xFF = 擦除态(旧固件/未写过) ⇒ 沿用经典，行为不变 */
+    if (cfg->hid_transport > KEY_CONFIG_HID_CLASSIC) return KEY_CONFIG_HID_DEFAULT;
+    return cfg->hid_transport;
+}
+
 key_config_storage_t *key_config_get(void)
 {
     return key_config_get_slot(bt_multi_get_slot() - 1);

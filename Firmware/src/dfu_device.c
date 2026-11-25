@@ -46,7 +46,7 @@
 
 /* 设备身份信息（App 端握手据此确认是 VibeKey-F3）。版本号随发布 bump。 */
 #define VIBEKEY_MODEL      "VibeKey-F3"
-#define VIBEKEY_FW_VERSION "1.2.2"
+#define VIBEKEY_FW_VERSION "1.3.3"
 
 #ifdef CONFIG_USBDEV_ADVANCE_DESC
 
@@ -192,13 +192,178 @@ static struct rt_messagequeue *conf_mq;
  * 10-05: 320→336 —— READ 回包 304→324(EC 按压滚动尾部追加 2×9B), 320 会溢出。 */
 USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX static uint8_t conf_tx_buf[336];
 
+/* ============================================================================
+ * 串口日志经 USB 转发（11-24）
+ * ============================================================================
+ * 需求：Mac/无外露串口的场景下拿不到调试口，希望网页端能直接看设备日志。
+ *
+ * 做法：把 RT-Thread 的控制台重定向到一个"镜像设备"——
+ *   · 原样转给 rt_hw_console_output()（UART 输出不变，老流程不受影响）
+ *   · 同时把字节压进环形缓冲
+ *   · 网页端发 CONF_CMD_LOG(0x07) 打开后，转发线程把缓冲分片写进 CDC IN
+ *
+ * 为什么用"互斥模式"而不是在协议流里插包：
+ *   网页端的通信是"发一帧 → 清空缓冲 → 等固定长度"的请求-应答模型，
+ *   中间插入的日志会让应答错位。所以约定：**开日志期间网页端停止轮询**，
+ *   此时 CDC IN 上全是纯文本，页面直接按文本渲染即可。
+ * OTA 期间强制不转发（固件流不能掺字节）。
+ * ========================================================================== */
+#define CONF_CMD_LOG     0x07
+#define USB_LOG_RING_SZ  8192u
+#define USB_LOG_CHUNK    512u
+
+static uint8_t  s_log_ring[USB_LOG_RING_SZ];
+static volatile uint16_t s_log_w = 0, s_log_r = 0;
+static volatile uint8_t  s_log_on = 0;
+static volatile uint8_t  s_usb_ready = 0;   /* cdc_acm_init 完成前不许发 IN 包 */
+static rt_device_t       s_log_dev   = RT_NULL;
+/* ★ 原控制台设备（UART）。切换前保存，之后由 logmux_write 直接写它 ——
+ * 不能用 rt_hw_console_output()：本 SDK 里它是 2 字节的**空弱符号**
+ * （nm 实测 0x12067730 大小 2），切了控制台就等于把 UART 输出掐断。 */
+static rt_device_t       s_old_console = RT_NULL;
+static char              s_uart_name[16] = "uart1";   /* 原控制台设备名，用于切回 */
+static rt_sem_t          s_log_sem   = RT_NULL;   /* 有数据就唤醒转发线程（事件驱动） */
+static volatile uint8_t  s_log_dropped = 0;       /* 环形溢出过：给页面补一行提示 */
+
+USB_NOCACHE_RAM_SECTION USB_MEM_ALIGNX static uint8_t s_log_tx[USB_LOG_CHUNK];
+
+static void usb_log_push(const char *s, rt_size_t n)
+{
+    if (!s_log_on || !s) return;
+    /* 日志可能同时来自线程与中断（ULOG_USING_ISR_LOG=1），
+     * 环形索引必须原子更新，否则会互相踩写导致字节错乱。 */
+    rt_base_t lvl = rt_hw_interrupt_disable();
+    rt_bool_t pushed = RT_FALSE;
+    for (rt_size_t i = 0; i < n; i++) {
+        uint16_t next = (uint16_t)((s_log_w + 1u) % USB_LOG_RING_SZ);
+        if (next == s_log_r) { s_log_dropped = 1; break; }  /* 满：丢弃但记账 */
+        s_log_ring[s_log_w] = (uint8_t)s[i];
+        s_log_w = next;
+        pushed = RT_TRUE;
+    }
+    rt_hw_interrupt_enable(lvl);
+
+    /* 事件驱动：有数据立刻唤醒，不再等 30ms 轮询。
+     * rt_sem_release 可在中断里调用（ULOG_USING_ISR_LOG=1）。 */
+    if (pushed && s_log_sem) rt_sem_release(s_log_sem);
+}
+
+/* 控制台镜像设备的 write：先照常输出到原控制台，再镜像到 USB 缓冲 */
+static rt_size_t logmux_write(rt_device_t dev, rt_off_t pos, const void *buf, rt_size_t size)
+{
+    (void)dev; (void)pos;
+    if (buf && size) {
+        /* 原 UART 输出：直接写回切换前保存的串口设备。
+         * （rt_hw_console_output 在本 SDK 是空实现，调它等于静音 —— 11-24 踩过：
+         *   切完控制台 UART 立刻没输出，日志停在 [BOOT] start。） */
+        if (s_old_console) rt_device_write(s_old_console, 0, buf, size);
+        usb_log_push((const char *)buf, size);
+    }
+    return size;
+}
+
+static rt_err_t logmux_open(rt_device_t dev, rt_uint16_t oflag) { (void)dev; (void)oflag; return RT_EOK; }
+static rt_err_t logmux_close(rt_device_t dev) { (void)dev; return RT_EOK; }
+
+static rt_size_t logmux_read(rt_device_t dev, rt_off_t pos, void *buffer, rt_size_t size)
+{
+    (void)dev; (void)pos; (void)buffer; (void)size;
+    return 0;
+}
+
+/* 低优先级转发线程：攒够一片就往 CDC 写一片 */
+static void usb_log_thread(void *arg)
+{
+    (void)arg;
+    while (1) {
+        /* 事件驱动：等"有新数据"，20ms 兜底超时用于状态检查 */
+        if (s_log_sem) rt_sem_take(s_log_sem, rt_tick_from_millisecond(20));
+        else           rt_thread_mdelay(20);
+
+        if (!s_log_on || !s_usb_ready) { s_log_r = s_log_w; continue; }
+        if (ota_started) { s_log_r = s_log_w; continue; } /* OTA 期间绝不插字节 */
+
+        /* 一次醒来尽量把积压发完（最多连发 16 片 ≈ 8KB），
+         * 避免高频日志时"每 30ms 只发一片"造成的持续落后。 */
+        for (int burst = 0; burst < 16 && s_log_r != s_log_w; burst++) {
+            uint16_t n = 0;
+            while (s_log_r != s_log_w && n < USB_LOG_CHUNK) {
+                s_log_tx[n++] = s_log_ring[s_log_r];
+                s_log_r = (uint16_t)((s_log_r + 1u) % USB_LOG_RING_SZ);
+            }
+            usbd_ep_start_write(g_busid, CDC_IN_EP, s_log_tx, n);
+            /* 等这一片发完再取下一片，避免覆盖 s_log_tx */
+            uint32_t guard = 0;
+            while (ep_tx_busy_flag && guard++ < 30) rt_thread_mdelay(1);
+            if (ep_tx_busy_flag) {
+                /* 端点迟迟发不出去 = 宿主没在读（页面关了/拔线了）。
+                 * 自动关闭转发，避免线程空转 + 缓冲一直被写满。 */
+                s_log_on = 0;
+                s_log_r = s_log_w = 0;
+                rt_kprintf("[LOG] USB log fwd auto OFF (host not reading)\n");
+                break;
+            }
+            /* 溢出过就在两片之间补一行提示，让页面知道中间有丢失 */
+            if (s_log_dropped && s_log_r == s_log_w) {
+                static const char kDrop[] = "\n[... 日志过快，中间有部分丢失 ...]\n";
+                s_log_dropped = 0;
+                usbd_ep_start_write(g_busid, CDC_IN_EP, (const uint8_t *)kDrop, sizeof(kDrop) - 1);
+                guard = 0;
+                while (ep_tx_busy_flag && guard++ < 30) rt_thread_mdelay(1);
+            }
+        }
+    }
+}
+
+/* 注册镜像设备并接管控制台。必须在 bt/日志大量输出之前调用。 */
+void usb_log_init(void)
+{
+    if (s_log_dev) return;
+
+    s_log_dev = (rt_device_t)rt_malloc(sizeof(struct rt_device));
+    if (!s_log_dev) return;
+    rt_memset(s_log_dev, 0, sizeof(struct rt_device));
+
+    s_log_dev->type      = RT_Device_Class_Char;
+    s_log_dev->init      = RT_NULL;
+    s_log_dev->open      = logmux_open;
+    s_log_dev->close     = logmux_close;
+    s_log_dev->read      = logmux_read;
+    s_log_dev->write     = logmux_write;
+    s_log_dev->control   = RT_NULL;
+
+    if (!s_log_sem) s_log_sem = rt_sem_create("usblog", 0, RT_IPC_FLAG_FIFO);
+
+    rt_device_register(s_log_dev, "logmux", RT_DEVICE_FLAG_STREAM);
+
+    /* ★★ 11-25 **不再开机接管控制台**（重要改动）。
+     * 之前一上电就 rt_console_set_device("logmux")，导致此后每一行 rt_kprintf
+     * 都改走设备框架的 UART 写（原来走 ROM 的轮询写）。蓝牙栈每秒几十行日志，
+     * 整体时序被改变 —— 实测 USB 只收到 4 个 OUT 包就再无后续。
+     * 现在改为**按需接管**：只有网页端真正打开日志时才切换，关闭后立刻切回 UART。
+     * 平时行为与改动前完全一致（这也是最不容易引入回归的做法）。 */
+    rt_device_t uart = rt_console_get_device();
+    if (uart && uart->parent.name) {
+        rt_strncpy(s_uart_name, uart->parent.name, sizeof(s_uart_name) - 1);
+    }
+    s_old_console = uart;
+
+    rt_thread_t tid = rt_thread_create("logfwd", usb_log_thread, RT_NULL, 1024, 26, 10);
+    if (tid) rt_thread_startup(tid);
+
+    rt_kprintf("[LOG] USB log fwd ready (console NOT taken over yet), cmd=0x%02x\n", CONF_CMD_LOG);
+}
+
 /* 等待上一次 IN 传输结束，避免覆盖正在 DMA 的缓冲或端点状态机错乱 */
 static void conf_in_write(const uint8_t *data, uint32_t len)
 {
+    /* 等待上一次 IN 传输结束，避免覆盖正在 DMA 的缓冲或端点状态机错乱 */
     while (ep_tx_busy_flag)
         rt_thread_mdelay(1);
     usbd_ep_start_write(g_busid, CDC_IN_EP, data, len);
 }
+
+
 
 /* 回包路由(09-03): USB → CDC IN 端点; BLE → 0xFF04 notify。
  * conf_tx_buf 由 conf_task 单线程串行使用, 不存在并发写。 */
@@ -220,6 +385,27 @@ static void conf_status_reply(const conf_pkt_t *pkt, uint8_t code)
         conf_send_reply(pkt, conf_tx_buf, 8);
 }
 
+/* ★ 11-25 供 main.c 判断"主机是否还在用 USB"。
+ * 记录**最近一次通信时刻**（tick），而不是布尔量：
+ *   · 布尔量会被一次 DTR=0 误清零（Web Serial 打开端口时的控制线状态不可靠）
+ *   · 时刻值可以表达"多久没说话了"，既能保持在线，也能在真拔线后超时关断 */
+volatile rt_tick_t g_usb_last_rx_tick = 0;
+/* ★ 11-25 "本轮生命周期内主机用过 USB" 的粘性标志：
+ * 一旦置位，vbus 线程就**不再按 VBUS/超时关断 USB**。
+ * 代价：拔线后控制器一直开着（几 mA）；收益：不供电但能通信的主机不会被误杀。
+ * 反复踩坑后选择"宁可费电也不要断线"——这类主机本来就是长期插着用的。 */
+volatile int g_usb_host_ever = 0;
+/* ★ 11-25 诊断计数：设备到底"收没收到 OUT 包"与"包有没有进到 conf_task"。
+ * out != conf ⇒ 中间环节(队列/回调分支)丢了；out 不涨 ⇒ OUT 端点真的没数据。 */
+volatile uint32_t g_usb_out_cnt  = 0;
+
+/* 供 main.c 的 USB 看门狗判断"现在能不能软复位"（OTA 期间绝对不能） */
+int usb_ota_in_progress(void) { return ota_started ? 1 : 0; }
+volatile uint32_t g_usb_conf_cnt = 0;
+
+/* 11-25: INFO 里要拼事件历史，先声明（实现见下方 usb_hist 部分） */
+const char *usb_hist_get(void);
+
 static void conf_task_entry(void *param)
 {
     conf_pkt_t pkt;
@@ -227,6 +413,10 @@ static void conf_task_entry(void *param)
     {
         if (rt_mq_recv(conf_mq, &pkt, sizeof(pkt), RT_WAITING_FOREVER) == RT_EOK)
         {
+            g_usb_conf_cnt++;
+            g_usb_last_rx_tick = rt_tick_get();
+            g_usb_host_ever = 1;
+
             uint32_t magic = *(uint32_t *)&pkt.buf[0];
             if (magic != CONF_MAGIC)
                 continue;
@@ -236,6 +426,31 @@ static void conf_task_entry(void *param)
              * 越界按槽1处理。READ/WRITE/RESET 均按指定槽操作, 上位机可改任意
              * 槽(运行时无需切槽/重启)。旧上位机(buf[5]=0)默认操作槽1, 兼容。 */
             uint8_t slot = pkt.buf[5];
+
+            /* ★ 11-24 串口日志开关（0x07，payload 1 字节：1=开 0=关）
+             * 放在安全模式守卫之前 —— 万一设备状态异常，日志正是排查手段。 */
+            if (cmd == CONF_CMD_LOG && data_len >= 1)
+            {
+                uint8_t want = (pkt.buf[8] != 0) ? 1 : 0;
+                if (want && !s_log_on) {
+                    /* 打开时才接管控制台（rt_console_set_device 会 close 旧设备，需重开） */
+                    if (s_uart_name[0]) {
+                        rt_device_t old = rt_console_set_device("logmux");
+                        if (old) {
+                            s_old_console = old;
+                            rt_device_open(s_old_console, RT_DEVICE_OFLAG_RDWR | RT_DEVICE_FLAG_STREAM);
+                        }
+                    }
+                } else if (!want && s_log_on) {
+                    /* 关闭时切回 UART，恢复原来的输出通道 */
+                    if (s_uart_name[0]) rt_console_set_device(s_uart_name);
+                }
+                s_log_on = want;
+                if (s_log_on) { s_log_w = s_log_r = 0; }   /* 从干净的起点开始 */
+                rt_kprintf("[LOG] USB log fwd %s\n", s_log_on ? "ON" : "OFF");
+                conf_status_reply(&pkt, 0x00);
+                continue;
+            }
 
             /* ★★ 11-23 安全模式：只放行 INFO 查询，其余配置命令一律拒绝。
              * 安全模式下 rgb_led_init()/LED 设备节点均未创建，上位机若下发
@@ -545,6 +760,33 @@ static void conf_task_entry(void *param)
                         }
                     }
                 }
+                /* ★ 11-24: HID 通道（每槽）—— 紧凑 payload 第 316 字节
+                 * （payload[315]，紧跟 EC 按压滚动的 [297..314]）。
+                 * 旧上位机不带这个字节 ⇒ 不进入本分支，保持 flash 现值。
+                 * 只接受 0/1，其它值一律忽略（绝不把 0xFF 写进去）。 */
+                if (data_len >= 316)
+                {
+                    uint8_t t = pkt.buf[8 + 315];
+                    if (t <= KEY_CONFIG_HID_CLASSIC)
+                        cfg->hid_transport = t;
+                }
+
+                /* ★ 11-24: 蓝牙开关（每槽）—— 紧凑 payload 第 317 字节。
+                 * bit0=经典 bit1=BLE，只接受 0~3（0xFF 一律忽略）。 */
+                if (data_len >= 317)
+                {
+                    uint8_t f = pkt.buf[8 + 316];
+                    if (f <= KEY_CONFIG_BT_ALL)
+                        cfg->bt_en_flags = f;
+                }
+
+                /* 11-25 诊断：确认 WRITE 真的解析到了尾部两个字节
+                 * （payload 长度不足/固件版本旧 时这里不会出现预期值） */
+                rt_kprintf("[KEYCONFIG] write slot%d len=%u -> hid=%d bt=%d (raw=%02x,%02x)\n",
+                           slot + 1, (unsigned)data_len,
+                           (int)cfg->hid_transport, (int)cfg->bt_en_flags,
+                           pkt.buf[8 + 315], pkt.buf[8 + 316]);
+
                 key_config_save_slot(slot);
                 rgb_req_t req = { .type = 1 };
                 rt_mq_send(rgb_mq, &req, sizeof(req));
@@ -606,9 +848,34 @@ static void conf_task_entry(void *param)
                  * 槽位: 1~3 为当前激活的蓝牙槽位；方便上位机首次连接时自动同步显示。
                  * (09-03 BLE 通道也靠它拿真实槽位 —— ble_config_worker 先 INFO 再按槽读写) */
                 int bat = app_battery_valid() ? (int)app_get_battery_percent() : 255;
+                /* ★ 11-25 双重校验：app_battery_valid() 在电量驱动还没跑完第一轮时会
+                 * 误报"有效"，此时 percent 就是 255(未初始化) —— 实测日志
+                 * "VibeKey-F3|1.3.6|255|1"，5 秒后才变 100。
+                 * 越界一律回哨兵 255，两端(上位机 PortDetector / 网页 parseInfo)
+                 * 都已把非 0~100 当"未知"，不会再显示 255%。 */
+                if (bat < 0 || bat > 100) bat = 255;
                 int slot = (int)bt_multi_get_slot();   /* 1~3 */
+                /* ★ 11-25 尾部追加 USB 诊断计数（第 5 个字段）。
+                 * 客户端按 '|' 分段取前 4 段，多出的字段天然被忽略，不破坏兼容。
+                 * 用途：USB 假死时改用 **BLE 通道**读 INFO，就能看到 out/conf 停在哪 ——
+                 * 这是唯一能在"USB 已经不能通信"之后仍拿到证据的途径。
+                 * out = OUT 端点收到的包数；conf = 真正进到 conf_task 的包数。 */
+                extern volatile uint32_t g_usb_out_cnt, g_usb_conf_cnt;
+                extern volatile uint32_t g_usb_ev_reset, g_usb_ev_susp, g_usb_ev_resm,
+                                        g_usb_ev_conf, g_usb_ev_err;
+                /* ★ 11-25 一次性格式化（原来分两步拼接，第二步 rt_snprintf 截断时
+                 * 返回值是"本应写入的长度"，导致 info_len 多 1 字节 —— 实测上位机
+                 * 每次都多收到一个 0x00 尾字节）。 */
                 int info_len = rt_snprintf((char *)conf_tx_buf, sizeof(conf_tx_buf),
-                                           "%s|%s|%d|%d\n", VIBEKEY_MODEL, VIBEKEY_FW_VERSION, bat, slot);
+                                           "%s|%s|%d|%d|out=%u,conf=%u|R%u,S%u,W%u,C%u,E%u|H=%s\n",
+                                           VIBEKEY_MODEL, VIBEKEY_FW_VERSION, bat, slot,
+                                           (unsigned)g_usb_out_cnt, (unsigned)g_usb_conf_cnt,
+                                           (unsigned)g_usb_ev_reset, (unsigned)g_usb_ev_susp,
+                                           (unsigned)g_usb_ev_resm, (unsigned)g_usb_ev_conf,
+                                           (unsigned)g_usb_ev_err,
+                                           usb_hist_get());
+                if (info_len > (int)sizeof(conf_tx_buf) - 1)
+                    info_len = (int)sizeof(conf_tx_buf) - 1;   /* 截断保护 */
                 conf_send_reply(&pkt, conf_tx_buf, (uint16_t)info_len);
             }
         }
@@ -716,10 +983,65 @@ static uint32_t q_read(uint8_t *dst, uint32_t max_len)
     return to_read;
 }
 
+/* ★ 11-25 诊断：统计 USB 事件次数。
+ * 用途：Mac 上 OUT 端点停住后，可经 **BLE 通道**读 INFO 拿到这些计数，
+ * 判断是"被主机挂起(SUSPEND)"、"发生过 RESET"、还是"控制器报错(ERROR)"。 */
+volatile uint32_t g_usb_ev_reset = 0, g_usb_ev_susp = 0, g_usb_ev_resm = 0;
+volatile uint32_t g_usb_ev_conf = 0, g_usb_ev_err  = 0;
+/* ★ 11-25 复位后未重新配置的检测（配合 main.c 的恢复逻辑）：
+ * 总线复位会清掉端点武装，只有 CONFIGURED 才会重新武装。
+ * 实测 Mac/无 VBUS 的 PC 上出现 "R2,C1" —— 第二次复位后主机再没来配置，
+ * OUT 从此收不到数据。这里记录"最近一次复位时刻"，由 vbus 线程判断超时。 */
+volatile rt_tick_t g_usb_reset_tick   = 0;
+volatile uint8_t   g_usb_configured   = 0;
+
+/* ★ 11-25 事件历史环：记录"谁在什么时候动了 USB"。
+ * 只记最近 8 条，格式 <事件字母><秒数>;  例如 "S1,C1,R2,P4,R5"
+ *   S=usb_start  P=usb_stop  R=总线复位  C=配置完成  W=恢复  U=挂起  E=控制器错误
+ * 通过 INFO 回包第 7 段输出，USB 死了也能用 BLE 读。 */
+/* 用定长数组存，取用时再拼字符串（避免依赖 strncat 等不一定存在的库函数） */
+static struct { char c; uint16_t sec; } s_hist[8];
+static int s_hist_n = 0;   /* 已记录条数(≤8) */
+static int s_hist_i = 0;   /* 下一次写入位置 */
+
+void usb_hist(char code)
+{
+    s_hist[s_hist_i].c = code;
+    s_hist[s_hist_i].sec = (uint16_t)(rt_tick_get() * 1000UL / RT_TICK_PER_SECOND / 1000);
+    s_hist_i = (s_hist_i + 1) % 8;
+    if (s_hist_n < 8) s_hist_n++;
+}
+
+const char *usb_hist_get(void)
+{
+    static char buf[80];
+    int off = 0;
+    buf[0] = 0;
+    for (int k = 0; k < s_hist_n; k++) {
+        int idx = (s_hist_i - s_hist_n + k + 8) % 8;
+        off += rt_snprintf(buf + off, sizeof(buf) - off, "%c%u;",
+                           s_hist[idx].c, (unsigned)s_hist[idx].sec);
+        if (off >= (int)sizeof(buf) - 8) break;
+    }
+    return buf;
+}
+
+/* ★★ 11-25 分片重组缓冲。
+ * 症状：网页写入 317 字节 payload（整帧 325B）后，设备端 data_len 正确(317)，
+ * 但尾部字节读出来是上一帧残留 —— 主机会把一次写拆成多个 USB 包，
+ * 我们的回调按"收到即当作完整帧"处理，于是尾部 5 字节还在路上就被丢弃了。
+ * 现在先攒够 8+data_len 再投递；魔数不对时逐字节滑动重新同步。 */
+static uint8_t  s_asm_buf[CONF_PKT_MAX + 16];
+static uint32_t s_asm_len = 0;
+
 static void usbd_event_handler(uint8_t busid, uint8_t event)
 {
     if (event == USBD_EVENT_CONFIGURED)
     {
+        g_usb_ev_conf++;
+        usb_hist('C');
+        g_usb_configured = 1;
+        g_usb_reset_tick = 0;          /* 已重新配置，撤销待恢复标记 */
         ep_tx_busy_flag = false;
         usbd_ep_start_read(busid, CDC_OUT_EP, read_buffer, 2048);
     }
@@ -727,13 +1049,89 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
     {
         /* 总线复位：清发送忙标志，OUT 接收会在随后的 CONFIGURED 事件中重新武装，
          * 避免 reset 后设备收不到数据 / 串口打不开。*/
+        g_usb_ev_reset++;
+        usb_hist('R');
+        s_asm_len = 0;                 /* 复位后残留的半帧必须丢弃 */
+        g_usb_configured = 0;
+        g_usb_reset_tick = rt_tick_get();
         ep_tx_busy_flag = false;
+        /* ★★ 11-25 复位时**立刻重新武装 OUT**，不等主机再发 SET_CONFIGURATION。
+         * 依据实测：Mac 和"不供电"的主机上出现 R2/C1（复位了但没重新配置），
+         * 端点从此未武装 ⇒ 数据永远收不到；而 R4/C2 的会话一切正常。
+         * 这类复位多半是电气抖动引起的"假复位"——主机那边仍认为设备已配置、
+         * 继续用原地址发数据，只是我们把自己的端点状态清零了。
+         * 因此这里直接重开接收：真复位（地址回 0）时这一手也无害，
+         * 因为主机不会再用旧地址发数据。 */
+        usbd_ep_start_read(busid, CDC_OUT_EP, read_buffer, 2048);
     }
+    else if (event == USBD_EVENT_SUSPEND)
+    {
+        g_usb_ev_susp++; usb_hist('U');
+    }
+    else if (event == USBD_EVENT_RESUME)
+    {
+        g_usb_ev_resm++; usb_hist('W');
+        /* ★ 恢复后重建 OUT 接收：主机挂起期间端点状态可能已被控制器清掉，
+         * 不重新武装就会出现"恢复后第一包之后再无数据"。 */
+        ep_tx_busy_flag = false;
+        usbd_ep_start_read(busid, CDC_OUT_EP, read_buffer, 2048);
+    }
+    else if (event == USBD_EVENT_ERROR)
+    {
+        g_usb_ev_err++; usb_hist('E');
+    }
+}
+
+/* ★ 11-25 把收到的字节喂进组装缓冲，按 data_len 切帧后投递。
+ * 独立成函数是因为它要处理"续帧"：一帧被拆包后，后续小包可能只有 3~5 字节，
+ * 原来的 `nbytes >= 8` 判断会把它们挡在门外（实测：尾部 5 字节被丢，
+ * 于是 payload 尾部读出来是上一帧残留）。 */
+static void conf_asm_feed(uint8_t busid, const uint8_t *data, uint32_t nbytes)
+{
+    if (s_asm_len + nbytes > sizeof(s_asm_buf))
+        s_asm_len = 0;                       /* 异常累积，丢弃重来 */
+    memcpy(s_asm_buf + s_asm_len, data, nbytes);
+    s_asm_len += nbytes;
+
+    uint32_t off = 0;
+    while (s_asm_len - off >= 8)
+    {
+        uint32_t m = *(uint32_t *)&s_asm_buf[off];
+        if (m != CONF_MAGIC) { off++; continue; }        /* 失步：滑动重同步 */
+        uint16_t dl = *(uint16_t *)&s_asm_buf[off + 6];
+        if (dl > CONF_PKT_MAX - 8) { off++; continue; }  /* 长度非法：当作假魔数 */
+        uint32_t need = 8u + dl;
+        if (s_asm_len - off < need) break;               /* 没收全，等下一包 */
+
+        conf_pkt_t pkt;
+        pkt.len = need;
+        pkt.src = CONF_SRC_USB;
+        pkt.conn_idx = 0;
+        memcpy(pkt.buf, s_asm_buf + off, need);
+        rt_mq_send(conf_mq, &pkt, sizeof(pkt));
+        off += need;
+    }
+
+    if (off > 0)
+    {
+        uint32_t rest = s_asm_len - off;
+        if (rest) memmove(s_asm_buf, s_asm_buf + off, rest);
+        s_asm_len = rest;
+    }
+    usbd_ep_start_read(busid, CDC_OUT_EP, read_buffer, 2048);
 }
 
 void usbd_cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
 {
     uint32_t magic = (nbytes >= 8) ? *(uint32_t *)&read_buffer[0] : 0;
+    if (!ota_started) g_usb_out_cnt++;      /* 11-25 诊断：OUT 包计数 */
+
+    /* ★ 11-25 续帧：正在组装一帧时，后续字节一律走组装器（可能不足 8 字节） */
+    if (!ota_started && s_asm_len > 0)
+    {
+        conf_asm_feed(busid, read_buffer, nbytes);
+        return;
+    }
 
     if (!ota_started && !conf_busy && nbytes >= 8)
     {
@@ -771,17 +1169,7 @@ void usbd_cdc_acm_bulk_out(uint8_t busid, uint8_t ep, uint32_t nbytes)
         }
         else if (magic == CONF_MAGIC)
         {
-            /* ISR 只拷贝并投递：真正处理（含 flash 写/回包）由 conf_task 线程完成，
-               避免在中断上下文同步调用 key_config_save()（取互斥量->fatal）与
-               usbd_ep_start_write（MUSB 回包在 ISR 内不安全）。*/
-            conf_pkt_t pkt;
-            uint32_t cp = (nbytes > CONF_PKT_MAX) ? CONF_PKT_MAX : nbytes;
-            pkt.len = cp;
-            pkt.src = CONF_SRC_USB;      /* 09-03: 回包路由来源标记 */
-            pkt.conn_idx = 0;
-            memcpy(pkt.buf, read_buffer, cp);
-            rt_mq_send(conf_mq, &pkt, sizeof(pkt));
-            usbd_ep_start_read(busid, CDC_OUT_EP, read_buffer, 2048);
+            conf_asm_feed(busid, read_buffer, nbytes);
             return;
         }
     }
@@ -886,6 +1274,7 @@ void cdc_acm_init(uint8_t busid, uintptr_t reg_base)
     usbd_add_interface(busid, usbd_cdc_acm_init_intf(busid, &intf1));
     usbd_add_endpoint(busid, &cdc_out_ep);
     usbd_add_endpoint(busid, &cdc_in_ep);
+    s_usb_ready = 1;            /* 日志转发线程从这里开始才允许写 IN 端点 */
 
     /* RGB 实时预览线程（ISR 不能直接调 WS2812B 驱动，经消息队列转发）*/
     rgb_mq = rt_mq_create("rgbmq", sizeof(rgb_req_t), RGB_REQ_MQ_SIZE, RT_IPC_FLAG_FIFO);
@@ -918,7 +1307,15 @@ void cdc_acm_disable(void)
 }
 
 volatile uint8_t dtr_enable = 0;
-void usbd_cdc_acm_set_dtr(uint8_t busid, uint8_t intf, bool dtr) { dtr_enable = dtr ? 1 : 0; }
+void usbd_cdc_acm_set_dtr(uint8_t busid, uint8_t intf, bool dtr)
+{
+    dtr_enable = dtr ? 1 : 0;
+    /* ★ 11-25 主机把 DTR 拉起来 = 它真的打开了这个串口。
+     * **只刷新时刻，不在 dtr=0 时清零** —— Web Serial 打开端口时发的控制线状态
+     * 不可靠（实测会带 dtr=0），一旦清零，vbus 线程下一拍就把 USB 关了，
+     * 表现正是"读完一次配置就无响应"。真拔线的情形交给超时判断。 */
+    if (dtr) { g_usb_last_rx_tick = rt_tick_get(); g_usb_host_ever = 1; }
+}
 
 static uint8_t wbuf[8192];
 

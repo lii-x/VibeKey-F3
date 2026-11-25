@@ -1,6 +1,7 @@
 
 #include <rtthread.h>
 #include "ble_app.h"
+#include "key_config.h"   /* 11-24: 每槽蓝牙开关/HID 通道 */
 #include "bf0_hal.h"
 #include "drivers/pm.h"
 #include <string.h>
@@ -97,7 +98,25 @@ static const char *bt_classic_name = RT_NULL;   /* 运行时取 local_name, 见�
  * 兜底逻辑保留(6s 主动连 + 重试收敛), 仅手机响应慢。
  * 历史: 0x200414(音响图标)→0x200408(耳机图标)均实测改善手机响应
  * (24s), 若后续想恢复"手机识别为音频设备"的收益可改回。 */
-uint32_t bt_get_class_of_device(void) { return 0x200000; }
+/* ★★ 11-24 COD 修正 —— macOS 配对后不建 HID 通道的直接原因。
+ *
+ * COD(24bit) 字段布局：bit23-13 主要服务类 / bit12-8 主要设备类 / bit7-2 次要设备类
+ *   0x200000 ⇒ 服务=Audio(bit21) ✅，**主要设备类=0x00(Miscellaneous)** ❌
+ *   0x200414 / 0x200408(历史值) ⇒ 主要设备类=0x04(Audio/Video)，同样**不是外设**
+ * 也就是说设备一直没对外宣称自己是"外设"，Windows 无所谓（照样查 SDP 读 HID 记录），
+ * 但 **macOS 更严格：COD 不是 Peripheral 就不去建立 HID 控制/中断通道**
+ * ⇒ 表现正是"能扫到设备、连上后没反应"。
+ *
+ * 正确值 0x2005C0：
+ *   服务类 bit21 = Audio（保留，手机仍认它是音频设备）
+ *   主要设备类   = 0x05 Peripheral
+ *   次要设备类   = 0xC0 Keyboard + Pointing（我们同时暴露键盘/鼠标/多媒体）
+ *
+ * ⚠️ 与下方历史注释的取舍：曾经为了"手机更快连上 HFP"把 COD 调成音响/耳机图标
+ *    (0x200414/0x200408)。现在必须让主要设备类回到 Peripheral —— 音频服务位仍在，
+ *    手机的 HFP 行为应基本不变；若安卓 HFP 变慢，靠已有的"设备主动连 + 重试"兜底。
+ */
+uint32_t bt_get_class_of_device(void) { return 0x2005C0; }
 
 typedef struct { uint16_t type; uint16_t event_id; uint16_t data_len; uint8_t *data; } bt_app_notify_data_t;
 
@@ -598,8 +617,35 @@ static void cls_autoconn_schedule(uint32_t ms);
 static void cls_autoconn_cb(void *param);
 void bt_classic_hid_kick_connect(void);   /* 定义在下方：排一次 HID 通道主动连接 */
 
+static int cls_enabled(void);   /* 前向声明：判定定义在 cls_autoconn_cb 之前 */
+/* 供其它路径（HFP 握手等）判断"经典是否被配置关闭" */
+int ble_app_classic_enabled(void) { return cls_enabled(); }
+
+/* ★ 11-25 HFP 连接统一入口：经典被关闭时**不发请求**，直接返回 0。
+ * 返回 0 的语义是"已提交"，调用方的重试/告警逻辑因此不会启动
+ * （用负值会让它进 8×2s 重试循环，反而一直骚扰射频）。
+ * 之所以做成函数而不是在每处加 if：`bt_err_t r = if(...)` 不是合法 C，
+ * 逐个包裹容易改坏语法，替换函数名则处处安全。 */
+/* ★ 11-25 page/inquiry scan 统一入口：经典被关闭时**强制全关**。
+ * 之前逐处加判断总会漏 —— BLE 连上后 "boot-first, page scan wait 800ms" 这条路
+ * 又把 page scan 打开了（日志 target_scan_mode:2），主机照样能寻呼到设备。
+ * 收敛到这一层后，任何调用点都不可能违背"经典关闭"的意图。 */
+static uint8_t vk_set_scan_mode(uint8_t inquiry, uint8_t page_scan)
+{
+    if (!cls_enabled()) { inquiry = 0; page_scan = 0; }
+    return bt_interface_set_scan_mode(inquiry, page_scan);
+}
+
+static bt_err_t vk_hfp_connect_req(const uint8_t *addr)
+{
+    if (!cls_enabled()) return 0;
+    return bt_interface_hfp_hf_start_connecting((uint8_t *)addr);
+}
+
 static void cls_autoconn_schedule(uint32_t ms)
 {
+    if (!cls_enabled()) return;                               /* 经典已关闭，不排回连 */
+
     if (!g_cls_conn_timer) {
         g_cls_conn_timer = rt_timer_create("cls_conn", cls_autoconn_cb, RT_NULL,
             rt_tick_from_millisecond(ms),
@@ -658,8 +704,18 @@ void bt_cls_autoconn_kick(uint32_t delay_ms)
     cls_autoconn_schedule(delay_ms);
 }
 
+/* ★ 11-24 当前槽位是否允许经典蓝牙。关闭时所有"主动建链"路径都必须让路，
+ * 否则设备自己 page 主机 → ACL 建起来 → HID 通道被踢开，"关闭"形同虚设。
+ * （实测: 只跳过 classic_hid_open() 时，auto connect 仍把 PC 连上了。） */
+static int cls_enabled(void)
+{
+    extern uint8_t key_config_bt_flags(void);
+    return (key_config_bt_flags() & KEY_CONFIG_BT_CLASSIC_EN) != 0;
+}
+
 static void cls_autoconn_cb(void *param)
 {
+    if (!cls_enabled()) return;                               /* 经典已关闭 */
     extern void *bt_cm_get_bonded_dev_by_addr(uint8_t *addr);
     extern volatile int g_pm_shutting_down;
 
@@ -687,7 +743,7 @@ static void cls_autoconn_cb(void *param)
     rt_kprintf("[CLS] auto connect #%d -> %02x:%02x:%02x:%02x:%02x:%02x (%d/%d)\n",
                g_cls_conn_tries, a[5], a[4], a[3], a[2], a[1], a[0],
                (int)g_cls_attempts, CLS_CONN_MAX_TOTAL);
-    bt_interface_hfp_hf_start_connecting((uint8_t *)a);
+    vk_hfp_connect_req((uint8_t *)a);
     /* 顺手把 HID 通道也排上：ACL 建起来之后（不管是 HFP 建的还是只建了 ACL）
      * 都能把 HID 控制/中断通道拉起来。即使对端不接受 HFP，键鼠还有机会工作。 */
     bt_classic_hid_kick_connect();
@@ -758,7 +814,7 @@ static void hfp_mgr_thread_entry(void *param)
                 rt_tick_t now = rt_tick_get();
                 rt_kprintf("[HID] direct active HFP connect (bt key ready, mgr), BLE->HFP %lums\n",
                            (unsigned long)((now - g_ble_conn_tick) * 1000UL / RT_TICK_PER_SECOND));
-                bt_err_t r = bt_interface_hfp_hf_start_connecting(g_hid_env.peer_addr);
+                bt_err_t r = vk_hfp_connect_req(g_hid_env.peer_addr);
                 if (r != 0) {
                     /* ⚠️ BLE 回连可能早于 BR/EDR 栈就绪(HFP 未使能): 首次请求返回
                      * BT_ERROR_STATE(0x10000005)被拒。若直接放弃, 依赖 pscan 链兜底
@@ -770,7 +826,7 @@ static void hfp_mgr_thread_entry(void *param)
                         rt_thread_mdelay(2000);
                         if (!g_hid_env.is_connected || g_hfp_connected) break;
                         if (!hfp_connect_latch_take()) break;   /* 已被 pscan 链抢发 */
-                        r = bt_interface_hfp_hf_start_connecting(g_hid_env.peer_addr);
+                        r = vk_hfp_connect_req(g_hid_env.peer_addr);
                         if (r == 0) {
                             rt_kprintf("[HID] HFP connect retry %d OK (BR/EDR ready)\n", i + 1);
                             break;
@@ -949,7 +1005,7 @@ static void page_scan_window_stop(void)
         rt_timer_delete(g_page_scan_timer);
         g_page_scan_timer = RT_NULL;
     }
-    bt_interface_set_scan_mode(0, 0);
+    vk_set_scan_mode(0, 0);
 }
 
 /* 延迟 ms 后触发一次 HFP 连接尝试(hfp_connect_timer_cb 执行)。
@@ -1007,6 +1063,7 @@ static void hid_kick_fire(void *parameter);
 void bt_classic_hid_kick_connect(void)
 {
     extern unsigned char classic_hid_linked(void);
+    if (!cls_enabled()) return;                               /* 经典已关闭，不建 HID 通道 */
 
     /* ★ 11-17: 60 秒窗口用完进入"放弃"状态后，**任何来源都不许再踢**，
      * 否则 kick 状态机每 10s 自动重新武装，会一直把射频拉起来、反复唤醒主核。
@@ -1287,12 +1344,12 @@ static void hfp_connect_timer_cb(void *parameter)
     }
 
     hfp_connect_timer = 1;
-    bt_interface_set_scan_mode(0, 1);   // 不可被搜索(关 inquiry)，保持可连接(page 开)
+    vk_set_scan_mode(0, 1);   // 不可被搜索(关 inquiry)，保持可连接(page 开)
     rt_kprintf("[BLE HID] HFP connect attempt %d -> %02x:%02x:%02x:%02x:%02x:%02x\n",
         hfp_connect_retry,
         g_hid_env.peer_addr[5], g_hid_env.peer_addr[4], g_hid_env.peer_addr[3],
         g_hid_env.peer_addr[2], g_hid_env.peer_addr[1], g_hid_env.peer_addr[0]);
-    bt_err_t ret = bt_interface_hfp_hf_start_connecting(g_hid_env.peer_addr);
+    bt_err_t ret = vk_hfp_connect_req(g_hid_env.peer_addr);
     if (ret != 0) {
         /* MAC 非法 / 请求被拒：释放闩锁并计数，800ms 后由本定时器重试 */
         hfp_connect_timer = 0;
@@ -1318,8 +1375,21 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             bt_interface_set_local_name(strlen(cls_name), (void *)cls_name);
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
                   cls_name, local_name);
-            /* 10-31: 蓝牙栈就绪 ⇒ 使能经典 HID(键盘+鼠标+多媒体) */
-            { extern void classic_hid_open(void); classic_hid_open(); }
+            /* ★ 11-24 按槽位开关决定是否拉起经典蓝牙。
+             * 关掉经典 ⇒ 不注册 HID、不开 page scan，设备在 BR/EDR 上完全沉默
+             * （省电 / 避免与 BLE 通道互相干扰；例如只用 BLE 的场景）。 */
+            { extern uint8_t key_config_bt_flags(void);
+              if (key_config_bt_flags() & KEY_CONFIG_BT_CLASSIC_EN) {
+                  extern void classic_hid_open(void);
+                  classic_hid_open();
+              } else {
+                  rt_kprintf("[BT] classic DISABLED by config (slot level)\n");
+                  /* SDK 在栈初始化时就 hid_enb_req 把 HID 服务打开了（日志
+                   * "btsapp_hid: >> HID enabled" 早于我们的判断），所以只跳过
+                   * classic_hid_open() 没用 —— 必须显式关掉，主机才找不到 HID。 */
+                  { extern void bt_hid_close(void); bt_hid_close(); }
+                  rt_kprintf("[BT] classic HID service closed\n");
+              } }
             /* 链路策略：入向 lp_in=0x0005(role switch+sniff) 保留——PC 主动连时
              * 设备可 role switch 成 master 省功耗；出向 lp_out=0x0004 禁用 role switch，
              * 设备主动发起 ACL 时拒绝手机的 role switch 请求、保持 master，
@@ -1336,7 +1406,27 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
              * 设备(蓝牙1/2)的 BR/EDR 骚扰由"仅手机主动 page 键盘"天然规避(电脑不会主动
              * page), BLE 侧仍由拒绝列表拦截。手机 BR/EDR 配对成功(HFP connected)时
              * bt_multi_on_br_paired 结束配对窗口, 广播转白名单停掉蓝牙1/2 骚扰。 */
-            bt_interface_set_scan_mode(0, 1);
+            /* ★★ 11-24 配对窗口内必须**可被发现**(inquiry scan 打开)。
+             * 原来这里恒为 (0,1) = 只开 page scan：page scan 只允许【已知地址】
+             * 的旧主机来寻呼，新主机必须先把设备"扫"出来才能发起配对。
+             * Windows 靠 BLE 广播能看见设备，所以一直没暴露；**macOS 的配对流程
+             * 是"蓝牙设置 → 搜索设备"（经典 inquiry）**，设备不可被发现 ⇒ 列表里
+             * 根本没有它 ⇒ 客户反馈"Mac 上蓝牙配不上"。
+             * 配对模式(BT_MODE_PAIR=1)下改成 (1,1)：可被发现 + 可被寻呼；
+             * 配对完成由 bt_slot.c 的两个出口收回成 (0,1)，不长期增加功耗。 */
+            { extern uint8_t key_config_bt_flags(void);
+              if (!(key_config_bt_flags() & KEY_CONFIG_BT_CLASSIC_EN)) {
+                  vk_set_scan_mode(0, 0);      /* 经典关闭: 不可连也不可发现 */
+                  rt_kprintf("[BT] page/inquiry scan OFF (classic disabled)\n");
+              } else {
+              extern uint8_t bt_multi_get_mode(void);
+              uint8_t m = bt_multi_get_mode();
+              if (m == 1 /*BT_MODE_PAIR*/) {
+                  vk_set_scan_mode(1, 1);
+                  rt_kprintf("[CLS] PAIR mode -> discoverable (inquiry+page scan ON)\n");
+              } else {
+                  vk_set_scan_mode(0, 1);
+              } } }
             /* 开机常开 page scan 用默认低活动度(省电); 配对/回连窗口由
              * page_scan_window_start 切高活动度提高寻呼命中率(08-07)。 */
             set_page_scan_activity(0);
@@ -1760,7 +1850,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
                             rt_kprintf("[BLE HID] HFP failed x%d, still no bt key, keep bond, wait host\n",
                                        HFP_REDERIVE_MAX);
                             if (g_hid_env.is_connected) {
-                                bt_interface_set_scan_mode(0, 1);
+                                vk_set_scan_mode(0, 1);
                                 uint8_t bonded = hfp_peer_is_bonded(g_hid_env.peer_addr);
                                 page_scan_window_start(bonded ? 1500 : 800);
                             }
@@ -1779,7 +1869,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
                         rt_kprintf("[BLE HID] HFP failed x%d (bt key kept, not overwritten), wait host re-pair\n",
                                    HFP_CONNECT_RETRY_MAX);
                         if (g_hid_env.is_connected) {
-                            bt_interface_set_scan_mode(0, 1);
+                            vk_set_scan_mode(0, 1);
                             uint8_t bonded = hfp_peer_is_bonded(g_hid_env.peer_addr);
                             page_scan_window_start(bonded ? 1500 : 800);
                         }
@@ -1793,7 +1883,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
                 extern void bt_multi_on_hfp_state(uint8_t hfp_on);
                 bt_multi_on_hfp_state(0);
                 if (g_hid_env.is_connected && !g_hfp_rederive_cnt) {
-                    bt_interface_set_scan_mode(0, 1);
+                    vk_set_scan_mode(0, 1);
                     uint8_t bonded = hfp_peer_is_bonded(g_hid_env.peer_addr);
                     /* HFP 掉线但 BLE 仍在：短窗口等 PC 重连，超时设备主动发起兜底。
                      * 原 10s/3s 过长，改为 1.5s/0.8s（同 BLE 连接策略）。
@@ -2056,6 +2146,15 @@ void app_ble_teardown_for_standby(void)
 void ble_app_wakeup_advertise(void)
 {
     g_standby_teardown = 0;   /* 退出待机/正常唤醒: 恢复正常广播策略 */
+    /* ★ 11-24 该槽位关掉了 BLE ⇒ 不广播。
+     * 所有广播入口(POWER_ON / 唤醒 / 断连重播)都收敛到本函数，所以一处判断即可。
+     * ⚠️ 关 BLE 后配置通道只剩 USB —— UI 必须提示用户。 */
+    { extern uint8_t key_config_bt_flags(void);
+      if (!(key_config_bt_flags() & KEY_CONFIG_BT_BLE_EN)) {
+          static uint8_t warned = 0;
+          if (!warned) { warned = 1; rt_kprintf("[BT] BLE advertising DISABLED by config\n"); }
+          return;
+      } }
     if (g_hid_env.is_connected) return;   /* 已连接，无需广播 */
     /* ⚠️ BLE 栈未就绪(上电早期, 短按松开即触发按键事件)时绝不能碰广播:
      * sibles_advertising_* 在栈未初始化时调用会取到 NULL 信号量
@@ -2311,9 +2410,9 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         /* 三设备切换: 配对窗口内(新设备 BLE 已连、配对尚未完成)经典蓝牙保持关闭,
          * 防已配对设备趁 page scan 从 BR/EDR 抢连 HFP; 配对成功后恢复(PAIRING_SUCCEED)。 */
         if (bt_multi_is_pairing_window())
-            bt_interface_set_scan_mode(0, 0);
+            vk_set_scan_mode(0, 0);
         else
-            bt_interface_set_scan_mode(0, 1);
+            vk_set_scan_mode(0, 1);
         {
             uint8_t bonded = hfp_peer_is_bonded(g_hid_env.peer_addr);
             uint8_t boot_first = !g_boot_first_connect;
@@ -2479,8 +2578,14 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
          * 寻呼建 HFP)。BR/EDR 栈未就绪时此调用被 SDK 忽略, 由 BT_STACK_READY
          * 时的状态判断兜底(届时已非配对窗口 → 正常开启)。 */
         if (g_br_ready) {
-            bt_interface_set_scan_mode(0, 1);
-            rt_kprintf("[HID] PAIR done: classic BT page scan restored\n");
+            /* ★ 11-25 日志如实反映实际行为：经典被配置关闭时 vk_set_scan_mode
+             * 会强制归零，原来那句 "page scan restored" 会误导排查
+             * （上层说恢复了，底层其实没开）。 */
+            vk_set_scan_mode(0, 1);
+            if (ble_app_classic_enabled())
+                rt_kprintf("[HID] PAIR done: classic BT page scan restored\n");
+            else
+                rt_kprintf("[HID] PAIR done: page scan kept OFF (classic disabled)\n");
         }
         break;
     }

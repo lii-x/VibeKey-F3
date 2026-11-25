@@ -1001,6 +1001,25 @@ void KeyConfigManager::setSleepMin(int minutes)
     setStatus("休眠时间已更改，写入后生效");
 }
 
+void KeyConfigManager::setHidTransport(int transport)
+{
+    /* 只有 0/1 合法，其它一律按经典处理（与固件侧的兜底一致） */
+    int v = (transport == 0) ? 0 : 1;
+    if (m_hidTransport == v)
+        return;
+    m_hidTransport = v;
+    emit hidTransportChanged();
+}
+
+void KeyConfigManager::setBtEnabled(int classicOn, int bleOn)
+{
+    int v = ((classicOn ? 0x01 : 0) | (bleOn ? 0x02 : 0));
+    if (m_btEnFlags == v)
+        return;
+    m_btEnFlags = v;
+    emit btEnFlagsChanged();
+}
+
 void KeyConfigManager::readConfig()
 {
     if (m_process && m_process->state() != QProcess::NotRunning) {
@@ -1057,6 +1076,12 @@ void KeyConfigManager::writeConfig()
     root["air_mouse_mode"] = (m_airMouseMode == 1) ? "hold" : "toggle";
     root["air_mouse_speed"] = (m_airMouseSpeed == 0) ? "slow" : ((m_airMouseSpeed == 2) ? "fast" : "medium");
     root["sleep_min"] = m_sleepMin;   /* 08-27: 休眠分钟(0=永不) */
+    /* 11-24: HID 通道（每槽）。旧固件忽略该字段，双向兼容。 */
+    root["hid_transport"] = m_hidTransport;
+    /* ★ 11-25 蓝牙开关已从界面移除：两套协议栈**固定全开**，不允许用户关闭。
+     * 这里强制下发 0x03（bit0 经典 + bit1 BLE），不再读 m_btEnFlags ——
+     * 即使某个槽位之前被写成 0，下一次写入也会被纠正回"全开"。 */
+    root["bt_en_flags"] = 3;
     /* 09-03: 摇一摇。⚠️ air_mouse_dir 故意不写入(交 python 用 0xFF 保持现值) */
     root["shake_enabled"] = (m_shakeEnabled == 1) ? 1 : 0;
     root["shake_sens"] = m_shakeSens;
@@ -1744,6 +1769,20 @@ void KeyConfigManager::onProcessFinished(int exitCode, QProcess::ExitStatus exit
                     int newMode = (modeStr == "hold") ? 1 : 0;
                     int newSpeed = (speedStr == "slow") ? 0 : ((speedStr == "fast") ? 2 : 1);
                     int newSleep = obj["sleep_min"].toInt(45);   /* 08-27: 旧固件无此字段->45 */
+                    /* 11-24: 旧固件无该字段 -> toInt(1) 默认经典，与旧行为一致 */
+                    int newTransport = obj["hid_transport"].toInt(1);
+                    newTransport = (newTransport == 0) ? 0 : 1;
+                    if (m_hidTransport != newTransport) {
+                        m_hidTransport = newTransport;
+                        emit hidTransportChanged();
+                    }
+                    /* 11-24: 旧固件无该字段 -> toInt(3) 默认都开 */
+                    int newBtFlags = obj["bt_en_flags"].toInt(3);
+                    if (newBtFlags < 0 || newBtFlags > 3) newBtFlags = 3;
+                    if (m_btEnFlags != newBtFlags) {
+                        m_btEnFlags = newBtFlags;
+                        emit btEnFlagsChanged();
+                    }
                     if (m_airMouseMode != newMode) {
                         m_airMouseMode = newMode;
                         emit airMouseModeChanged();

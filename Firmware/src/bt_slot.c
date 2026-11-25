@@ -298,6 +298,12 @@ void bt_multi_on_hfp_state(uint8_t hfp_on)
     /* 10-31: 原来用 g_hid_env.is_connected(BLE) 判据 —— 手机只走经典蓝牙，
      * BLE 永远不连 ⇒ 这里直接 return，HFP 就绪后槽位灯**永远不熄灭**。改判"任一宿主已连"。 */
     if (!bt_host_linked()) return;
+    /* ★ 11-25 经典关闭时，HFP 状态变化不应再点亮"等 HFP"的青色 */
+    { extern uint8_t key_config_bt_flags(void);
+      if (!(key_config_bt_flags() & KEY_CONFIG_BT_CLASSIC_EN)) {
+          bt_multi_led_stop();
+          return;
+      } }
     if (hfp_on)
         bt_multi_led_stop();
     else
@@ -512,6 +518,16 @@ void bt_multi_on_connected(void)
                g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0],
                other_slot ? " (other slot, not recorded)" : "",
                g_hfp_live ? "off (HFP alive)" : "cyan (wait HFP)");
+    /* ★ 11-25 经典被配置关闭时**不要闪青**。
+     * 青闪的语义是"已连上、等 HFP 建好"；经典关了 HFP 永远不会来，
+     * 这盏灯就会一直闪到关机（用户实测："蓝牙关了但青灯还在闪"）。
+     * 直接停灯 = 已连接且无需等待。 */
+    { extern uint8_t key_config_bt_flags(void);
+      if (!(key_config_bt_flags() & KEY_CONFIG_BT_CLASSIC_EN)) {
+          bt_multi_led_stop();
+          rt_kprintf("[BTSLOT] classic disabled -> LED off (no HFP to wait)\n");
+          return;
+      } }
     if (g_hfp_live)
         bt_multi_led_stop();   /* HFP 仍存活(语音中 BLE 断连重连): 保持关灯, 不闪青 */
     else
@@ -527,13 +543,27 @@ void bt_multi_on_paired(void)
     rt_kprintf("[BTSLOT] paired -> slot%d addr %02x:%02x:%02x:%02x:%02x:%02x, LED %s\n",
                g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0],
                g_hfp_live ? "off (HFP alive)" : "cyan (wait HFP)");
+    /* ★ 11-25 与 bt_multi_on_connected 保持一致：经典被配置关闭时不要闪青。
+     * 青闪的语义是"配对完成、等 HFP 建好"；经典关了 HFP 永远不会来，
+     * 这盏灯会一直闪到关机（用户实测：配对模式下青灯常闪不停）。 */
+    { extern uint8_t key_config_bt_flags(void);
+      if (!(key_config_bt_flags() & KEY_CONFIG_BT_CLASSIC_EN)) {
+          bt_multi_led_stop();
+          rt_kprintf("[BTSLOT] classic disabled -> LED off after pairing\n");
+          goto paired_led_done;
+      } }
     if (g_hfp_live)
         bt_multi_led_stop();
     else
         bt_multi_led_start(g_cur_slot, RGB_COLOR_CYAN);   /* 配对完成, HFP 未建立: 青闪 */
+paired_led_done:
     /* 配对完成 = 该槽位已就绪, 之后按连接模式对待:
      * 断连回连窗口只允许刚配对的新设备(白名单), 防其它已配对设备抢连 */
     g_cur_mode = BT_MODE_CONNECT;
+    /* ★ 11-24 配对窗口关闭 ⇒ 收回"可被发现"，回到只允许寻呼的省电状态。
+     * （配对期间是开着的，见 ble_app.c 里 stack-ready 时的判断） */
+    { extern uint8_t bt_interface_set_scan_mode(uint8_t, uint8_t);
+      bt_interface_set_scan_mode(0, 1); }
 }
 
 /* BR/EDR(经典蓝牙)配对+连接成功(HFP connected): 手机等设备走 BR/EDR 配对,
@@ -572,6 +602,10 @@ void bt_multi_on_br_paired(const uint8_t *addr)
     rt_kprintf("[BTSLOT] BR/EDR paired -> slot%d addr %02x:%02x:%02x:%02x:%02x:%02x, PAIR window end\n",
                g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
     bt_multi_led_stop();
+    /* ★ 11-24 经典配对完成 ⇒ 同样收回"可被发现" */
+    g_cur_mode = BT_MODE_CONNECT;
+    { extern uint8_t bt_interface_set_scan_mode(uint8_t, uint8_t);
+      bt_interface_set_scan_mode(0, 1); }
     /* ★ 11-23: 首次配对是手机发起(dir=1) ⇒ 设备为 slave ⇒ 空中鼠标拖慢。
      * 主动断一次让 auto-connect 以 master 身份重连，与"重启设备"等效。 */
     { extern void ble_app_post_pair_role_fix(void); ble_app_post_pair_role_fix(); }
