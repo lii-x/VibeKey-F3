@@ -6,6 +6,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonParseError>
+#include "PythonLocator.h"
 
 WorkBuddyMonitor::WorkBuddyMonitor(QObject *parent)
     : QObject(parent)
@@ -59,27 +60,7 @@ WorkBuddyMonitor::~WorkBuddyMonitor()
 
 QString WorkBuddyMonitor::findPython()
 {
-    // 优先程序目录下的 python/（绿色版捆绑的 Python）
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python310\\python.exe"
-    };
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(1000) && test.exitCode() == 0)
-            return path;
-    }
-    return "python";
+    return findPythonInterpreter({});
 }
 
 QString WorkBuddyMonitor::findScript()

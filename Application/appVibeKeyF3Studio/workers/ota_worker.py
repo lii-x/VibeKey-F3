@@ -1,8 +1,27 @@
+import os
 import serial
 import struct
 import sys
 import time
 import zlib
+
+
+def normalize_port(port):
+    """把 Qt 传来的 portName 规范成 pyserial 能打开的路径。
+
+    Windows: QSerialPortInfo::portName() = "COM3"  -> pyserial 直接可用。
+    macOS/Linux: portName() = "cu.usbmodem20221234561"（无目录前缀），
+    而 pyserial 要求 "/dev/cu.usbmodem20221234561"；直接传裸名会抛
+    FileNotFoundError，OTA 会以"升级前读取设备信息失败"草率跳过预检。
+    这里统一补全前缀，与 config_worker.py 的 normalize_port 语义保持一致。
+    """
+    if not port:
+        return port
+    if port.startswith("/dev/") or port.startswith("COM"):
+        return port
+    if os.name != "nt":
+        return "/dev/" + port
+    return port
 
 # ⚠️ 08-27: Windows 下被 QProcess 管道捕获时, Python 默认按 locale(GBK/cp936)编码输出
 # stdout → Qt 端 QString::fromUtf8 解析出乱码("????"). 强制 stdout 为 UTF-8 与 Qt 对齐。
@@ -75,6 +94,7 @@ def send_info_and_read(ser, timeout=2):
     return None
 
 def ota_upgrade(port, firmware_path):
+    port = normalize_port(port)   # macOS/Linux: 裸 portName -> /dev/<portName>
     with open(firmware_path, "rb") as f:
         fw_data = f.read()
 

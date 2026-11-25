@@ -50,16 +50,50 @@ PortDetector::~PortDetector()
     closeProbePort();
 }
 
-/* 枚举所有串口，仅保留 VID == VIBEKEY_VID 的 VibeKey 设备 */
+/* 枚举串口，认出 VibeKey 设备。
+ *
+ * 主判据是 VID == 0x38F4（SiFli）。但不能只靠它：
+ *   · macOS/部分 USB 集线器组合下 QSerialPortInfo 拿不到 USB 元数据，
+ *     vendorIdentifier() 返回 0 —— 设备明明在 /dev/cu.usbmodemXXX，却被过滤掉；
+ *   · 换一台电脑（尤其没装过驱动的全新系统）更容易命中这种"元数据缺失"。
+ * 因此补两条兜底：
+ *   ② 描述/厂商串里含 "VibeKey"（固件把自己报成 VibeKey-F3）；
+ *   ③ macOS 上 /dev/cu.usbmodem* 且该端口**能通过下面的握手探测**——
+ *      这里只做名字级预筛，真正的确认仍由 probeDevice() 的 'VibeKey-F3|...'
+ *      回包完成，所以不会把别的 usbmodem 设备误判成我们的。 */
 QStringList PortDetector::detectVibeKeyPorts()
 {
     QStringList ports;
     const auto infos = QSerialPortInfo::availablePorts();
     for (const QSerialPortInfo &info : infos) {
-        if (info.vendorIdentifier() == VIBEKEY_VID) {
-            ports.append(info.portName());
+        bool match = (info.vendorIdentifier() == VIBEKEY_VID);
+
+        if (!match) {
+            const QString desc = info.description();
+            const QString manu = info.manufacturer();
+            if (desc.contains("VibeKey", Qt::CaseInsensitive)
+                    || manu.contains("VibeKey", Qt::CaseInsensitive)) {
+                match = true;
+            }
+        }
+
+        if (!match && info.vendorIdentifier() == 0) {
+            /* VID 缺失（拿不到 USB 元数据）。放宽到 usbmodem / usbserial 类端口，
+             * 由 probeDevice() 的实际握手回包来最终确认。 */
+            const QString name = info.portName();
+            if (name.contains("usbmodem", Qt::CaseInsensitive)
+                    || name.contains("usbserial", Qt::CaseInsensitive)) {
+                match = true;
+            }
+        }
+
+        if (match) {
+            if (!ports.contains(info.portName()))
+                ports.append(info.portName());
         }
     }
+    if (!ports.isEmpty())
+        qDebug() << "detectVibeKeyPorts:" << ports;
     return ports;
 }
 

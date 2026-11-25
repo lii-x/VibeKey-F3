@@ -227,7 +227,27 @@ private slots:
     void onProcessReadyRead();
     void onProcessFinished(int exitCode, QProcess::ExitStatus exitStatus);
     void onProcessError(QProcess::ProcessError error);
-    void onModifierTimeout();
+#ifdef Q_OS_WIN
+    void onModifierTimeout();   // 仅 Windows 低层键盘钩子使用(定义同样在 Q_OS_WIN 内)
+#endif
+    /* ===== 非 Windows: 用 Qt 事件过滤实现快捷键捕获 =====
+     * Windows 靠 WH_KEYBOARD_LL 全局钩子(见 keyboardHookProc), 可捕获【任意】前台
+     * 窗口的按键。macOS/Linux 没有等价的免权限全局钩子(macOS 需要 CGEventTap 且
+     * 要辅助功能授权), 因此改走 Qt 事件过滤: VibeKey 是标准 HID 键盘, 按键会作为
+     * 普通键盘事件送进本应用, 只要本窗口是 key window 就能收到。
+     * 语义差异: 必须点住"捕获中"的输入框让本应用在前台, 无法在后台窗口捕获。 */
+    void onPlatformKeyEvent(const QKeyEvent *ke);
+#ifdef Q_OS_MACOS
+    /* 裸修饰键(只按 Cmd/Ctrl/Shift/Alt, 不带主键)在 macOS 上不会作为 KeyPress
+     * 送达窗口, 只有 flagsChanged。Windows 靠 m_modifierTimer 的 500ms 超时把
+     * "纯修饰键"判为合法快捷键, 这里用轮询 queryKeyboardModifiers() 复刻同一语义:
+     * 压下时记录峰值位, 全部松开后经一小段宽限窗口仍无主键 => 判为纯修饰键组合。 */
+    void pollPlatformMods();
+    void onPlatformModGraceExpired();
+#endif
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
     /* 08-31: 设备连接状态变化 -> 新连上时自动读一次按键配置 */
     void onDeviceConnectedChanged();
     /* 08-31: 设备端切换蓝牙槽位 -> 同步更新上位机当前编辑槽位并重新读取 */
@@ -255,6 +275,11 @@ private slots:
 #endif
 
 private:
+    /* 11-24: MacModifierWatcher 的物理修饰键位变化回调(事件驱动)。
+     * 捕获期间据此维护峰值/宽限窗口, 快速轻点修饰键也不会落在轮询间隙里漏掉。 */
+#ifdef Q_OS_MACOS
+    void onMacPhysicalModsChanged(int bits);
+#endif
     void setStatus(const QString &msg);
     void setBusy(bool busy);
     QString findPython();
@@ -318,6 +343,17 @@ private:
     HHOOK m_keyboardHook;
     QTimer m_modifierTimer;
     int m_lastMod;
+#endif
+    /* 非 Windows: 捕获进行中累积的修饰键位(与 Windows 的 m_captureMods 同语义,
+     * 位定义 0x01=LCtrl 0x02=LShift 0x04=LAlt 0x08=LWin 0x10=RCtrl
+     * 0x20=RShift 0x40=RAlt 0x80=RWin)。Qt 在没有选中文本时 keyPress 收到的
+     * 是 Qt::Key_Control/Shift/Alt/Meta, 由 e->modifiers() 判定后自行置位。 */
+    int m_platformMods = 0;
+#ifdef Q_OS_MACOS
+    QTimer m_macModPoll;        /* 60ms 轮询物理修饰键状态 */
+    QTimer m_macModGrace;       /* 松开后的宽限窗口, 期间来了主键则主键优先 */
+    int m_macPeakMods = 0;      /* 本轮按下的修饰位峰值 */
+    int m_macPendingMods = 0;   /* 已松开、等待宽限窗口收尾的修饰位 */
 #endif
     enum OpType { OP_NONE, OP_READ, OP_WRITE, OP_RESET } m_currentOp;
     /* 09-03: 摇一摇捕获目标索引。m_captureIndex == -2 表示当前在捕获摇一摇

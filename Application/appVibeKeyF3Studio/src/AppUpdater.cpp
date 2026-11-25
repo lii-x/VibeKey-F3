@@ -12,6 +12,19 @@
 #include <QVariantList>
 #include <QVariantMap>
 #include <QDebug>
+#include "PythonLocator.h"
+
+bool AppUpdater::supported()
+{
+    /* 发布资产只有 Windows 安装器(VibeKey-F3_Studio_Setup_vX.Y.Z.exe),
+     * 安装动作是 "setup.exe /S" —— 这两点在 macOS/Linux 上都不成立。
+     * 详见 AppUpdater.h 文件头的平台说明。 */
+#ifdef Q_OS_WIN
+    return true;
+#else
+    return false;
+#endif
+}
 
 AppUpdater::AppUpdater(QObject *parent)
     : QObject(parent)
@@ -38,27 +51,7 @@ AppUpdater::~AppUpdater()
 
 QString AppUpdater::findPython()
 {
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-    };
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(500) && test.exitCode() == 0) {
-            qDebug() << "AppUpdater: Python at" << path;
-            return path;
-        }
-    }
-    qWarning() << "AppUpdater: Python not found";
-    return "python";
+    return findPythonInterpreter({});
 }
 
 QString AppUpdater::findScript(const QString &scriptName)
@@ -93,6 +86,15 @@ void AppUpdater::setBusy(bool busy)
 
 void AppUpdater::checkNow(bool silent)
 {
+    /* macOS/Linux: 没有可用的安装包资产, 检查出来也没法装 -> 直接跳过,
+     * 免得弹"发现新版"却永远装不上(调用方通常已按 supported() 屏蔽入口,
+     * 这里是防御性兜底)。 */
+    if (!supported()) {
+        qDebug() << "AppUpdater: 当前平台不支持应用自更新, 跳过检查";
+        if (!silent)
+            emit checkFailed(QStringLiteral("当前平台暂不支持应用自更新，请从官网下载最新版本"));
+        return;
+    }
     if (m_busy) {
         qDebug() << "AppUpdater: already busy";
         return;
@@ -121,6 +123,10 @@ void AppUpdater::checkNow(bool silent)
 
 void AppUpdater::installUpdate()
 {
+    if (!supported()) {
+        emit updateFailed(QStringLiteral("当前平台暂不支持应用自更新，请从官网下载最新版本"));
+        return;
+    }
     if (m_busy)
         return;
     if (m_latestUrl.isEmpty() || m_latestFile.isEmpty()) {

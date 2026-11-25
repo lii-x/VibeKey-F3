@@ -12,6 +12,10 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QTimer>
+#include "PythonLocator.h"
+#ifdef Q_OS_MACOS
+#include "MacModifierWatcher.h"   /* 11-24: 物理修饰键左右手追踪(flagsChanged.keyCode) */
+#endif
 #ifdef Q_OS_WIN
 #include <windows.h>
 static KeyConfigManager *g_hookInstance = nullptr;
@@ -188,6 +192,214 @@ static int qtKeyToHid(int key)
     return -1;
 }
 
+#ifndef Q_OS_WIN
+/* ================= macOS/Linux 快捷键捕获(Qt 事件过滤) =================
+ * Windows 用 WH_KEYBOARD_LL 全局钩子捕获任意前台窗口按键; macOS 没有免权限的
+ * 等价机制(CGEventTap 需辅助功能授权, 且会被 TCC 拦), 所以改用应用级事件过滤:
+ * VibeKey 是标准 HID 键盘, 按键会作为普通 QKeyEvent 进入本应用。
+ *
+ * 修饰键判定: 按下的时刻从 QKeyEvent::modifiers() 反推修饰位 —— 比自行累计
+ * keyPress/keyRelease 更可靠(Qt 在无文本焦点时不一定给独立的修饰键事件)。
+ * 纯修饰键快捷键由"释放时仍有捕获目标且无主键"收尾(keyRelease 分支)。
+ */
+
+/* Qt::KeyboardModifier -> 与 Windows 钩子一致的修饰位。
+ *
+ * ⚠️ macOS 上 Qt 默认"交换 Ctrl 与 Cmd"(等价 Qt::AA_MacDontSwapCtrlAndMeta 未设
+ * 的状态): 物理 Command 报成 ControlModifier, 物理 Control 报成 MetaModifier。
+ * 而固件/HID 语义里 Command = GUI 键(位 0x08), Control = 位 0x01 —— 若直接用
+ * mods 映射, 用户按 Cmd+J 会被写进设备成 LCtrl+J, 快捷键直接失效。故 macOS
+ * 下必须反交换。
+ * 左右手: Qt 的 modifiers 无法区分; 捕获时优先使用 MacModifierWatcher 提供的
+ * 物理位(11-24), 这里仅作为兜底 —— 兜底无法区分左右, 统一按左键位落盘。 */
+static int qtModsToBits(Qt::KeyboardModifiers mods)
+{
+    int bits = 0;
+#ifdef Q_OS_MACOS
+    // 反交换: Qt 的 ControlModifier 其实是物理 Cmd -> 0x08(LWin/GUI)
+    if (mods & Qt::ControlModifier) bits |= 0x08;
+    if (mods & Qt::MetaModifier)    bits |= 0x01;   // Qt 的 MetaModifier 是物理 Ctrl
+#else
+    if (mods & Qt::ControlModifier) bits |= 0x01;   // LCtrl
+    if (mods & Qt::MetaModifier)    bits |= 0x08;   // LWin / Super
+#endif
+    if (mods & Qt::ShiftModifier)   bits |= 0x02;   // LShift
+    if (mods & Qt::AltModifier)     bits |= 0x04;   // LAlt
+    return bits;
+}
+
+/* Qt 键值 -> HID usage。qtKeyToHid 已覆盖字母/数字/F1-F12/方向键等主键,
+ * 这里补上符号键(macOS 上常用)与修饰键自身。 */
+static int qtKeyToHidExtended(int key)
+{
+    const int hid = qtKeyToHid(key);
+    if (hid >= 0)
+        return hid;
+    struct { int qt; int hid; } map[] = {
+        /* 符号键: 按 US 布局对应 HID usage */
+        {Qt::Key_Minus, 45}, {Qt::Key_Equal, 46}, {Qt::Key_BracketLeft, 47},
+        {Qt::Key_BracketRight, 48}, {Qt::Key_Backslash, 49},
+        {Qt::Key_Semicolon, 51}, {Qt::Key_Apostrophe, 52},
+        {Qt::Key_QuoteLeft, 53}, {Qt::Key_Comma, 54},
+        {Qt::Key_Period, 55}, {Qt::Key_Slash, 56},
+        {Qt::Key_Print, 70}, {Qt::Key_ScrollLock, 71}, {Qt::Key_Pause, 72},
+        {Qt::Key_Menu, 118},
+        /* 修饰键自身(纯修饰键快捷键) */
+        {Qt::Key_Control, 224}, {Qt::Key_Shift, 225},
+        {Qt::Key_Alt, 226}, {Qt::Key_Meta, 227},
+        {0, -1}
+    };
+    for (int i = 0; map[i].qt != 0; i++) {
+        if (map[i].qt == key) return map[i].hid;
+    }
+    return -1;
+}
+
+bool KeyConfigManager::eventFilter(QObject *watched, QEvent *event)
+{
+    Q_UNUSED(watched);
+    // 只在捕获中处理, 其余事件一律放行
+    if (m_captureIndex == -1)
+        return QObject::eventFilter(watched, event);
+
+    switch (event->type()) {
+    case QEvent::KeyPress:
+    case QEvent::KeyRelease:
+        onPlatformKeyEvent(static_cast<const QKeyEvent *>(event));
+        /* 捕获期间吃掉按键: 不让 Esc/回车/空格 等泄漏到界面控件
+         * (比如触发弹窗关闭、按钮按下)。 */
+        return true;
+    default:
+        break;
+    }
+    return QObject::eventFilter(watched, event);
+}
+
+void KeyConfigManager::onPlatformKeyEvent(const QKeyEvent *ke)
+{
+    if (!ke || m_captureIndex == -1)
+        return;
+    if (ke->isAutoRepeat())
+        return;   // 长按不重复触发
+
+    const bool press = (ke->type() == QEvent::KeyPress);
+    const int key = ke->key();
+#ifdef Q_OS_MACOS
+    /* 11-24: 优先用 AppKit 监听到的物理左右位(Qt 的 modifiers 只有类型,
+     * 会把右 Option/Command 记成左手位); 一个修饰键都没按时再退回 generic 位。 */
+    const int physicalMods = MacModifierWatcher::currentBits();
+    const int modBits = physicalMods != 0 ? physicalMods : qtModsToBits(ke->modifiers());
+#else
+    const int modBits = qtModsToBits(ke->modifiers());
+#endif
+
+    /* 修饰键自身按下: 只记位, 等释放时由"无主键"分支收尾 */
+    const bool isModifierKey = (key == Qt::Key_Control || key == Qt::Key_Shift
+                                || key == Qt::Key_Alt || key == Qt::Key_Meta);
+
+    if (press) {
+        m_platformMods = modBits;
+        if (isModifierKey) {
+            qDebug() << "[Capture/mac] modifier down:" << key << "mods=" << modBits;
+            return;
+        }
+        /* 主键到达: 取消可能已挂起的纯修饰键收尾(主键优先) */
+#ifdef Q_OS_MACOS
+        m_macModGrace.stop();
+        m_macPendingMods = 0;
+#endif
+        /* Esc: 取消捕获(与 Windows 上点第二次/Esc 的交互习惯一致) */
+        const int hid = qtKeyToHidExtended(key);
+        if (hid < 0) {
+            qDebug() << "[Capture/mac] unmapped key:" << key;
+            return;
+        }
+        if (key == Qt::Key_Escape) {
+            cancelCapture();
+            return;
+        }
+        qDebug() << "[Capture/mac] key down: Qt=" << key << "hid=" << hid
+                 << "mods=" << m_platformMods;
+        finishCapture(m_platformMods, hid);
+        return;
+    }
+
+    /* 释放分支: 纯修饰键(无主键)才在此收尾。
+     * 有主键的情况已在 KeyPress 里 finishCapture, m_captureIndex 已置 -1。 */
+    if (isModifierKey && m_captureIndex != -1) {
+        const int saved = m_platformMods;
+        m_platformMods = modBits;   // 用释放时刻的剩余修饰位(可能已清掉自己)
+        if (saved != 0) {
+            qDebug() << "[Capture/mac] pure modifier shortcut: bits=" << saved;
+            finishCapture(saved, 0);   /* 与 Windows onModifierTimeout 同语义 */
+        }
+    }
+}
+
+#ifdef Q_OS_MACOS
+/* 11-24: 物理修饰键按下/抬起 -> 捕获态峰值/宽限(事件驱动, 与 60ms 轮询互补)。
+ * 按下时记录峰值; 全部松开后开宽限窗口, 期间来了主键则主键优先;
+ * 宽限过期仍无主键 => 纯修饰键组合(与 Windows 500ms 语义一致)。
+ * 注意: 只改成员/定时器, 不在这里同步调 finishCapture —— 该回调发生在 AppKit
+ * 派发事件的过程中, 延迟到 grace 定时器再落盘, 避免重入 Qt/QML。 */
+void KeyConfigManager::onMacPhysicalModsChanged(int bits)
+{
+    if (m_captureIndex == -1)
+        return;
+    if (bits != 0) {
+        m_macPeakMods = bits;
+        m_macPendingMods = 0;
+        m_macModGrace.stop();
+    } else if (m_macPeakMods != 0) {
+        m_macPendingMods = m_macPeakMods;
+        m_macPeakMods = 0;
+        m_macModGrace.start();
+    }
+}
+
+/* 裸修饰键(只按 Cmd / Ctrl / Shift / Alt)在 macOS 上不产生 KeyPress ——
+ * QKeyEvent 只在 Ctrl+Tab 等被系统转义的情况下出现, 单独按下只改 flagsChanged。
+ * 为了让"纯修饰键 = 合法快捷键"(Windows onModifierTimeout 的语义)在 macOS
+ * 同样成立, 这里用 QGuiApplication::queryKeyboardModifiers() 轮询:
+ *   阶段1(仍按住): 持续抬高峰值 m_macPeakMods
+ *   阶段2(全松开): 峰值转 m_macPendingMods, 开宽限窗口(120ms)
+ *   阶段3(宽限超时仍无主键): 判为纯修饰键组合并收尾
+ * 宽限窗口的作用: 用户"Cmd 还没松完就按 J"时主键优先, 不会被提前截断。 */
+void KeyConfigManager::pollPlatformMods()
+{
+    if (m_captureIndex == -1)
+        return;
+    /* 11-24: 优先用 MacModifierWatcher 的物理左右位; 它没记录到任何修饰键时
+     * (极端情况下漏了 flagsChanged)再退回 Qt 的 generic 位兜底。 */
+    int bits = MacModifierWatcher::currentBits();
+    if (bits == 0)
+        bits = qtModsToBits(QGuiApplication::queryKeyboardModifiers());
+    if (bits != 0) {
+        m_macPeakMods = bits;
+        m_macPendingMods = 0;
+        m_macModGrace.stop();      // 又按下了, 撤销挂起
+        return;
+    }
+    /* 全松开: 若本轮确实按下过修饰键, 交给宽限窗口收尾 */
+    if (m_macPeakMods != 0) {
+        m_macPendingMods = m_macPeakMods;
+        m_macPeakMods = 0;
+        m_macModGrace.start();
+    }
+}
+
+void KeyConfigManager::onPlatformModGraceExpired()
+{
+    if (m_captureIndex == -1 || m_macPendingMods == 0)
+        return;
+    const int bits = m_macPendingMods;
+    m_macPendingMods = 0;
+    qDebug() << "[Capture/mac] pure modifier (polled): bits=" << bits;
+    finishCapture(bits, 0);
+}
+#endif   // Q_OS_MACOS
+#endif   // !Q_OS_WIN
+
 #ifdef Q_OS_WIN
 static int vkToHid(int vk)
 {
@@ -323,6 +535,8 @@ KeyConfigManager::KeyConfigManager(QObject *parent)
     , m_keyboardHook(nullptr)
     , m_modifierTimer()
     , m_lastMod(0)
+#else
+    , m_platformMods(0)
 #endif
     , m_currentOp(OP_NONE)
     , m_previewProcess(nullptr)
@@ -395,6 +609,23 @@ KeyConfigManager::KeyConfigManager(QObject *parent)
 #ifdef Q_OS_WIN
     g_hookInstance = this;
     m_keyboardHook = SetWindowsHookExW(WH_KEYBOARD_LL, keyboardHookProc, GetModuleHandleW(nullptr), 0);
+#else
+    /* macOS/Linux: 装应用级事件过滤器替代全局钩子。用 qApp 而非 this 作为
+     * 父对象安装 —— 事件从 QQuickWindow 派发, 只有应用级过滤能保证收到。 */
+    qApp->installEventFilter(this);
+#ifdef Q_OS_MACOS
+    /* 11-24: 物理修饰键左右手追踪 —— Qt 的 modifiers 只有类型, 捕获右 Option/
+     * 右 Command 时只能落到左手位。本地 NSEvent 监视器读 flagsChanged.keyCode,
+     * 不需要辅助功能/输入监控授权(只接收本应用的事件)。 */
+    MacModifierWatcher::install([this](int bits) { onMacPhysicalModsChanged(bits); });
+    /* 裸修饰键轮询(见 pollPlatformMods 注释)。只在捕获期间运行。 */
+    m_macModPoll.setInterval(60);
+    connect(&m_macModPoll, &QTimer::timeout, this, &KeyConfigManager::pollPlatformMods);
+    m_macModGrace.setSingleShot(true);
+    m_macModGrace.setInterval(120);
+    connect(&m_macModGrace, &QTimer::timeout,
+            this, &KeyConfigManager::onPlatformModGraceExpired);
+#endif
 #endif
 }
 
@@ -408,6 +639,12 @@ KeyConfigManager::~KeyConfigManager()
     }
     g_hookInstance = nullptr;
 #endif
+#ifndef Q_OS_WIN
+    qApp->removeEventFilter(this);
+#endif
+#ifdef Q_OS_MACOS
+    MacModifierWatcher::uninstall();
+#endif
     if (m_process && m_process->state() != QProcess::NotRunning) {
         m_process->kill();
         m_process->waitForFinished(2000);
@@ -420,27 +657,15 @@ KeyConfigManager::~KeyConfigManager()
 
 QString KeyConfigManager::findPython()
 {
-    // 优先使用程序目录下的 python/（绿色版捆绑的 Python）
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python310\\python.exe"
-    };
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(1000) && test.exitCode() == 0)
-            return path;
-    }
-    return "python";
+    /* config_worker.py 必须能 import serial；BLE 通道额外要 bleak。
+     * macOS 的 mac worker 还用 bleak 3.x 的 BleakAdapter，必须把这层版本要求
+     * 也纳入探测：旧版 bleak 虽然 `import bleak` 能过，运行时会 ImportError。 */
+#ifdef Q_OS_MACOS
+    const QStringList required = {"serial", "bleak:BleakAdapter"};
+#else
+    const QStringList required = {"serial"};
+#endif
+    return findPythonInterpreter(required);
 }
 
 QString KeyConfigManager::findWorkerScript()
@@ -471,11 +696,20 @@ QString KeyConfigManager::findWorkerScript()
 }
 
 /* 09-03: BLE 通道配置 worker(一次性进程: 连接 -> 读写配置 -> 断开)。
- * 与 findWorkerScript 同策略搜索(workers/ 或 appDir 平级)。 */
+ * 与 findWorkerScript 同策略搜索(workers/ 或 appDir 平级)。
+ *
+ * macOS 用独立实现 `ble_config_worker_mac.py`：原版依赖 Windows UWP 的
+ * `winrt.windows.devices.bluetooth`，macOS 上无法运行。新版走 bleak/
+ * CoreBluetooth 访问同一个 0xFF00 服务，帧格式复用 config_worker 的编解码，
+ * 命令行接口与 Windows 版一致，故此处只需换脚本名。 */
 QString KeyConfigManager::findBleConfigWorker()
 {
     QString appDir = QCoreApplication::applicationDirPath();
+#ifdef Q_OS_MACOS
+    QString scriptName = "ble_config_worker_mac.py";
+#else
     QString scriptName = "ble_config_worker.py";
+#endif
     QStringList searchPaths = {
         appDir + "/" + scriptName,
         appDir + "/workers/" + scriptName,
@@ -1097,7 +1331,12 @@ void KeyConfigManager::onPreviewTick()
         bri = m_ledTestBrightness[keyIndex];
     } else {
         QJsonObject obj = m_keyConfigs[keyIndex].toJsonObject();
-        en = obj["rgb_enabled"].toBool();
+        /* rgb_enabled 在设备回包里是数字 1/0（config_worker 的 payload），而
+         * QML 切换开关写回的是 JSON bool。QJsonValue::toBool() 对数字返回
+         * false —— 直接用它会让"读取后预览"永远下发 en=0（开关显示开、灯不亮）。
+         * 两种类型都兼容。 */
+        const QJsonValue rgbEnabled = obj.value(QStringLiteral("rgb_enabled"));
+        en = rgbEnabled.toBool() || rgbEnabled.toInt(0) != 0;
         int color = obj["rgb_color"].toInt();
         r = (color >> 16) & 0xFF;
         g = (color >> 8) & 0xFF;
@@ -1651,7 +1890,13 @@ void KeyConfigManager::beginCapture(int target)
     if (m_captureIndex == target) return;
     m_captureIndex = target;
     m_captureMods = 0;
+#ifndef Q_OS_WIN
+    m_platformMods = 0;
+#endif
+#ifdef Q_OS_WIN
+    // m_lastMod 仅 Windows 低层键盘钩子使用(头文件在 Q_OS_WIN 下声明)
     m_lastMod = 0;
+#endif
     m_prevKeys.clear();
     memset(m_prevKeyState, 0, sizeof(m_prevKeyState));
 #ifdef Q_OS_WIN
@@ -1660,6 +1905,12 @@ void KeyConfigManager::beginCapture(int target)
         connect(&m_modifierTimer, &QTimer::timeout, this, &KeyConfigManager::onModifierTimeout, Qt::UniqueConnection);
     }
     m_modifierTimer.stop();
+#elif defined(Q_OS_MACOS)
+    /* 裸修饰键轮询: 捕获期间运行, 复刻 Windows 的 500ms 修饰键超时语义 */
+    m_macPeakMods = 0;
+    m_macPendingMods = 0;
+    m_macModGrace.stop();
+    m_macModPoll.start();
 #endif
     emit capturingChanged();
 }
@@ -1669,7 +1920,14 @@ void KeyConfigManager::cancelCapture()
     m_captureIndex = -1;
     m_captureMods = 0;
     m_prevMods = 0;
+#ifdef Q_OS_WIN
     m_lastMod = 0;
+#elif defined(Q_OS_MACOS)
+    m_macModPoll.stop();
+    m_macModGrace.stop();
+    m_macPeakMods = 0;
+    m_macPendingMods = 0;
+#endif
     m_prevKeys.clear();
     emit capturingChanged();
 }
@@ -1716,6 +1974,11 @@ void KeyConfigManager::finishCapture(int modifier, int keycode)
     m_captureIndex = -1;
 #ifdef Q_OS_WIN
     m_modifierTimer.stop();
+#elif defined(Q_OS_MACOS)
+    m_macModPoll.stop();
+    m_macModGrace.stop();
+    m_macPeakMods = 0;
+    m_macPendingMods = 0;
 #endif
     if (ki >= 0) {
         if (ki == kL1CaptureIndex) {

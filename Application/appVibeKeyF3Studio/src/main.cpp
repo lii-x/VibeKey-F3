@@ -5,6 +5,7 @@
 #include <QIcon>
 #include <QQuickStyle>
 #include <QTimer>
+#include <functional>
 #include "OtaManager.h"
 #include "KeyConfigManager.h"
 #include "SystemTray.h"
@@ -16,6 +17,30 @@
 
 int main(int argc, char *argv[])
 {
+    /* 禁止 Python worker 在 app bundle 内写 __pycache__ 目录和 .pyc 文件。
+     * macOS 的代码签名会封存 bundle 资源；运行时新增/修改 .pyc 会让
+     * `codesign --verify` 立刻报 "a sealed resource is missing or invalid"。
+     * 这里设置的环境变量会被 QProcess 子进程继承（所有 worker 都生效）。 */
+    qputenv("PYTHONDONTWRITEBYTECODE", "1");
+
+#ifdef Q_OS_MACOS
+    /* 内置 Python 必须自包含：忽略用户级 site-packages（~/.local/lib/pythonX.Y/）。
+     *
+     * CPython 默认把用户级 site-packages 排在 bundle 自带目录**之前**，于是用户
+     * 为别的项目装过的旧版本会劫持内置依赖。真实事故：机器 ~/.local 里残留
+     * bleak 3.0.2，而 bundle 内置的是 3.1.0；worker 里 `from bleak import
+     * BleakAdapter`（3.1 才有的 API）直接 ImportError，每个 BLE worker 都崩在
+     * stderr，C++ 侧只读到空 stdout ⇒ 界面永远"未连接"。同一份 DMG 在构建机上
+     * 正常，因为那台机器的 ~/.local 是干净的 —— 这就是"换一台 Mac 就看不到设备"
+     * 里最隐蔽的一层。
+     *
+     * 环境变量会被 QProcess 子进程继承，所有 worker 一并生效；两套架构的内置
+     * 运行时都装了 pyserial + bleak，不需要 user site 补充。
+     * 只在 macOS 设置：Windows 版允许用户用 `pip install --user` 给系统 Python
+     * 补依赖（没有内置运行时的回退路径），不能切断 user site。 */
+    qputenv("PYTHONNOUSERSITE", "1");
+#endif
+
     // 使用 QApplication（而非 QGuiApplication），因为系统托盘右键菜单用到了 QWidget（QMenu）
     QApplication app(argc, argv);
 
@@ -93,7 +118,10 @@ int main(int argc, char *argv[])
     systemTray.init();
 
     // 启动 3 秒后后台静默查一次应用更新(静默: 无新版/失败都不弹气泡, 有新版才提示)
-    QTimer::singleShot(3000, &app, [&appUpdater]() { appUpdater.checkNow(true); });
+    // ⚠️ 只在支持自更新的平台(Windows)执行: macOS 没有 .exe 安装资产, 查了也装不上,
+    //    白白派生一个 python 进程去请求 Gitee。见 AppUpdater.h 的平台说明。
+    if (AppUpdater::supported())
+        QTimer::singleShot(3000, &app, [&appUpdater]() { appUpdater.checkNow(true); });
     // 启动 5 秒后后台静默查一次固件更新: 拉到在线最新固件并与【已连接设备】版本比对,
     // 在线更新才提醒。未插设备时只缓存最新版; 之后插上 USB 由 deviceVersionChanged 触发比对。
     QTimer::singleShot(5000, &app, [&otaManager]() { otaManager.checkFirmwareUpdate(true); });
@@ -101,6 +129,52 @@ int main(int argc, char *argv[])
     // 现在才显式显示窗口，任务栏捕获带图标的窗口
     if (win)
         win->show();
+
+#ifndef Q_OS_WIN
+    /* ===== macOS/Linux: 切走再切回时自动召回窗口 =====
+     * 本工程 onClosing 是"收进托盘"(close.accepted=false + hide()), 不是真退出
+     * (见 qml/Main.qml 末尾)。Windows 上点任务栏图标能叫回来, 但 macOS 没有对应
+     * 机制: 点 Dock 图标 / Cmd+Tab 切回只会切应用, 隐藏的窗口不会出现, 用户只能
+     * 去菜单栏找那个小图标 —— 表现就是"切换后无法切到前台"。
+     *
+     * ⚠️ 判据必须是 visibility() 而不是 isVisible():
+     *   hide()      -> isVisible()==false, visibility()==Hidden
+     *   最小化      -> isVisible()==true (!), visibility()==Minimized
+     * 只用 isVisible() 会漏掉"最小化"这条路径 —— 实测点 ✕ 收进托盘后窗口是
+     * Hidden, 但用户若用最小化按钮/快捷键收起, 窗口是 Minimized, 同样回不来。 */
+    auto restoreIfCollapsed = [win]() {
+        if (!win)
+            return;
+        const QWindow::Visibility vis = win->visibility();
+        if (vis == QWindow::Hidden || vis == QWindow::Minimized) {
+            win->show();
+            win->raise();
+            win->requestActivate();
+        }
+    };
+
+    QObject::connect(&app, &QGuiApplication::applicationStateChanged, win,
+                     [restoreIfCollapsed](Qt::ApplicationState state) {
+        if (state == Qt::ApplicationActive)
+            restoreIfCollapsed();
+    });
+#ifdef Q_OS_MACOS
+    /* 点 Dock 图标触发的是"重开"(reopen) 而非状态变化: 应用已是 Active 时
+     * Dock 点击不会再发 applicationStateChanged, 上面的 lambda 收不到。
+     * 用事件过滤拦 QEvent::ApplicationActivate 作为补充路径。 */
+    struct ReopenFilter : QObject {
+        std::function<void()> restore;
+        explicit ReopenFilter(std::function<void()> fn, QObject *parent = nullptr)
+            : QObject(parent), restore(std::move(fn)) {}
+        bool eventFilter(QObject *, QEvent *e) override {
+            if (e->type() == QEvent::ApplicationActivate)
+                restore();
+            return false;   // 不吞事件
+        }
+    };
+    app.installEventFilter(new ReopenFilter(restoreIfCollapsed, &app));
+#endif
+#endif
 
     return app.exec();
 }

@@ -13,6 +13,7 @@
 #include <QJsonObject>
 #include <QJsonParseError>
 #include <QDebug>
+#include "PythonLocator.h"
 
 OtaManager::OtaManager(QObject *parent)
     : QObject(parent)
@@ -150,34 +151,7 @@ OtaManager::~OtaManager()
 
 QString OtaManager::findPython()
 {
-    // 优先使用安装包内自带的 Python（位于程序目录下的 python/）
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",    // 安装包内自带的 Python（优先）
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python310\\python.exe"
-    };
-
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(500)) {
-            if (test.exitCode() == 0) {
-                qDebug() << "Found Python at:" << path;
-                return path;
-            }
-        }
-    }
-
-    qWarning() << "Python not found";
-    return "python";
+    return findPythonInterpreter({"serial"});
 }
 
 QString OtaManager::findScript(const QString &scriptName)

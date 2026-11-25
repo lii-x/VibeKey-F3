@@ -7,3 +7,18 @@
 *.ico binary
 *.exe binary
 *.bin binary
+
+# ⚠️ 脚本必须固定 LF。
+# 上面的 * eol=crlf 会把脚本也检出成 CRLF，而 CRLF 的 shell 脚本在 macOS/Linux
+# 上根本不能执行：
+#   bash: build_macos.sh: line 113: syntax error near unexpected token `{'
+#   bash: build_dmg_macos.sh: line 33: syntax error near unexpected token `&&'
+# 原因：`#!/bin/bash\r` + `func() {\r` 里的 \r 被当成命令的一部分。
+# macOS 打包链路（build_macos.sh / build_dmg_macos.sh）正是在 Mac 上执行的，
+# 一旦按 CRLF 检出就整条链断掉 —— 这本身就是"换一台机器就编不出/跑不起来"的
+# 一类事故，必须在这里锁死。
+*.sh   text eol=lf
+*.command text eol=lf
+*.py   text eol=lf
+*.plist text eol=lf
+*.in   text eol=lf

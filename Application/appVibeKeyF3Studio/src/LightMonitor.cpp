@@ -1,9 +1,12 @@
 #include "LightMonitor.h"
 #include <QCoreApplication>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QUrl>
 #include <QDebug>
 #include "PortDetector.h"
+#include "PythonLocator.h"
 
 // 蓝牙连接判定去抖阈值：连续这么多次探测为“断开”才真正判定断开。
 // BLE HID 设备空闲时无线电链接会瞬时掉线、有活动时重连，ConnectionStatus 会闪；
@@ -62,6 +65,18 @@ LightMonitor::LightMonitor(QObject *parent)
     m_bleTimer->start();
     checkBleConnection(); // 立即探一次
 
+    /* ★ 启动后 6s 做一次深度诊断（仅 macOS）。
+     * 时机原因：启动瞬间快速 status 还没回来、USB 也还没枚举完，此时扫描
+     * 容易和它们抢时间；6s 后状态已稳定，若仍连不上就值得给用户一个
+     * "到底卡在哪"的结论（换一台没配过的 Mac 时这几乎是必经路径）。
+     * 单次 singleShot，不进轮询。 */
+#ifdef Q_OS_MACOS
+    QTimer::singleShot(6000, this, [this]() {
+        if (!m_bleConnected && !m_bleServeReady)
+            probeBleDiagnostics();
+    });
+#endif
+
     // 09-03: serve 延迟恢复(见 resumeBleServe 注释)。singleShot 天然防抖:
     // 若 2s 窗口内又 pause(新一轮配置), 定时器被停掉, 不会与配置 worker 抢连接。
     m_serveResumeTimer.setSingleShot(true);
@@ -93,6 +108,12 @@ LightMonitor::~LightMonitor()
         m_bleProc->waitForFinished(1000);
     }
     stopBleServe();
+    /* 诊断扫描要跑 8~15s，退出时必须主动杀掉，否则 python 子进程会成为孤儿
+     * 继续占用 CoreBluetooth（与 serve/config worker 争连接）。 */
+    if (m_bleProbeProc && m_bleProbeProc->state() != QProcess::NotRunning) {
+        m_bleProbeProc->kill();
+        m_bleProbeProc->waitForFinished(1000);
+    }
     if (m_process && m_process->state() != QProcess::NotRunning) {
         m_process->kill();
         m_process->waitForFinished(1000);
@@ -101,27 +122,18 @@ LightMonitor::~LightMonitor()
 
 QString LightMonitor::findPython()
 {
-    // 优先使用程序目录下的 python/（绿色版捆绑的 Python）
-    QString appDir = QCoreApplication::applicationDirPath();
-    QStringList candidates = {
-        appDir + "/python/python.exe",
-        appDir + "/python/python3.exe",
-        "python",
-        "python3",
-        "C:\\Python312\\python.exe",
-        "C:\\Python311\\python.exe",
-        "C:\\Python310\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python311\\python.exe",
-        "C:\\Users\\" + qEnvironmentVariable("USERNAME") + "\\AppData\\Local\\Programs\\Python\\Python310\\python.exe"
-    };
-    for (const QString &path : candidates) {
-        QProcess test;
-        test.start(path, {"--version"});
-        if (test.waitForFinished(1000) && test.exitCode() == 0)
-            return path;
-    }
-    return "python";
+    /* 依赖随平台不同：
+     *   macOS  -> 0xFF00 服务走 bleak(CoreBluetooth)，见 ble_status_worker_mac.py
+     *   Windows-> 走 UWP winrt，见 ble_led_worker.py
+     *   USB 灯控本身只需要 pyserial（config_worker.py）。 */
+#ifdef Q_OS_MACOS
+    const QStringList required = {"serial", "bleak:BleakAdapter"};
+#elif defined(Q_OS_WIN)
+    const QStringList required = {"serial", "winrt"};
+#else
+    const QStringList required = {"serial"};
+#endif
+    return findPythonInterpreter(required);
 }
 
 QString LightMonitor::findWorkerScript()
@@ -145,7 +157,15 @@ QString LightMonitor::findWorkerScript()
 QString LightMonitor::findBleWorkerScript()
 {
     QString appDir = QCoreApplication::applicationDirPath();
+#ifdef Q_OS_MACOS
+    /* macOS 用独立实现：原版 ble_led_worker.py 依赖 Windows UWP(winrt) +
+     * PowerShell(Get-PnpDevice)，在 macOS 上必然返回 DISCONNECTED（误报）。
+     * macOS 版基于 bleak/CoreBluetooth，用 retrieveConnectedPeripheralsWithServices
+     * (0xFF00) 判定连接态 + 读 0x180F 电池，输出格式与 Windows 版一致。 */
+    QString scriptName = "ble_status_worker_mac.py";
+#else
     QString scriptName = "ble_led_worker.py";
+#endif
     QStringList searchPaths = {
         appDir + "/" + scriptName,
         appDir + "/workers/" + scriptName,
@@ -475,6 +495,142 @@ void LightMonitor::setPortName(const QString &port)
 void LightMonitor::refreshBle()
 {
     checkBleConnection();
+    /* 刷新按钮同时做一次深度诊断：用户点刷新通常正是因为"看不到设备"，
+     * 只跑快速 status 仍然只能得到"未连接"，无从判断下一步做什么。 */
+    probeBleDiagnostics();
+}
+
+/* ★ 深度诊断（仅 macOS 有意义）。
+ *
+ * 为什么需要它：macOS 的 CoreBluetooth 只能拿到"系统已配对且已连接"的外设
+ * （retrieveConnectedPeripheralsWithServices）。换一台从没配对过的 Mac，
+ * 该列表恒为空 —— 旧实现据此报"未连接"，用户完全不知道是
+ *   · 设备没开机/睡着了，
+ *   · 还是该去系统设置里配对，
+ *   · 还是设备槽位绑在老电脑上（固件白名单只放行已记录的那一个地址）。
+ * 这里让 worker 主动扫描一次，把"设备其实就在旁边广播"这种情况识别出来，
+ * UI 才能给出正确引导。
+ *
+ * 一次扫描 8~15s，因此**只允许低频触发**，不进常规轮询；同一时刻只跑一个。 */
+void LightMonitor::probeBleDiagnostics()
+{
+#ifdef Q_OS_MACOS
+    if (m_bleProbeProc && m_bleProbeProc->state() != QProcess::NotRunning)
+        return;   // 已有诊断在跑，丢弃本次
+    // 已连接就不必诊断（已连接是终态，扫描只会浪费 8s 无线电时间）
+    if (m_bleConnected)
+        return;
+
+    m_bleProbeProc = new QProcess(this);
+    connect(m_bleProbeProc, &QProcess::finished, this, &LightMonitor::onBleProbeFinished);
+    connect(m_bleProbeProc, &QProcess::readyReadStandardError, this, [this]() {
+        if (!m_bleProbeProc) return;
+        const QByteArray err = m_bleProbeProc->readAllStandardError();
+        if (!err.isEmpty())
+            qDebug() << "[LightMonitor] BLE probe stderr:" << QString::fromUtf8(err).trimmed();
+    });
+
+    const QString worker = findBleWorkerScript();
+    m_bleProbeProc->setWorkingDirectory(QCoreApplication::applicationDirPath());
+    qDebug() << "[LightMonitor] BLE 深度诊断(扫描)启动";
+    m_bleProbeProc->start(m_pythonPath, {worker, "probe"});
+    /* 硬超时：probe 里授权未决时最多等 25s（用户点"检查设备"后要看到反馈，
+     * 不能无限挂着）。再加扫描 8s + 系统查询 5s 的余量，60s 足够收尾。
+     * 定时器只建一次：probe 可被反复点击，每次 new 会让旧定时器成为
+     * 永不释放的 QObject 子对象（内存随点击次数线性增长）。 */
+    if (!m_bleProbeTimeout) {
+        m_bleProbeTimeout = new QTimer(this);
+        m_bleProbeTimeout->setSingleShot(true);
+        connect(m_bleProbeTimeout, &QTimer::timeout, this, [this]() {
+            if (m_bleProbeProc && m_bleProbeProc->state() != QProcess::NotRunning) {
+                qDebug() << "[LightMonitor] BLE probe 超时, 杀进程";
+                m_bleProbeProc->kill();
+            }
+        });
+    }
+    m_bleProbeTimeout->start(60000);
+#else
+    qDebug() << "[LightMonitor] probeBleDiagnostics: 仅 macOS 需要";
+#endif
+}
+
+void LightMonitor::onBleProbeFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    Q_UNUSED(exitStatus);
+    QString diag;
+    if (m_bleProbeTimeout)
+        m_bleProbeTimeout->stop();
+    if (m_bleProbeProc) {
+        const QString output = QString::fromUtf8(m_bleProbeProc->readAllStandardOutput()).trimmed();
+        qDebug() << "[LightMonitor] BLE probe exit=" << exitCode << "out=" << output;
+        if (output.startsWith("CONNECTED", Qt::CaseInsensitive)) {
+            diag.clear();          // 能连上就不需要任何引导
+        } else if (output.startsWith("PAIRED_BUSY", Qt::CaseInsensitive)) {
+            diag = QStringLiteral("busy");
+        } else if (output.startsWith("SLOT_MISMATCH", Qt::CaseInsensitive)) {
+            diag = QStringLiteral("slot");
+        } else if (output.startsWith("PAIRED", Qt::CaseInsensitive)) {
+            diag = QStringLiteral("paired");
+        } else if (output.startsWith("FOUND", Qt::CaseInsensitive)) {
+            diag = QStringLiteral("found");
+        } else if (output.startsWith("BT_OFF", Qt::CaseInsensitive)) {
+            diag = QStringLiteral("btoff");
+        } else if (output.startsWith("NOPERM", Qt::CaseInsensitive)) {
+            diag = QStringLiteral("noperm");
+        } else {
+            diag = QStringLiteral("absent");
+        }
+        m_bleProbeProc->deleteLater();
+        m_bleProbeProc = nullptr;
+    }
+    if (diag != m_bleDiagnostic) {
+        m_bleDiagnostic = diag;
+        emit bleDiagnosticChanged();
+        qDebug() << "[LightMonitor] BLE 诊断状态:" << (diag.isEmpty() ? "connected/none" : diag);
+    }
+}
+
+void LightMonitor::openBluetoothSettings()
+{
+#ifdef Q_OS_MACOS
+    /* 实测 macOS 26：com.apple.settings.Bluetooth 会落到“通用”，
+     * com.apple.Bluetooth 才正确打开蓝牙面板（14/15 也兼容）。 */
+    QDesktopServices::openUrl(QUrl(QStringLiteral("x-apple.systempreferences:com.apple.Bluetooth")));
+#else
+    qDebug() << "[LightMonitor] openBluetoothSettings: 当前平台无需系统蓝牙设置页";
+#endif
+}
+
+void LightMonitor::openBluetoothPrivacySettings()
+{
+#ifdef Q_OS_MACOS
+    /* 诊断出 noperm 时用：CoreBluetooth 被 TCC 拦截不会报错，只会静默不回调，
+     * 用户看到的现象和"设备不在附近"一模一样，必须直接送到授权开关。
+     * macOS 13+ 的隐私面板锚点是 Privacy_Bluetooth（14/15/26 一致）。 */
+    QDesktopServices::openUrl(QUrl(QStringLiteral(
+        "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth")));
+#else
+    qDebug() << "[LightMonitor] openBluetoothPrivacySettings: 仅 macOS";
+#endif
+}
+
+void LightMonitor::openDiagnosticSettings()
+{
+    /* probe 是异步的：QML 里"先 probe 再读 bleDiagnostic"必然拿到上一次的结论，
+     * 所以由这里统一分派。语义：
+     *   noperm                 -> 隐私与安全性 → 蓝牙（授权开关）
+     *   btoff/paired/busy/found-> 系统蓝牙面板（连接/配对都在那里）
+     *   slot/absent            -> 不打开任何面板：要动的是设备本身
+     *                             （按键唤醒 / 关机后按 C 键切槽），软件帮不上 */
+    const QString d = m_bleDiagnostic;
+    if (d == QStringLiteral("noperm")) {
+        openBluetoothPrivacySettings();
+    } else if (d == QStringLiteral("btoff") || d == QStringLiteral("paired")
+               || d == QStringLiteral("busy") || d == QStringLiteral("found")) {
+        openBluetoothSettings();
+    } else {
+        qDebug() << "[LightMonitor] openDiagnosticSettings: 无需打开系统面板, diag=" << d;
+    }
 }
 
 /* 探测 VibeKey 蓝牙设备是否已配对/在线。通过独立的 QProcess 运行
@@ -482,7 +638,7 @@ void LightMonitor::refreshBle()
 void LightMonitor::checkBleConnection()
 {
     // 常驻 BLE 进程已真正握住链路(READY)：它就是连接状态的唯一权威。
-    // 此时不再跑 status 探测——既避免每 3s 开/关设备造成的无线电链接抖动
+    // 此时不再跑 status 探测——既避免周期性开/关设备造成的无线电链接抖动
     // （弱适配器上尤其明显，正是“显示断开但实际连着”的根源），也避免 racy 的
     // ConnectionStatus 轮询把 m_bleConnected 误判为断开、进而 kill 掉常驻进程。
     if (m_bleServeProc && m_bleServeReady) {
@@ -496,11 +652,54 @@ void LightMonitor::checkBleConnection()
         return;
     }
 
+    /* ★ 11-25: 蓝牙权限被拒/未授权时**停止常规轮询**，改低频退避。
+     *
+     * 成因（实测 tccd 日志：6 小时 160 次弹窗、一次都没授权成功；
+     * 当时的轮询周期是 3s，现已放宽到 10s，但机制完全相同）：
+     *   每轮一次新 python 进程 → 每次碰 CoreBluetooth 都是一次新的 TCC 询问；
+     *   旧 status 只等 6s 就退出，进程一退系统把弹窗撤掉，用户根本来不及点。
+     *   于是"关掉就马上再弹"，永远点不完。
+     *
+     * worker 侧已改成：授权未决时把进程留住等用户选择（见 _await_authorization）。
+     * 但若用户明确拒绝，继续按常规周期只会白刷 —— 退到 30s 一次，
+     * 让用户有时间去「隐私与安全性 → 蓝牙」把开关打开，无需重启客户端。 */
+    if (m_bleNoPerm && m_bleNoPermTimer.isValid()
+            && m_bleNoPermTimer.elapsed() < 30000) {
+        return;   // 退避窗口内不再发起探测
+    }
+    m_bleNoPermTimer.restart();   // 本次探测起，重新计退避窗口
+
     if (m_bleProc && m_bleProc->state() != QProcess::NotRunning)
         return;
 
     m_bleProc = new QProcess(this);
     connect(m_bleProc, &QProcess::finished, this, &LightMonitor::onBleCheckFinished);
+    /* 硬超时：授权未决时 worker 会留在原地等用户点系统弹窗（最长 90s），
+     * 期间进程不能变成永久僵尸。给一个略大于 worker 预算的上限，
+     * 超时就杀掉并当作"仍无权限"处理（下一轮退避再试）。
+     * 正常路径（已授权）通常 <1s 就返回，这个定时器不会触发。
+     * 定时器只建一次：本函数每轮轮询都被调一次，每次 new 会持续泄漏 QObject。 */
+    if (!m_bleProcTimeout) {
+        m_bleProcTimeout = new QTimer(this);
+        m_bleProcTimeout->setSingleShot(true);
+        connect(m_bleProcTimeout, &QTimer::timeout, this, [this]() {
+            if (m_bleProc && m_bleProc->state() != QProcess::NotRunning) {
+                qDebug() << "[LightMonitor] BLE status 超时(等授权?), 杀进程";
+                m_bleProc->kill();
+            }
+        });
+    }
+    m_bleProcTimeout->start(100000);   // 100s > worker 的 90s 授权等待预算
+    /* worker 把真正的原因（ModuleNotFoundError / 蓝牙未授权 / 适配器错误）
+     * 都打在 stderr，stdout 只剩一句 DISCONNECTED。不读 stderr 的话，界面
+     * 只显示"未连接"，日志里也查不到为什么 —— 实测过一个案例：本机
+     * ~/.local 的旧 bleak 劫持了内置版本，所有 BLE 功能静默失效。 */
+    connect(m_bleProc, &QProcess::readyReadStandardError, this, [this]() {
+        if (!m_bleProc) return;
+        const QByteArray err = m_bleProc->readAllStandardError();
+        if (!err.isEmpty())
+            qDebug() << "[LightMonitor] BLE status stderr:" << QString::fromUtf8(err).trimmed();
+    });
 
     QString worker = findBleWorkerScript();
     QString appDir = QCoreApplication::applicationDirPath();
@@ -513,6 +712,7 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
 {
     Q_UNUSED(exitStatus);
     bool connected = false;
+    bool noPerm = false;
     QString name;
     int battery = -1;
 
@@ -529,7 +729,7 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
         }
         QByteArray out = m_bleProc->readAllStandardOutput();
         QString output = QString::fromUtf8(out).trimmed();
-        {   /* ★ 11-23 只在输出变化时打印（轮询每 1.5s 一次，结果通常不变） */
+        {   /* ★ 11-23 只在输出变化时打印（结果通常不变） */
             static QString lastOut;
             static int lastExit = -1;
             if (output != lastOut || exitCode != lastExit) {
@@ -538,8 +738,13 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
                 qDebug() << "[LightMonitor] BLE status exit=" << exitCode << "out=" << output;
             }
         }
-        // 新格式：CONNECTED <battery>（battery 为 0-100 或 -1）；旧格式 CONNECTED 也兼容
-        if (output.startsWith("CONNECTED", Qt::CaseInsensitive)) {
+        /* NOPERM：蓝牙权限被拒或授权框等待超时。
+         * 置标记 → checkBleConnection 的轮询退避到 30s，避免无限刷系统弹窗；
+         * 同时把诊断态设为 noperm，让界面直接给出"去授权"的引导，
+         * 而不是让用户去折腾设备（此时设备可能就好好连着）。 */
+        if (output.startsWith("NOPERM", Qt::CaseInsensitive)) {
+            noPerm = true;
+        } else if (output.startsWith("CONNECTED", Qt::CaseInsensitive)) {
             connected = true;
             name = "VibeKey-F3";
             QStringList parts = output.split(' ');
@@ -550,6 +755,23 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
         }
         m_bleProc->deleteLater();
         m_bleProc = nullptr;
+    }
+    if (m_bleProcTimeout)
+        m_bleProcTimeout->stop();
+
+    /* NOPERM 不会自己恢复：用户必须去系统设置里授权。
+     * 这里只负责**降频**（见 checkBleConnection 的 30s 退避）并给出诊断态，
+     * 不再继续按常规周期撞 TCC —— 那正是"弹窗关掉就再弹"的直接来源。
+     * 一旦授权被打开，下一轮退避探测会拿到 CONNECTED 并自动清掉诊断态。 */
+    if (noPerm) {
+        m_bleNoPerm = true;
+        if (m_bleDiagnostic != QStringLiteral("noperm")) {
+            m_bleDiagnostic = QStringLiteral("noperm");
+            emit bleDiagnosticChanged();
+        }
+        qDebug() << "[LightMonitor] BLE 无权限：轮询退避到 30s";
+    } else {
+        m_bleNoPerm = false;
     }
 
     // 去抖（迟滞）：出现一次 CONNECTED 立即判定为已连接并清零计数；
@@ -590,6 +812,12 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
         emit bleConnectedChanged();
         emit bleDeviceNameChanged();
         updateChannel();
+        /* 连上即清除诊断态：之前的"设备在附近但没连"引导已过期，
+         * 留着会让 UI 在已连接时仍显示配对提示。 */
+        if (m_bleConnected && !m_bleDiagnostic.isEmpty()) {
+            m_bleDiagnostic.clear();
+            emit bleDiagnosticChanged();
+        }
         qDebug() << "[LightMonitor] BLE" << (m_bleConnected ? "CONNECTED" : "DISCONNECTED")
                  << "(discStreak=" << m_bleDiscStreak << ")";
     }

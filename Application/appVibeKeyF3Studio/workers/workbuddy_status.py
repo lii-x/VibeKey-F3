@@ -41,8 +41,18 @@ import datetime
 import json
 import csv
 import io
+import tempfile
 
-DB_PATH = os.path.expandvars(r"%USERPROFILE%\.workbuddy\workbuddy.db")
+# ===================== 跨平台路径基础 =====================
+# 历史实现全部写死 Windows 环境变量（%USERPROFILE% / %TEMP%），在 macOS 上
+# os.path.expandvars 找不到变量时**原样返回字符串**，于是路径恒不存在、DB 永远读不到，
+# 状态一路静默回退成 idle（面板"永远空闲"）。
+#
+# 统一改用跨平台 API：
+#   os.path.expanduser("~")  -> Windows: %USERPROFILE%；POSIX: $HOME（均为平台权威值）
+#   tempfile.gettempdir()    -> Windows: %TEMP%；macOS: $TMPDIR（即 /var/folders/.../T）
+WB_HOME = os.path.join(os.path.expanduser("~"), ".workbuddy")
+DB_PATH = os.path.join(WB_HOME, "workbuddy.db")
 
 
 def _reconfigure_stdio():
@@ -72,11 +82,12 @@ def _now_ms():
 
 # ---- 高风险命令审批检测（10-03 新增）--------------------------------------
 # WorkBuddy 弹出"检测到批量删除操作 / 高风险命令"确认框时，会在
-#   %TEMP%\codebuddy-safe-delete\report-<pid>-<ts>-<rand>.jsonl
+#   Windows: %TEMP%\codebuddy-safe-delete\report-<pid>-<ts>-<rand>.jsonl
+#   macOS  : $TMPDIR/codebuddy-safe-delete/report-<pid>-<ts>-<rand>.jsonl
 # 写审计报告；**弹窗结束后该目录被清空**（源码 ensureSafeDeleteReportPath()）。
 # 这是外部唯一可观测的落地信号 —— 审批状态本身走 A2A IPC，不落盘。
-SAFEDEL_DIR = os.path.join(os.environ.get("TEMP", r"C:\Windows\Temp"),
-                          "codebuddy-safe-delete")
+# 两者都由 tempfile.gettempdir() 一并覆盖（实测 macOS 下该目录确实存在）。
+SAFEDEL_DIR = os.path.join(tempfile.gettempdir(), "codebuddy-safe-delete")
 # ⚠️ 判据是"**文件存在**"，不是"文件新鲜"（10-03 实测踩过的坑）：
 #   最初用 mtime < 8s 判定，实测 3s 轮询时 alert 只亮了几秒就消失 ——
 #   因为审批期间 WorkBuddy 并**不持续追加**报告，mtime 停在创建那一刻。
@@ -136,13 +147,33 @@ def _rel_time(ms):
 
 
 def _workbuddy_proc_alive():
-    """WorkBuddy.exe 进程是否在运行。"""
+    """WorkBuddy 主进程是否在运行（跨平台）。
+
+    Windows: WorkBuddy.exe（tasklist 过滤镜像名）
+    macOS  : 主进程二进制的**进程名**是 Electron（可执行路径才是
+             /Applications/WorkBuddy.app/Contents/MacOS/Electron），因此不能按
+             "WorkBuddy" 精确匹配进程名 —— 实测 pgrep -x WorkBuddy 恒为 0。
+             这里改为匹配完整的可执行路径，既能命中主进程，也不会误判
+             "WorkBuddy Helper" 之类的子进程（它们自己的路径同样含 WorkBuddy.app，
+             但主进程存在与否不影响判断：只要 App 在跑，主进程就一定在跑）。
+
+    任何异常都返回 False（宁可显示空闲，也不要误报忙碌）。
+    """
     try:
+        if os.name == "nt":
+            r = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq WorkBuddy.exe", "/NH"],
+                capture_output=True, text=True, timeout=5, errors="ignore",
+            )
+            return "WorkBuddy.exe" in r.stdout
+
+        # macOS / Linux: pgrep -f 按完整命令行匹配主进程可执行路径
+        pat = r"/WorkBuddy\.app/Contents/MacOS/Electron$"
         r = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq WorkBuddy.exe", "/NH"],
+            ["pgrep", "-f", pat],
             capture_output=True, text=True, timeout=5, errors="ignore",
         )
-        return "WorkBuddy.exe" in r.stdout
+        return r.returncode == 0 and bool(r.stdout.strip())
     except Exception:
         return False
 
@@ -156,7 +187,7 @@ def _ms(v):
 
 # 状态保持：记录最近一次判定为 busy 的时间戳，用于容忍 DB 静默间隙（思考/等待/
 # planning 记录未建等），避免在这些瞬间闪 idle。只有明确的"完成"信号才清空。
-STATE_FILE = os.path.expandvars(r"%USERPROFILE%\.workbuddy\wb_monitor_state.json")
+STATE_FILE = os.path.join(WB_HOME, "wb_monitor_state.json")
 HOLD_MS = 15 * 1000             # busy 状态保持时长，覆盖瞬时静默 / planning 记录未建
 COMPLETE_GRACE_MS = 1500        # 回完(转 completed)后仅亮 1.5s 缓冲，超过即视为明确完成
 
@@ -363,7 +394,7 @@ def read_state():
         await_prompt = None
         is_await = (last_session_status == "planning")
         if not is_await:
-            sentinel = os.path.expandvars(r"%USERPROFILE%\.workbuddy\wb_awaiting.json")
+            sentinel = os.path.join(WB_HOME, "wb_awaiting.json")
             if os.path.exists(sentinel):
                 try:
                     with open(sentinel, "r", encoding="utf-8") as f:

@@ -12,6 +12,14 @@
  *
  * 注: 依赖 net_worker.py(与固件 OTA 共用), 资产按文件名 VibeKey-F3_Studio_Setup_vX.Y.Z.exe
  *     过滤 —— 与固件 .bin 天然隔离。
+ *
+ * ⚠️ 平台限制: 本自更新链路**只能在 Windows 上工作** ——
+ *   net_worker 只认出 VibeKey-F3_Studio_Setup_*.exe 这一种资产, 安装动作是
+ *   startDetached(setup.exe, "/S")(NSIS 静默参数)。macOS 没有对应的发布资产与
+ *   安装器语义, 强行走这条链路只会下载到 .exe 然后启动失败/报错。
+ *   因此 supported() 在非 Windows 上返回 false, 调用方(SystemTray / main.cpp)
+ *   据此**不创建**"检查更新/立即更新"入口、也不做启动自检, 避免误导用户。
+ *   将来若提供 macOS 分发形态(dmg/zip + 替换 bundle), 在这里补实现并放开即可。
  */
 #include <QObject>
 #include <QProcess>
@@ -26,6 +34,7 @@ class AppUpdater : public QObject
     Q_PROPERTY(QString latestVersion READ latestVersion NOTIFY latestVersionChanged)
     Q_PROPERTY(bool busy READ busy NOTIFY busyChanged)
     Q_PROPERTY(int downloadProgress READ downloadProgress NOTIFY downloadProgressChanged)
+    Q_PROPERTY(bool supported READ supported CONSTANT)
 
 public:
     explicit AppUpdater(QObject *parent = nullptr);
@@ -35,6 +44,10 @@ public:
     QString latestVersion() const { return m_latestVersion; }
     bool busy() const { return m_busy; }
     int downloadProgress() const { return m_downloadProgress; }   /* 0..100, -1 空闲 */
+
+    /* 当前平台是否支持"下载安装包并静默重装"。macOS/Linux 为 false:
+     * 发布资产只有 Windows 安装器(.exe + /S), 见文件头说明。 */
+    static bool supported();
 
     /* silent=true: 失败时不发 checkFailed(启动后台自检用, 免得没网一直弹) */
     Q_INVOKABLE void checkNow(bool silent = false);
