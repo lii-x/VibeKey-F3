@@ -40,6 +40,13 @@ if _HERE not in sys.path:
 import config_worker as cw
 
 LED_SVC = "0000ff00-0000-1000-8000-00805f9b34fb"
+# 标准 HID / 设备信息服务（2026-11-25 实测必要）：
+# macOS 的 retrieveConnectedPeripheralsWithServices 只认系统自己发现过的服务。
+# VibeKey 是以 BLE HID(0x1812) 身份连上 Mac 的，用 0xFF00 去查会返回 0 个 ——
+# 即使设备连着、按键正常。同一台机器实测：0xFF00 → 0 个，0x1812 → 2 个。
+# 必须带上 HID 才找得到已连接设备，否则只会在"扫描"里空转到超时。
+HID_SVC = "00001812-0000-1000-8000-00805f9b34fb"
+DIS_SVC = "0000180a-0000-1000-8000-00805f9b34fb"
 CHAR_LED = "0000ff01-0000-1000-8000-00805f9b34fb"
 CHAR_CFG = "0000ff03-0000-1000-8000-00805f9b34fb"
 CHAR_RSP = "0000ff04-0000-1000-8000-00805f9b34fb"
@@ -56,34 +63,102 @@ def log(msg):
 
 
 async def _find_device():
-    """优先取系统【已连接】的 0xFF00 设备（免扫描、最快），
+    """优先取系统【已连接】的设备（免扫描、最快），
     退化为主动扫描（设备可能因空闲停播，故扫描时间给足）。
 
     ⚠️ 已连接列表里不要只认名字含 "vibekey"：macOS 有时先给出空名字，
-    设备连上后又停止广播，一旦被名字过滤掉就再也找不到。0xFF00 是设备
-    自定义服务，命中这个服务的已连接设备就直接采用。"""
+    设备连上后又停止广播，一旦被名字过滤掉就再也找不到。
+
+    ⚠️ **必须查 HID 服务，不能只查 0xFF00**：系统只缓存自己发现过的服务。
+    VibeKey 作为 BLE HID 键盘被系统连上，0xFF00（自定义服务）不会进
+    已连接缓存 —— 实测同一台 Mac：0xFF00 → 0 个设备，0x1812 → 2 个。
+    只查 0xFF00 就会直接掉到扫描分支，而设备连着时根本不广播 ⇒ 永远失败。
+    这正是"设备连接正常、按键能用，客户端却读不到配置"的根因。"""
     from bleak import BleakAdapter, BleakScanner
 
     try:
         adapter = await BleakAdapter.get()
-        devs = await adapter.get_connected_devices([LED_SVC])
-        for d in devs:
-            nm = (d.name or "").lower()
-            if not nm or "vibekey" in nm:
-                log(f"found connected device: {d.address} {d.name or '(no name)'}")
+        # HID/设备信息服务优先（命中最可靠），再补一次 0xFF00（旧配对可能只缓存它）
+        candidates = []
+        seen_addrs = set()
+        for uuids in ([HID_SVC, DIS_SVC], [LED_SVC]):
+            try:
+                devs = await adapter.get_connected_devices(uuids)
+            except Exception as e:
+                log(f"get_connected_devices({uuids[0][4:8]}) failed: {e}")
+                continue
+            for d in devs:
+                key = getattr(d, "address", None) or id(d)
+                if key in seen_addrs:
+                    continue
+                seen_addrs.add(key)
+                log(f"connected candidate: {d.address} {d.name or '(no name)'} "
+                    f"via={uuids[0][4:8]}")
+                candidates.append(d)
+
+        # 名字命中直接认；否则必须验证 —— 查 HID 会把用户的鼠标/别家键盘
+        # 一起带出来，而 macOS 对未做过服务发现的外设常只给空名字。认错设备
+        # 的代价很大：会对着鼠标去读配置，然后把错误计入"设备无响应"。
+        for d in candidates:
+            if "vibekey" in (d.name or "").lower():
+                log(f"found connected device by name: {d.address} {d.name}")
+                return d
+        for d in candidates:
+            if await _has_led_service(d):
+                log(f"found connected device by GATT: {d.address} "
+                    f"{d.name or '(no name)'}")
                 return d
     except Exception as e:
         log(f"get_connected_devices failed: {e}")
 
     log("not in connected list, scanning ...")
-    seen = await BleakScanner.discover(timeout=12.0, return_adv=True)
+    # ⚠️ 与 ble_status_worker_mac.py 同一坑：蓝牙权限未授予时
+    # BleakScanner.discover 的 timeout 不生效，会无限挂起（实测 >2min）。
+    # C++ 侧只等有限时间，弹一次"读取失败"总比进程永远挂着好。
+    try:
+        seen = await asyncio.wait_for(
+            BleakScanner.discover(timeout=12.0, return_adv=True), timeout=18.0)
+    except asyncio.TimeoutError:
+        log("scan hard-timeout (蓝牙权限未授予? 系统设置→隐私与安全性→蓝牙)")
+        return None
+    except Exception as e:
+        log(f"scan failed: {e}")
+        return None
+
+    strong = []
+    weak = []
     for addr, (d, adv) in seen.items():
         nm = d.name or adv.local_name or ""
         uuids = [u.lower() for u in (getattr(adv, "service_uuids", None) or [])]
         if "vibekey" in nm.lower() or LED_SVC in uuids:
-            log(f"found by scan: {addr} {nm or '(no name)'}")
+            strong.append(d)
+        elif HID_SVC in uuids:
+            # 只带 HID 的很大概率是用户自己的外设，必须验证后再用
+            weak.append(d)
+
+    if strong:
+        log(f"found by scan: {strong[0].address}")
+        return strong[0]
+    for d in weak:
+        if await _has_led_service(d):
+            log(f"found by scan+GATT: {d.address}")
             return d
     return None
+
+
+async def _has_led_service(dev):
+    """连上去确认有没有 0xFF00 服务 —— VibeKey 的可靠身份特征。
+
+    只做服务发现，不读不写。连不上时返回 False（这里不需要区分
+    "未知"与"不是"，因为调用方还有扫描兜底路径）。
+    """
+    from bleak import BleakClient
+    try:
+        async with BleakClient(dev, timeout=10.0) as c:
+            return any(s.uuid.lower().startswith(LED_SVC[:8]) for s in c.services)
+    except Exception as e:
+        log(f"identity check failed for {getattr(dev, 'address', '?')}: {e}")
+        return False
 
 
 class Session:

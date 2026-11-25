@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
+#include <QElapsedTimer>
 #include "PortDetector.h"
 
 class LightMonitor : public QObject
@@ -22,6 +23,11 @@ class LightMonitor : public QObject
      *   空串     = 未知（还没探测过 / 非 macOS）
      *   "found"  = 设备正在广播但系统没连 -> 多半没配对 / 槽位不匹配
      *   "absent" = 附近没有设备在广播 -> 设备睡了（按键唤醒）或没开机
+     *   "paired" = 本机有配对记录但当前未连接 -> 去系统蓝牙点连接
+     *   "slot"   = 本机配对的是另一个蓝牙地址（设备停在别的槽位）-> 按 C 键切槽
+     *   "busy"   = 系统显示已连接，但配置通道拿不到 -> 配对记录异常，需重新配对
+     *   "btoff"  = 这台 Mac 的蓝牙已关闭
+     *   "noperm" = 扫描被系统拦截（蓝牙权限未授予）-> 去隐私设置授权
      * 只有 macOS 的 probe 会给出非空值；其余平台恒为空，UI 据空串隐藏提示。 */
     Q_PROPERTY(QString bleDiagnostic READ bleDiagnostic NOTIFY bleDiagnosticChanged)
 
@@ -48,6 +54,16 @@ public:
     /* macOS：打开系统“蓝牙”设置页，引导用户先把设备配对/连接。
      * macOS 的 CoreBluetooth 只暴露系统已连接的外设，App 本身无法发起配对。 */
     Q_INVOKABLE void openBluetoothSettings();
+    /* macOS：打开「隐私与安全性 → 蓝牙」权限页。
+     * 用途：诊断出 noperm（扫描被 TCC 拦截）时，直接把用户送到授权开关，
+     * 而不是让他自己去系统设置里翻。 */
+    Q_INVOKABLE void openBluetoothPrivacySettings();
+    /* macOS：按**当前**诊断结论把用户送到对应的系统面板。
+     * 为什么不放在 QML 里判断：probe 是异步的（8~25s），QML 里
+     * `probeBleDiagnostics(); if (bleDiagnostic === ...)` 读到的永远是
+     * **上一次**的结论 —— 第一次点"点此授权"会什么都不打开。
+     * 这里由 C++ 直接读 m_bleDiagnostic 分派，语义明确、不依赖时序。 */
+    Q_INVOKABLE void openDiagnosticSettings();
     /* 注入共享的设备探测器，用于蓝牙未连接时走 USB 发送 */
     void setPortDetector(PortDetector *detector);
 
@@ -102,16 +118,26 @@ private:
 
     QTimer *m_bleTimer;
     QProcess *m_bleProc;
+    QTimer *m_bleProcTimeout = nullptr;  // status 探测硬超时(等授权时防止进程堆积)
     bool m_bleConnected;
     QString m_bleDeviceName;
     QString m_bleDeviceVersion;   // 蓝牙连接透传的固件版本号(空=未知)
     int m_bleBatteryPercent = -1;  // 通过 BLE Battery Service 读到的电量，<0 表示未知
     int m_bleDiscStreak = 0;       // 曾连接后连续探测为"断开"的次数(去抖, 见 onBleCheckFinished);
                                    // 从未连接时首次 DISCONNECTED 直接判定断开, 不攒计数
+    /* ★ 11-25: 蓝牙权限被拒/未授权。
+     * 置位后 checkBleConnection 从 3s 轮询退到 30s —— 未授权时每 3s 新起一个
+     * python 进程碰 CoreBluetooth，就是每 3s 一次新的 TCC 弹窗；而旧进程只等 6s
+     * 就退出，进程一退弹窗被系统撤掉，用户永远点不到"允许"。
+     * （实测 tccd 日志：6 小时 160 次弹窗，一次成功授权都没有。）
+     * m_bleNoPermTimer 记录退避窗口起点。 */
+    bool m_bleNoPerm = false;
+    QElapsedTimer m_bleNoPermTimer;
     /* 蓝牙诊断状态（仅 macOS 的 probe 会写）：
      *   ""/"found"/"absent"，含义见 Q_PROPERTY 注释。 */
     QString m_bleDiagnostic;
     QProcess *m_bleProbeProc = nullptr;   // probe 诊断子进程（同一时刻只允许一个）
+    QTimer *m_bleProbeTimeout = nullptr;  // probe 硬超时(等授权时防止进程堆积)
 
     PortDetector *m_portDetector;   // 蓝牙未连接时走 USB 发送用
     QString m_channel;              // "ble" / "usb" / "none"

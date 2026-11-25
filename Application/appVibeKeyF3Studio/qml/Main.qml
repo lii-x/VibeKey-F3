@@ -1319,13 +1319,15 @@ ApplicationWindow {
                                      * 光说"未连接"帮不上忙 —— 换一台没配过的 Mac 时用户根本
                                      * 不知道是设备睡了、要去配对、还是设备槽位绑在老电脑上
                                      * （固件白名单只放行已记录的那一个地址）。按 bleDiagnostic
-                                     * 区分三种情况：
-                                     *   found  -> 设备就在旁边广播，但系统没连：去系统设置配对，
-                                     *             若无效则说明槽位绑在别的电脑上，需在设备上按住
-                                     *             L1/L2/L3 进入配对模式（会清该槽位旧配对）。
-                                     *   absent -> 附近扫不到设备：先按键唤醒（固件广播只维持
-                                     *             60s 就进深睡），再刷新。
-                                     *   ""     -> 还没诊断过：先给一个"检查"入口。 */
+                                     * 区分六种情况（探针会先用 system_profiler 读系统蓝牙
+                                     * 开关/配对表，不需要蓝牙权限）：
+                                     *   btoff  -> 蓝牙关着，先打开蓝牙
+                                     *   noperm -> 扫描被 TCC 拦截，去隐私设置授权（关键：
+                                     *             没权限时扫描静默失败，和"设备不在"一样）
+                                     *   paired -> 本机有配对记录但未连接，去系统蓝牙点连接
+                                     *   busy   -> 系统显示已连接但配置通道不可用，配对记录残留
+                                     *   found  -> 设备就在旁边广播，但系统没连：去系统设置配对
+                                     *   absent -> 附近扫不到设备：先按键唤醒（广播只维持 60s） */
                                     Rectangle {
                                         id: btHintBtn
                                         Layout.alignment: Qt.AlignVCenter
@@ -1339,26 +1341,43 @@ ApplicationWindow {
                                             id: btHintText
                                             anchors.centerIn: parent
                                             text: {
-                                                if (lightMonitor.bleDiagnostic === "found")
-                                                    return "已发现设备，去配对 / 换槽位"
-                                                if (lightMonitor.bleDiagnostic === "absent")
-                                                    return "未发现设备：按键唤醒后再试"
-                                                return "蓝牙未连接？检查设备"
+                                                switch (lightMonitor.bleDiagnostic) {
+                                                case "slot":   return "设备在别的槽位，按 C 键切槽"
+                                                case "found":  return "已发现设备，去配对 / 换槽位"
+                                                case "paired": return "已配对未连接，去系统蓝牙连接"
+                                                case "busy":   return "已连接但配置通道异常"
+                                                case "btoff":  return "蓝牙已关闭，点此打开"
+                                                case "noperm": return "无蓝牙权限，点此授权"
+                                                case "absent": return "未发现设备：按键唤醒后再试"
+                                                default:       return "蓝牙未连接？检查设备"
+                                                }
                                             }
                                             font.pointSize: 9
-                                            color: lightMonitor.bleDiagnostic === "absent" ? "#d48806" : "#1677ff"
+                                            color: {
+                                                if (lightMonitor.bleDiagnostic === "noperm") return "#cf1322"
+                                                if (lightMonitor.bleDiagnostic === "btoff"
+                                                        || lightMonitor.bleDiagnostic === "absent"
+                                                        || lightMonitor.bleDiagnostic === "slot") return "#d48806"
+                                                return "#1677ff"
+                                            }
                                         }
                                         MouseArea {
                                             id: btHintMa
                                             anchors.fill: parent
                                             hoverEnabled: true
                                             cursorShape: Qt.PointingHandCursor
-                                            /* 点一次做两件事：先重新诊断（拿到最新结论），
-                                             * 已判定"设备在附近"时再直接把用户送到系统蓝牙面板。 */
+                                            /* 点一次做两件事：先重新诊断（异步，结论稍后经
+                                             * bleDiagnosticChanged 回来），再按**当前已得到的**
+                                             * 结论把用户送到对应的系统面板：
+                                             *   noperm                 -> 隐私 → 蓝牙
+                                             *   btoff/paired/busy/found-> 系统蓝牙
+                                             *   slot/absent            -> 只重扫（要动设备本身）
+                                             * 注意别在这里判断 bleDiagnostic：probe 是异步的，
+                                             * 紧跟其后的读取拿到的还是上一次结论。分派逻辑放在
+                                             * C++ 的 openDiagnosticSettings() 里。 */
                                             onClicked: {
                                                 lightMonitor.probeBleDiagnostics()
-                                                if (lightMonitor.bleDiagnostic === "found")
-                                                    lightMonitor.openBluetoothSettings()
+                                                lightMonitor.openDiagnosticSettings()
                                             }
                                         }
                                     }
@@ -1377,13 +1396,14 @@ ApplicationWindow {
                                     }
                                 }
 
-                                /* macOS 诊断说明条：只在"扫到设备却连不上"或"扫不到设备"时出现，
-                                 * 把下一步该按哪个键写清楚。这两条是换机场景的必要信息：
-                                 *   · 固件连接模式有白名单，只放行本槽位已记录的地址 —— 换一台
-                                 *     电脑必然连不上，必须在设备上按住 L 键进配对模式（会清该槽
-                                 *     位旧配对），这不是软件能绕过的。
-                                 *   · 固件只在开机/按键后广播 60s 就停播进深睡 —— 新电脑上打开
-                                 *     客户端时设备多半已经睡了，表现为"扫不到"。 */
+                                /* macOS 诊断说明条：把"下一步具体做什么"写清楚。
+                                 * 这几条是换机场景的必要信息：
+                                 *   · 每个蓝牙槽位是**不同的本机蓝牙地址**（bt_identity.c），
+                                 *     而槽位只在开机瞬间由按键决定（bt_multi_boot_select）——
+                                 *     所以"设备当前跑在哪个槽位"决定这台 Mac 能不能连上。
+                                 *   · 固件连接模式有白名单，只放行本槽位已记录的那台电脑。
+                                 *   · 固件只在开机/按键后广播 60s 就停播进深睡。
+                                 *   · 按住 L 键会清掉原电脑在该槽位的配对；换机优先用没占用的槽位。 */
                                 Rectangle {
                                     Layout.fillWidth: true
                                     Layout.leftMargin: 12
@@ -1394,9 +1414,19 @@ ApplicationWindow {
                                     visible: root.isMacOS && !portDetector.deviceConnected
                                              && !lightMonitor.bleConnected
                                              && lightMonitor.bleDiagnostic !== ""
-                                    color: lightMonitor.bleDiagnostic === "found" ? "#f0f7ff" : "#fffbe6"
+                                    color: {
+                                        if (lightMonitor.bleDiagnostic === "noperm") return "#fff1f0"
+                                        if (lightMonitor.bleDiagnostic === "found"
+                                                || lightMonitor.bleDiagnostic === "paired") return "#f0f7ff"
+                                        return "#fffbe6"
+                                    }
                                     border.width: 1
-                                    border.color: lightMonitor.bleDiagnostic === "found" ? "#bae0ff" : "#ffe58f"
+                                    border.color: {
+                                        if (lightMonitor.bleDiagnostic === "noperm") return "#ffccc7"
+                                        if (lightMonitor.bleDiagnostic === "found"
+                                                || lightMonitor.bleDiagnostic === "paired") return "#bae0ff"
+                                        return "#ffe58f"
+                                    }
                                     Text {
                                         id: btDiagText
                                         anchors.fill: parent
@@ -1404,13 +1434,37 @@ ApplicationWindow {
                                         wrapMode: Text.WordWrap
                                         font.pointSize: 9
                                         color: "#555"
-                                        text: lightMonitor.bleDiagnostic === "found"
-                                              ? "已扫描到 VibeKey，但系统未连接。请打开「系统设置 → 蓝牙」连接它；"
-                                                + "若列表里没有或连接失败，说明设备绑定在另一台电脑上 —— "
-                                                + "按住设备 L1/L2/L3（对应蓝牙1/2/3）开机进入配对模式（黄灯闪），"
-                                                + "再在此重新连接。"
-                                              : "附近没有扫描到 VibeKey。设备空闲 60 秒会停止广播进入休眠，"
-                                                + "请先按任意键唤醒设备（或短按开机），再点上方按钮重新检查。"
+                                        text: {
+                                            switch (lightMonitor.bleDiagnostic) {
+                                            case "btoff":
+                                                return "这台 Mac 的蓝牙处于关闭状态。请打开「系统设置 → 蓝牙」后重试（点上方按钮可直接打开）。"
+                                            case "noperm":
+                                                return "客户端没有蓝牙权限，扫描会被系统静默拦截——表现得和“设备不在附近”完全一样。"
+                                                     + "请到「系统设置 → 隐私与安全性 → 蓝牙」勾选 VibeKey-F3 Studio，然后重启客户端。"
+                                            case "slot":
+                                                return "扫描到了 VibeKey-F3，但它的蓝牙地址和本机配对的那个不一样——"
+                                                     + "说明设备现在停在别的蓝牙槽位上（每个槽位的蓝牙地址不同）。"
+                                                     + "请把设备关机，按住本机对应槽位的「C」键再开机（C1/C2/C3 = 蓝牙1/2/3），"
+                                                     + "然后点上方按钮重新检查。这台 Mac 配过哪个槽位就是哪个 C 键。"
+                                            case "paired":
+                                                return "这台 Mac 有 VibeKey-F3 的配对记录，但当前没有连接。请到「系统设置 → 蓝牙」点击连接；"
+                                                     + "若连不上，先确认设备开在**同一个槽位**上（关机后按住本机配过的那个 C 键开机）。"
+                                                     + "如果这个槽位本来就该给这台 Mac 用，也可以让设备进入配对模式重配："
+                                                     + "关机后按住 L1/L2/L3（对应槽位）开机，黄灯闪烁时配对。"
+                                            case "busy":
+                                                return "系统显示设备已连接，但客户端拿不到配置通道（常见于旧的配对记录残留）。"
+                                                     + "请到「系统设置 → 蓝牙」里“忽略此设备”，然后关机按住对应槽位的 L 键开机（黄灯闪）重新配对。"
+                                            case "found":
+                                                return "已扫描到 VibeKey，但系统未连接。请打开「系统设置 → 蓝牙」连接它；"
+                                                     + "若连接失败，说明设备当前槽位绑定在另一台电脑上 —— 关机后按住 L2/L3（选没占用的槽位）开机，"
+                                                     + "黄灯闪烁时再配对。注意：L 键会清掉原电脑在该槽位的配对，换机请优先用没占用的槽位。"
+                                            default:
+                                                return "附近没有扫描到 VibeKey。设备空闲 60 秒会停止广播进入休眠：先按任意键唤醒（或短按开机），"
+                                                     + "再点上方按钮重新检查。若设备正连着另一台电脑，它不会广播——请先关掉那台电脑的蓝牙或把设备关机。"
+                                                     + "若要用另一个槽位，需关机后按住对应的 C 键（连接）或 L 键（重新配对）开机。"
+                                                     + "也可以直接用 USB 线连接——插线即可配置，不需要蓝牙。"
+                                            }
+                                        }
                                     }
                                 }
 
