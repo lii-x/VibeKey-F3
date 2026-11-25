@@ -2,6 +2,7 @@
 #include <QSerialPort>
 #include <QSerialPortInfo>
 #include <QDebug>
+#include <QThread>
 
 /* 等待设备回包的超时(ms)。
  * 旧实现是 `while (t.elapsed() < 800) { sp.waitForReadyRead(300); }` —— 阻塞轮询，
@@ -196,6 +197,87 @@ void PortDetector::probeNext()
     m_probeTimeout->start(PROBE_REPLY_TIMEOUT_MS);
 }
 
+/* ============================================================================
+ * USB RGB 预览直发（11-23）
+ * ============================================================================
+ * 帧格式（与 config_worker.py 的 conf_rgb 完全一致，14 字节）：
+ *   [0..3] CONF_MAGIC(0x434F4E46, LE)  [4] cmd=0x06  [5] slot(0)
+ *   [6..7] data_len=6 (LE)
+ *   [8..13] idx, en, r, g, b, bri
+ * 设备回 2 字节(code, eff_bri)，这里只等 120ms 尽量读走，读不到也不影响——
+ * 预览是"发出去就行"的语义，不落盘。
+ * ========================================================================== */
+/* 通用：短连接写一帧 CONF 命令（cmd + payload），耗时 1~5ms。
+ * 帧 = magic(4, LE) + cmd(1) + slot(1)=0 + len(2, LE) + payload */
+static bool vk_send_conf_frame(const QString &portName, quint8 cmd, const QByteArray &payload)
+{
+    if (portName.isEmpty())
+        return false;
+
+    QSerialPort sp;
+    sp.setPortName(portName);
+    sp.setBaudRate(115200);
+    /* 端口可能正被探测/配置流程短暂占用：重试 2 次，每次让 20ms */
+    bool opened = false;
+    for (int i = 0; i < 3 && !opened; i++) {
+        opened = sp.open(QIODevice::ReadWrite);
+        if (!opened) QThread::msleep(20);
+    }
+    if (!opened) {
+        qDebug() << "[LedTest] direct usb preview: open failed on" << portName
+                 << sp.errorString() << "-> fallback to worker";
+        return false;
+    }
+
+    QByteArray frame;
+    const quint32 magic = 0x434F4E46u;          /* CONF_MAGIC */
+    frame.append(char(magic & 0xFF));
+    frame.append(char((magic >> 8) & 0xFF));
+    frame.append(char((magic >> 16) & 0xFF));
+    frame.append(char((magic >> 24) & 0xFF));
+    frame.append(char(cmd));
+    frame.append(char(0x00));                    /* slot 0 */
+    const int len = payload.size();
+    frame.append(char(len & 0xFF));              /* data_len (LE) */
+    frame.append(char((len >> 8) & 0xFF));
+    frame.append(payload);
+
+    const qint64 n = sp.write(frame);
+    const bool ok = (n == frame.size()) && sp.waitForBytesWritten(80);
+    if (ok) {
+        /* 尽量把设备回的 2 字节读走，避免残留在下次探测的缓冲里 */
+        sp.waitForReadyRead(60);
+        sp.readAll();
+    }
+    sp.close();
+    if (!ok)
+        qDebug() << "[LedTest] direct usb: write failed, n=" << n;
+    return ok;
+}
+
+bool PortDetector::sendUsbRgbPreview(const QString &portName, int idx, int en,
+                                     int r, int g, int b, int bri)
+{
+    QByteArray pl;
+    pl.append(char(idx & 0xFF));
+    pl.append(char(en ? 1 : 0));
+    pl.append(char(r & 0xFF));
+    pl.append(char(g & 0xFF));
+    pl.append(char(b & 0xFF));
+    pl.append(char(bri & 0xFF));
+    return vk_send_conf_frame(portName, 0x06 /*CONF_CMD_RGB_APPLY*/, pl);
+}
+
+bool PortDetector::sendUsbLedState(const QString &portName, int state)
+{
+    QByteArray pl;
+    pl.append(char(state & 0xFF));
+    /* ⚠️ 命令字必须与固件 dfu_device.c 一致：
+     *   READ=0x01 WRITE=0x02 RESET=0x03 **LED=0x04** INFO=0x05 RGB_APPLY=0x06
+     * 写成 0x05 会被当成 INFO 查询（设备只回版本号，灯不亮）。 */
+    return vk_send_conf_frame(portName, 0x04 /*CONF_CMD_LED*/, pl);
+}
+
 void PortDetector::onProbeReadyRead()
 {
     if (!m_probeActive)
@@ -229,7 +311,15 @@ void PortDetector::onProbeReadyRead()
         slot = (tmp >= 1 && tmp <= 3) ? tmp : -1;
     }
 
-    qDebug() << "probe: device online on" << portName << name << version << "battery=" << bat << "slot=" << slot;
+    /* ★ 11-23 只在"状态变化"时打印 —— 探测每 1.5s 一次，原来每次都打一行，
+     * 日志里全是 `probe: device online ...`，把真正的问题淹没掉。 */
+    static QString lastKey;
+    const QString key = portName + "|" + version + "|" + QString::number(slot);
+    if (key != lastKey) {
+        lastKey = key;
+        qDebug() << "probe: device online on" << portName << name << version
+                 << "battery=" << bat << "slot=" << slot;
+    }
     applyProbeResult(true, name, version, portName, bat);
     applyProbeSlot(slot);
 }

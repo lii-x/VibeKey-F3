@@ -53,8 +53,14 @@ LightMonitor::LightMonitor(QObject *parent)
                        "-ErrorAction SilentlyContinue }").arg(myPid)});
 #endif
 
-    // 定时探测 VibeKey 蓝牙设备是否已配对/在线（手动测试时用于通道选择）
-    m_bleTimer->setInterval(3000);
+    /* 定时探测 VibeKey 蓝牙设备是否已配对/在线（手动测试时用于通道选择）
+     * ★ 11-23: 3s → 10s。每次探测都要**启动一个 Python 子进程**
+     * (python ble_worker.py status)，解释器启动 50~150ms + 进程创建开销，
+     * 每 3 秒一次长期挂机是纯浪费（笔记本上可见）。
+     * 放宽的代价：无 serve 进程时判定断开最多慢到 kBleDiscThreshold×10s=20s；
+     * 但 serve 握着链路时以它为准(serveAuthoritative)，这条轮询只是兜底，
+     * 慢一点不影响灯效观感。 */
+    m_bleTimer->setInterval(10000);
     connect(m_bleTimer, &QTimer::timeout, this, &LightMonitor::checkBleConnection);
     m_bleTimer->start();
     checkBleConnection(); // 立即探一次
@@ -446,6 +452,17 @@ void LightMonitor::sendState(int state)
         return;
     }
 
+    /* ★ 11-23 USB 直发快路径：直接写一帧 CONF_CMD_LED(0x05)，
+     * 耗时 1~5ms；原来每次点击都起一个 config_worker.py（约 1~2s），
+     * 那排"黄灯/绿灯/红灯/蓝灯/关灯"按钮因此明显发滞。
+     * 打开失败（端口被探测占用）时返回 false，自动落到下面的进程路径。 */
+    if (m_portDetector && m_portDetector->sendUsbLedState(port, state)) {
+        m_viaUsb = true;
+        m_lastSentState = state;
+        m_usbPending = false;
+        return;
+    }
+
     // 占用串口，避免探测线程抢端口造成冲突
     if (m_portDetector) m_portDetector->setPortInUse(true);
     m_viaUsb = true;
@@ -494,7 +511,7 @@ void LightMonitor::refreshBle()
  * 这里让 worker 主动扫描一次，把"设备其实就在旁边广播"这种情况识别出来，
  * UI 才能给出正确引导。
  *
- * 一次扫描 8~15s，因此**只允许低频触发**，不进 3s 轮询；同一时刻只跑一个。 */
+ * 一次扫描 8~15s，因此**只允许低频触发**，不进常规轮询；同一时刻只跑一个。 */
 void LightMonitor::probeBleDiagnostics()
 {
 #ifdef Q_OS_MACOS
@@ -621,7 +638,7 @@ void LightMonitor::openDiagnosticSettings()
 void LightMonitor::checkBleConnection()
 {
     // 常驻 BLE 进程已真正握住链路(READY)：它就是连接状态的唯一权威。
-    // 此时不再跑 status 探测——既避免每 3s 开/关设备造成的无线电链接抖动
+    // 此时不再跑 status 探测——既避免周期性开/关设备造成的无线电链接抖动
     // （弱适配器上尤其明显，正是“显示断开但实际连着”的根源），也避免 racy 的
     // ConnectionStatus 轮询把 m_bleConnected 误判为断开、进而 kill 掉常驻进程。
     if (m_bleServeProc && m_bleServeReady) {
@@ -635,15 +652,16 @@ void LightMonitor::checkBleConnection()
         return;
     }
 
-    /* ★ 11-25: 蓝牙权限被拒/未授权时**停止 3s 轮询**，改低频退避。
+    /* ★ 11-25: 蓝牙权限被拒/未授权时**停止常规轮询**，改低频退避。
      *
-     * 成因（实测 tccd 日志：6 小时 160 次弹窗、一次都没授权成功）：
-     *   每 3s 一个新 python 进程 → 每次碰 CoreBluetooth 都是一次新的 TCC 询问；
+     * 成因（实测 tccd 日志：6 小时 160 次弹窗、一次都没授权成功；
+     * 当时的轮询周期是 3s，现已放宽到 10s，但机制完全相同）：
+     *   每轮一次新 python 进程 → 每次碰 CoreBluetooth 都是一次新的 TCC 询问；
      *   旧 status 只等 6s 就退出，进程一退系统把弹窗撤掉，用户根本来不及点。
      *   于是"关掉就马上再弹"，永远点不完。
      *
      * worker 侧已改成：授权未决时把进程留住等用户选择（见 _await_authorization）。
-     * 但若用户明确拒绝，继续 3s 一次只会白刷 —— 退到 30s 一次，
+     * 但若用户明确拒绝，继续按常规周期只会白刷 —— 退到 30s 一次，
      * 让用户有时间去「隐私与安全性 → 蓝牙」把开关打开，无需重启客户端。 */
     if (m_bleNoPerm && m_bleNoPermTimer.isValid()
             && m_bleNoPermTimer.elapsed() < 30000) {
@@ -660,7 +678,7 @@ void LightMonitor::checkBleConnection()
      * 期间进程不能变成永久僵尸。给一个略大于 worker 预算的上限，
      * 超时就杀掉并当作"仍无权限"处理（下一轮退避再试）。
      * 正常路径（已授权）通常 <1s 就返回，这个定时器不会触发。
-     * 定时器只建一次：本函数每 3s 就被调一次，每次 new 会持续泄漏 QObject。 */
+     * 定时器只建一次：本函数每轮轮询都被调一次，每次 new 会持续泄漏 QObject。 */
     if (!m_bleProcTimeout) {
         m_bleProcTimeout = new QTimer(this);
         m_bleProcTimeout->setSingleShot(true);
@@ -686,7 +704,7 @@ void LightMonitor::checkBleConnection()
     QString worker = findBleWorkerScript();
     QString appDir = QCoreApplication::applicationDirPath();
     m_bleProc->setWorkingDirectory(appDir);
-    qDebug() << "[LightMonitor] BLE status check";
+    /* ★ 11-23 原来每次轮询都打一行 → 日志被刷爆；只在结果变化时打(见下)。 */
     m_bleProc->start(m_pythonPath, {worker, "status"});
 }
 
@@ -699,11 +717,29 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
     int battery = -1;
 
     if (m_bleProc) {
+        /* ★ 11-23: 把 worker 的 stderr 也打出来 —— 里面是"为什么判成未连接"
+         * 的现场（DEBUG: no addr resolved / from_bluetooth_address_async=None
+         * / pnp enumeration empty ...）。不收集的话，客户端只能看到一句
+         * "未连接"，客户和我们都没法判断原因。 */
+        {
+            QByteArray err = m_bleProc->readAllStandardError();
+            if (!err.trimmed().isEmpty())
+                qDebug() << "[LightMonitor] BLE status stderr:"
+                         << QString::fromUtf8(err).trimmed();
+        }
         QByteArray out = m_bleProc->readAllStandardOutput();
         QString output = QString::fromUtf8(out).trimmed();
-        qDebug() << "[LightMonitor] BLE status exit=" << exitCode << "out=" << output;
+        {   /* ★ 11-23 只在输出变化时打印（结果通常不变） */
+            static QString lastOut;
+            static int lastExit = -1;
+            if (output != lastOut || exitCode != lastExit) {
+                lastOut = output;
+                lastExit = exitCode;
+                qDebug() << "[LightMonitor] BLE status exit=" << exitCode << "out=" << output;
+            }
+        }
         /* NOPERM：蓝牙权限被拒或授权框等待超时。
-         * 置标记 → checkBleConnection 从 3s 轮询退到 30s，避免无限刷系统弹窗；
+         * 置标记 → checkBleConnection 的轮询退避到 30s，避免无限刷系统弹窗；
          * 同时把诊断态设为 noperm，让界面直接给出"去授权"的引导，
          * 而不是让用户去折腾设备（此时设备可能就好好连着）。 */
         if (output.startsWith("NOPERM", Qt::CaseInsensitive)) {
@@ -725,7 +761,7 @@ void LightMonitor::onBleCheckFinished(int exitCode, QProcess::ExitStatus exitSta
 
     /* NOPERM 不会自己恢复：用户必须去系统设置里授权。
      * 这里只负责**降频**（见 checkBleConnection 的 30s 退避）并给出诊断态，
-     * 不再继续每 3s 撞一次 TCC —— 那正是"弹窗关掉就再弹"的直接来源。
+     * 不再继续按常规周期撞 TCC —— 那正是"弹窗关掉就再弹"的直接来源。
      * 一旦授权被打开，下一轮退避探测会拿到 CONNECTED 并自动清掉诊断态。 */
     if (noPerm) {
         m_bleNoPerm = true;

@@ -475,8 +475,8 @@ int lsm_init(const lsm_config_t *cfg, lsm_drdy_cb_t drdy_cb, lsm_fifo_cb_t fifo_
     static const lsm_config_t default_cfg = {
         .xl_fs    = LSM_XL_FS_4G,
         .g_fs     = LSM_G_FS_500DPS,
-        .xl_odr   = LSM_ODR_104HZ,
-        .g_odr    = LSM_ODR_104HZ,
+        .xl_odr   = LSM_ODR_104HZ,   /* ⚠️ 必须与陀螺同 ODR: FIFO 每帧固定 6 字 */
+        .g_odr    = LSM_ODR_104HZ,   /* 11-13: 因功耗敏感从 208Hz 退回 104Hz（跟手靠 EMA 补） */
         .fifo_thr = 0,
         .use_int1     = true,
         .filter_shift = 0,  /* 关闭: 由应用层统一滤波, 避免双重滤波导致延迟 */
@@ -531,8 +531,10 @@ int lsm_init(const lsm_config_t *cfg, lsm_drdy_cb_t drdy_cb, lsm_fifo_cb_t fifo_
     if (ret != RT_EOK) return ret;
 
     /* 6. 配置陀螺仪: ODR + FS */
+    /* ⚠️ 陀螺用 CTRL2_G 自己的 ODR 位域（[3:0]），不能复用 XL 的 0x40 —— 0x40 的
+     * bit6 在 CTRL2_G 里是 FS_125，会把量程意外切成 ±125dps。详见 lsm6ds3.h 的枚举注释。*/
     ret = lsm_reg_write(LSM_REG_CTRL2_G,
-                        (uint8_t)(g_lsm.cfg.g_odr | g_lsm.cfg.g_fs));
+                        (uint8_t)(LSM_G_ODR_104HZ | g_lsm.cfg.g_fs));
     if (ret != RT_EOK) return ret;
 
     /* 7. 配置 FIFO (如启用) */
@@ -655,7 +657,7 @@ int lsm_enter_active(void)
                             (uint8_t)(g_lsm.cfg.xl_odr | g_lsm.cfg.xl_fs));
     if (ret != RT_EOK) return ret;
     ret = lsm_reg_write(LSM_REG_CTRL2_G,
-                        (uint8_t)(g_lsm.cfg.g_odr | g_lsm.cfg.g_fs));
+                        (uint8_t)(LSM_G_ODR_104HZ | g_lsm.cfg.g_fs));
     return ret;
 }
 
@@ -676,12 +678,24 @@ void lsm_deinit(void)
         rt_pin_detach_irq(LSM_INT1_PIN);
     }
 
-    if (g_lsm.int_sem) {
-        /* 唤醒线程使其退出 */
-        rt_sem_release(g_lsm.int_sem);
-        rt_thread_mdelay(10);
-        rt_sem_delete(g_lsm.int_sem);
+    /* ★★★ 11-17 修复断言 rt_sem_delete(sem != RT_NULL) 崩溃：
+     * 断开蓝牙时，BLE 断开 / 经典断开 / 看门狗 会在**不同线程**里几乎同时
+     * 调 air_mouse_stop() → lsm_deinit()。原来的写法是"先判空 → 释放 → 延时
+     * → 删除 → 置空"，两个线程可以同时通过判空（延时那 10ms 是调度点），
+     * 于是第二个线程删的是一个已经被释放的对象 ⇒ RT-Thread 断言崩溃
+     * （实测 `fatal error on thread: bt_hid_s`）。
+     * ⇒ 先把指针原子地"抢"过来并置空，再慢慢释放/删除；后来者只会看到 NULL。 */
+    {
+        rt_base_t lvl = rt_hw_interrupt_disable();
+        rt_sem_t claimed = g_lsm.int_sem;
         g_lsm.int_sem = RT_NULL;
+        rt_hw_interrupt_enable(lvl);
+
+        if (claimed) {
+            rt_sem_release(claimed);      /* 唤醒线程使其退出 */
+            rt_thread_mdelay(10);
+            rt_sem_delete(claimed);
+        }
     }
 
     /* 关闭传感器输出 */

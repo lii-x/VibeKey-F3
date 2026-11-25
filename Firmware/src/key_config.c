@@ -22,7 +22,7 @@ static uint32_t key_config_slot_addr(uint8_t slot)
     return KEY_CONFIG_FLASH_ADDR + (slot + 1) * KEY_CONFIG_SLOT_STRIDE;
 }
 
-/* 槽2/槽3 默认(08-31)：C1 = LCtrl+LShift+LWin(0x0B) */
+/* 槽2/槽3 默认：C1 = 右Alt(0x40)。11-17 起与槽1 统一（原为 LCtrl+LShift+LWin） */
 static const key_config_storage_t default_config = {
     .magic = KEY_CONFIG_MAGIC,
     .version = KEY_CONFIG_VERSION,
@@ -53,12 +53,14 @@ static const key_config_storage_t default_config = {
     .ec_press_dbl_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .ec_press_lng_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .ec_press_tap_key = { KEY_ACTION_MOUSE, 0x00, 0x04, 0, 0, 0, 0, 0, 0 },
-    /* 10-05 按压滚动(按住旋钮旋转) 出厂默认 = LCtrl+[ / LCtrl+]:
-     *   KEY_ACTION_KEYBOARD, modifier=0x01(LCtrl), keycode=0x2F('[') / 0x30(']')。
-     *   键码依据 HID Usage ID(0x2F=[ 0x30=]), 与上位机 Main.qml 的 hidKeyName 表一致
-     *   ([47,"["] [48,"]"])、hidModifierName 的 0x01->LCtrl 一致, 显示为 "LCtrl+[ / LCtrl+]"。 */
-    .ec_cw_press_key = { KEY_ACTION_KEYBOARD, 0x01, 0x2F, 0, 0, 0, 0, 0, 0 },
-    .ec_ccw_press_key = { KEY_ACTION_KEYBOARD, 0x01, 0x30, 0, 0, 0, 0, 0, 0 },
+    /* 11-17 按压滚动(按住旋钮旋转) 出厂默认 = 【键盘 ← / →】(方向键):
+     *   KEY_ACTION_KEYBOARD, modifier=0(无修饰键), keycode 依 HID Usage ID:
+     *   0x50 = Left Arrow、0x4F = Right Arrow（与上位机 Main.qml 的
+     *   hidKeyName 表 [79,"Right"] [80,"Left"] 对应，界面显示 Left / Right）。
+     *   历史: 10-05 起为 LCtrl+[ / LCtrl+](0x01/0x2F/0x30)，11-17 用户改成本组。
+     *   ⚠️ 只改出厂默认；旧槽页里已存的配置不受影响。 */
+    .ec_cw_press_key = { KEY_ACTION_KEYBOARD, 0x00, 0x50, 0, 0, 0, 0, 0, 0 }, /* 11-17: 默认改为键盘← */
+    .ec_ccw_press_key = { KEY_ACTION_KEYBOARD, 0x00, 0x4F, 0, 0, 0, 0, 0, 0 }, /* 11-17: 默认改为键盘→ */
     /* 09-05: C 键双击/长按默认【未设置】(NONE) —— 保持历史"按住发送"行为不变,
      * 用户在上位机给某键配上双击/长按后该键才进入手势模式。 */
     .c1_dbl_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
@@ -77,8 +79,11 @@ static const key_config_storage_t default_config = {
     .l3_dbl_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .l3_lng_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .keys = {
-        /* C1: 仅修饰键 LCtrl+LShift+LWin (0x0B)，无主键(0x00)；底光清亮蓝 0x20A0FF 亮度15% */
-        { KEY_ACTION_KEYBOARD, 0x0B, 0x00, 0, 1, 0x20, 0xA0, 0xFF, 15 },
+        /* C1: 仅修饰键【右Alt】(0x40)，无主键(0x00)；底光清亮蓝 0x20A0FF 亮度15%
+         * 11-17: 原为 LCtrl+LShift+LWin(0x0B)，按要求改为三个槽位统一 = 右Alt。
+         * 右Alt 在 HID 里是修饰键(modifier bit6)，不是主键码 —— 上位机
+         * hidModifierName() 按 0x40 解码成 "RAlt"。 */
+        { KEY_ACTION_KEYBOARD, 0x40, 0x00, 0, 1, 0x20, 0xA0, 0xFF, 15 },
         /* C2: Enter (0x28)；底光清亮蓝 0x20A0FF 亮度15% */
         { KEY_ACTION_KEYBOARD, 0x00, 0x28, 0, 1, 0x20, 0xA0, 0xFF, 15 },
         /* C3: Backspace (0x2A)；底光清亮蓝 0x20A0FF 亮度15% */
@@ -86,7 +91,7 @@ static const key_config_storage_t default_config = {
     },
 };
 
-/* 槽1 默认(08-31)：仅 C1 与槽2/3 不同 —— C1 = 右Alt。
+/* 槽1 默认：C1 = 右Alt。11-17 起槽2/3 也已统一为右Alt，三槽 C1 一致。
  * 其余(C2=Enter、C3=Backspace、空中鼠标、休眠)与 default_config 完全一致。
  *
  * 键码依据：右Alt 在 HID 里是【修饰键】(modifier bit6 = 0x40)，不是主键码。
@@ -117,12 +122,14 @@ static const key_config_storage_t default_config_slot1 = {
     .ec_press_dbl_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .ec_press_lng_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .ec_press_tap_key = { KEY_ACTION_MOUSE, 0x00, 0x04, 0, 0, 0, 0, 0, 0 },
-    /* 10-05 按压滚动(按住旋钮旋转) 出厂默认 = LCtrl+[ / LCtrl+]:
-     *   KEY_ACTION_KEYBOARD, modifier=0x01(LCtrl), keycode=0x2F('[') / 0x30(']')。
-     *   键码依据 HID Usage ID(0x2F=[ 0x30=]), 与上位机 Main.qml 的 hidKeyName 表一致
-     *   ([47,"["] [48,"]"])、hidModifierName 的 0x01->LCtrl 一致, 显示为 "LCtrl+[ / LCtrl+]"。 */
-    .ec_cw_press_key = { KEY_ACTION_KEYBOARD, 0x01, 0x2F, 0, 0, 0, 0, 0, 0 },
-    .ec_ccw_press_key = { KEY_ACTION_KEYBOARD, 0x01, 0x30, 0, 0, 0, 0, 0, 0 },
+    /* 11-17 按压滚动(按住旋钮旋转) 出厂默认 = 【键盘 ← / →】(方向键):
+     *   KEY_ACTION_KEYBOARD, modifier=0(无修饰键), keycode 依 HID Usage ID:
+     *   0x50 = Left Arrow、0x4F = Right Arrow（与上位机 Main.qml 的
+     *   hidKeyName 表 [79,"Right"] [80,"Left"] 对应，界面显示 Left / Right）。
+     *   历史: 10-05 起为 LCtrl+[ / LCtrl+](0x01/0x2F/0x30)，11-17 用户改成本组。
+     *   ⚠️ 只改出厂默认；旧槽页里已存的配置不受影响。 */
+    .ec_cw_press_key = { KEY_ACTION_KEYBOARD, 0x00, 0x50, 0, 0, 0, 0, 0, 0 }, /* 11-17: 默认改为键盘← */
+    .ec_ccw_press_key = { KEY_ACTION_KEYBOARD, 0x00, 0x4F, 0, 0, 0, 0, 0, 0 }, /* 11-17: 默认改为键盘→ */
     .c1_dbl_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .c1_lng_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },
     .c2_dbl_key = { KEY_ACTION_NONE, 0x00, 0x00, 0, 0, 0, 0, 0, 0 },

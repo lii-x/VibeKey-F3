@@ -1,0 +1,337 @@
+/* ===== 弹窗层: 弹窗外壳 / 动作行 / 快捷键框 / 手势卡 / 分段按钮 / RGB 取色器 / 摇一摇 / 空中鼠标 / EC 分组块 =====
+   本文件由 build_index_template.html 的内联 <style> 拆出(2026-10-03)。
+   拆分原因: 单文件千行 CSS 曾因一次正则误删整段样式导致页面裸奔, 且脚本化改样式
+   极易锚点失配 -> 改为按关注点分文件, 改一处只动一个文件。
+   加载顺序即层叠顺序, 勿随意调整文件名序号。 */
+
+  /* ===== Studio 同款：点击卡片弹出分组编辑器 (替代整页编辑器) =====
+     规格对齐 QML keySettingsPopup: 遮罩 2671 / 背景 2670 / 标题 2836-2850 / 完成按钮 4370 */
+  .modal {
+    position: fixed; inset: 0; z-index: 1200;
+    display: none; align-items: center; justify-content: center;
+    padding: 20px;
+  }
+  .modal-backdrop {
+    position: absolute; inset: 0;
+    background: var(--q-scrim);                 /* QML #80000000 */
+    opacity: 0; transition: opacity 0.18s;
+  }
+  .modal.show .modal-backdrop { opacity: 1; }
+  .modal-card {
+    position: relative; z-index: 1;
+    /* QML 三弹窗宽度: 按键 320 (2665) / 摇一摇 340 (4386) / EC 380 (4525) */
+    width: min(320px, 94vw); max-height: 88vh;
+    background: var(--bg-card);
+    border: 1px solid var(--q-panel-border);     /* QML 2670 */
+    border-radius: 12px;                         /* QML 2670 */
+    display: flex; flex-direction: column; overflow: hidden;
+    /* QML 弹窗无阴影 (background 里只有 radius/color/border), 这里刻意不加 */
+    transform: translateY(10px) scale(0.98); opacity: 0;
+    transition: transform 0.18s ease, opacity 0.18s ease;
+  }
+  .modal.show .modal-card { transform: none; opacity: 1; }
+  /* 摇一摇 / EC 弹窗更宽 (QML 4386 / 4525) */
+  .modal-card[data-kind="SHAKE"] { width: min(340px, 94vw); }
+  .modal-card[data-kind="EC"] { width: min(380px, 94vw); }
+  .modal-head {
+    flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
+    /* 上下 14 (QML 2666 padding) 但底部收到 10 = QML ColumnLayout spacing 10 (2832) */
+    padding: 14px 14px 10px;
+  }
+  .modal-title { font-size: 21.3px; font-weight: 700; color: var(--q-modal-title); }  /* QML 2844 = 16pt */
+  /* 10-05: EC 的「模式」下拉从「按下」行移到标题行右侧。标题行原本是 space-between 两栏
+     (标题 ‖ 关闭), 插进来会变三栏 ⇒ 让标题吃掉剩余宽度, 「模式」+关闭按钮稳定贴右。 */
+  .modal-head .modal-title { flex: 1 1 auto; min-width: 0; }
+  .modal-head-mode { display: inline-flex; align-items: center; gap: 6px; margin-right: 10px; }
+  .modal-head-mode .ed-sel { min-width: 96px; height: 26px; }   /* 与上位机标题行下拉同尺寸 */
+  .modal-close {
+    width: 28px; height: 28px; border: none; background: var(--q-close-bg);   /* QML 2847 = 28x28 */
+    border-radius: 14px; font-size: 19px; line-height: 1; color: var(--q-modal-title);  /* QML 2850 = 16pt */
+    cursor: pointer; transition: background 0.15s;
+  }
+  .modal-close:hover { background: var(--q-seg-off); }
+  .modal-body { padding: 0 14px 4px; overflow-y: auto; }   /* 左右 QML 2666 padding:14; 底部间距交给 modal-foot */
+  /* 底部「完成」按钮: 84x32 radius 16 绿底白字 (QML 4370-4372) */
+  .modal-foot {
+    flex-shrink: 0; display: flex; justify-content: flex-end;
+    /* QML 4504 RowLayout{spacing: 8}; 缺 gap 会让「清除」和「完成」贴在一起(实测间距 0) */
+    gap: 8px; align-items: center;
+    padding: 10px 14px 14px;   /* 上 10 = QML spacing 10, 下 14 = QML padding 14 */
+  }
+  /* 摇一摇弹窗: QML 4504-4510 是 [清除][Item fillWidth][完成] -> 两端对齐(清除靠左、完成靠右);
+     C/L 弹窗只有一个「完成」, 仍保持右对齐(与 QML 4367-4372 的 Item{fillWidth}+完成 一致) */
+  .modal-card[data-kind="SHAKE"] .modal-foot { justify-content: space-between; }
+  /* 「清除」仅摇一摇弹窗用 (QML 4503-4507): 62x30 radius15 灰底 + #d0d0d0 边, 11pt #666 */
+  .modal-clear {
+    display: none;
+    width: 62px; height: 30px; border: 1px solid #d0d0d0; border-radius: 15px;
+    background: #f0f0f0; color: var(--q-title-2); font-size: 14.7px; cursor: pointer;
+    font-family: inherit;
+  }
+  .modal-card[data-kind="SHAKE"] .modal-clear { display: inline-block; }
+  .modal-clear:hover { background: #e6e6e6; }
+  .modal-done {
+    width: 84px; height: 32px; border: none;
+    border-radius: 16px; background: var(--accent); color: #fff;
+    font-size: 16px; cursor: pointer; transition: filter 0.15s;   /* QML 4372 = 12pt */
+  }
+  .modal-done:hover { filter: brightness(1.06); }
+  .modal-card[data-kind="EC"] .modal-foot { display: none; }
+  /* 摇一摇底部红色提示: QML 里排在「清除/完成」按钮行**下面**(4504-4515) */
+  .modal-note {
+    display: none; flex-shrink: 0;
+    margin: 0; padding: 0 14px 12px;
+    font-size: 12px; line-height: 1.6; color: #f56c6c;   /* QML 4512 = 10pt #f56c6c */
+    /* 12px 而非 13.3px: 25 个全角字在 13.3px 下需 317px > 可用 303px 会折行 */
+  }
+  .modal-card[data-kind="SHAKE"] .modal-note { display: block; }
+  /* 10-05: EC 弹窗底部也要这行「设置完成后请点击上方"写入"按钮保存到当前蓝牙槽位」
+     (对齐上位机新版 EC 弹窗)。文字由 paintShakeUi() 统一写入, 这里只负责显隐与配色 ——
+     用中性灰, 不是摇一摇那条红色警告色。 */
+  .modal-card[data-kind="EC"] .modal-note { display: block; color: var(--q-text-3); }
+  .modal-groups .panel { box-shadow: none; margin-bottom: 0; }
+
+  /* ===== 弹窗内单键编辑器：行 / 分段按钮 / 分区 (对齐 Studio keySettingsPopup) =====
+     分区标题 12px bold #333 无背景条 (4215) / 「模式」label 11px bold #555 (2863) /
+     下拉与捕获框 radius 8 + 边 #d0e0d8 (3035 / 3168) / 分段按钮高 32 radius 6 (4330) */
+  /* 分区间距: QML 整个弹窗是一个 ColumnLayout{spacing:10} (Main.qml 2832),
+     所以统一用 margin 收口, 不叠内边距 —— 之前 padding 10+10 再叠内部 margin 导致空档近 30px */
+  .ed-sec { margin: 0 0 10px; }
+  .ed-sec:last-child { margin-bottom: 0; }
+  .ed-sec-title { font-size: 16px; font-weight: 700; color: var(--q-title); margin-bottom: 10px; }  /* QML 4215 = 12pt */
+  .ed-row { display: flex; align-items: center; gap: 8px; }
+  /* 模式行的下拉不参与拉伸, 右侧提示才能同行显示 (QML ComboBox 116px + AlignRight 提示) */
+  .ed-row > .ed-sel { flex: 0 0 auto; width: 104px; min-width: 0; }
+  .ed-label { font-size: 13.3px; font-weight: 700; color: var(--q-label); min-width: 38px; }  /* QML 2863 = 10pt */
+  /* 下拉 / 捕获框: 白底 radius 8 边 #d0e0d8, 聚焦转绿 (QML 3036 / 3170) */
+  .ed-sel {
+    width: auto; min-width: 128px; height: 30px;
+    padding: 0 24px 0 9px;           /* 右侧留给绿色箭头 */
+    background-color: var(--bg-card);
+    border: 1px solid var(--q-field-border);
+    border-radius: 8px;
+    color: var(--q-title); font-size: 13.3px;           /* QML 2931 = 10pt */
+  }
+  .ed-sel:focus { outline: none; border-color: var(--accent); background: var(--q-sel-bg); }
+  /* 弹窗内的动作行改成 QML 的「label 在左 + 控件在右」同行布局 (QML 2856-2866 RowLayout),
+     不再是网页端原来的 label 压在控件上方 —— 纵向省一行, 也更像 QML */
+  /* margin-bottom 必须显式归零: 基础规则 .form-group{margin-bottom:12px} (290) 会叠加,
+     弹窗内纵向间距统一由 .ed-sec 的 margin-bottom 10px 控制 (QML spacing 10) */
+  .ed-block .form-group { display: flex; align-items: center; gap: 8px; margin-bottom: 0; }
+  .ed-block { margin: 0; }
+  .ed-block .form-group > label {
+    width: 64px; flex-shrink: 0; margin: 0; white-space: nowrap;  /* 「鼠标按键」4 字不换行 */
+    font-size: 13.3px; font-weight: 700; color: var(--q-label);  /* QML 2986 = 10pt */
+  }
+  .ed-block .form-group > select { flex: 1; min-width: 0; }
+  /* 动作行 (QML 3865-3874 RowLayout spacing 6): 大类下拉 100px 固定 + 细分控件占满, 无 label */
+  .ed-block .ed-act-row { gap: 6px; }
+  .ed-block .ed-act-row > .ed-act-sel { flex: 0 0 100px; width: 100px; }
+  .ed-block .ed-act-row > .ed-sub { flex: 1; min-width: 0; }
+  /* 快捷键框: QML lKbBox (Main.qml 3161-3192) 112x30 radius 8 白底 + #d0e0d8 边,
+     捕获中转 #e6f5ec + #07c160 边, 框内居中显示 formatShortcut 或「未设置」 */
+  .ed-kb {
+    flex: 1; min-width: 0; height: 30px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--q-field-border); background: var(--bg-card);
+    display: flex; align-items: center; justify-content: center;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .ed-kb:hover { border-color: var(--accent); }
+  .ed-kb.capturing { background: var(--q-sel-bg); border-color: var(--accent); }
+  .ed-kb-text {
+    font-size: 13.3px; color: var(--q-title);          /* QML 3180 = 10pt / #333 */
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding: 0 8px;
+  }
+  .ed-kb.capturing .ed-kb-text { color: var(--accent); }  /* QML 3181 捕获中 #07c160 */
+  /* 捕获按钮: QML 是 radius 8 白底 + #d0e0d8 边, 捕获中转 #e6f5ec + 绿边 (3163-3185)。
+     文案比 QML 的「未设置/捕获中…」长, 故整行宽度而非 112, 避免文字被截断 */
+  .ed-block .capture-btn {
+    width: 100%; padding: 0 10px; height: 30px;
+    border: 1px solid var(--q-field-border); border-radius: 8px;
+    background: var(--bg-card); color: var(--q-title); font-size: 13.3px;  /* QML 3178 = 10pt */
+  }
+  .ed-block .capture-btn.capturing {
+    border-color: var(--accent); background: var(--q-sel-bg); color: var(--accent);
+  }
+  /* ===== 弹窗内 RGB 取色器: 逐条对齐 QML 4209-4307 =====
+     标题行(12pt粗体+22色块+开关) / 8 个 26px 预设圆 / 70px 高 SV 面板 / 16px 色相条 /
+     色块+hex / 亮度条(10px 轨 + 18px 圆钮) */
+  .modal-body .rgb-section { margin-top: 0; padding-top: 0; border-top: none; }
+  .rgb-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }   /* QML 4213 spacing 10 */
+  .rgb-section > * + * { margin-top: 10px; }   /* QML ColumnLayout{spacing:10} (4211) */
+  .rgb-title { font-size: 16px; font-weight: 700; color: var(--q-title); white-space: nowrap; }  /* 12pt -> #333 */
+  .rgb-chip { width: 22px; height: 22px; border-radius: 4px; background: #222; flex-shrink: 0; }  /* QML 4217 */
+  .rgb-flex { flex: 1; }
+  /* 开关: 50x26 radius 13, 开 #07c160 / 关 #ccc, 文字 10pt (QML 4220-4223) */
+  .rgb-switch {
+    width: 50px; height: 26px; border: none; border-radius: 13px;
+    background: var(--q-knob-off); cursor: pointer; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+    transition: background 0.15s;
+  }
+  .rgb-switch span { color: #fff; font-size: 13.3px; }   /* 10pt */
+  .rgb-switch.on { background: var(--accent); }
+  /* 预设色: 8 个 26x26 圆, 选中加 2px #333 边 (QML 4227-4240) */
+  .rgb-presets { display: flex; gap: 8px; }
+  .rgb-preset {
+    width: 26px; height: 26px; border-radius: 13px; cursor: pointer;
+    border: 2px solid transparent; box-sizing: border-box;
+    transition: border-color 0.12s;
+  }
+  .rgb-preset.sel { border-color: var(--q-title); }
+  /* SV 面板: 两层渐变叠出「左白右纯色 / 上透明下黑」, 圆角 10 (QML 4243-4257) */
+  .rgb-sv {
+    position: relative; height: 70px; border-radius: 10px; overflow: hidden;
+    cursor: crosshair; touch-action: none; --base: #ff0000;
+  }
+  .rgb-sv > i { position: absolute; inset: 0; display: block; }
+  .rgb-sv-h { background: linear-gradient(90deg, #ffffff 0%, var(--base) 100%); }
+  .rgb-sv-v { background: linear-gradient(180deg, rgba(0,0,0,0) 0%, rgba(0,0,0,1) 100%); }
+  .rgb-sv-dot {
+    inset: auto; width: 14px; height: 14px; border-radius: 7px;
+    background: transparent; border: 2px solid #fff;
+    transform: translate(-50%, -50%); pointer-events: none;
+  }
+  /* 色相条: 7 段彩虹, 4x16 白边游标 (QML 4259-4268) */
+  .rgb-hue {
+    position: relative; height: 16px; border-radius: 8px;
+    cursor: pointer; touch-action: none;
+    background: linear-gradient(90deg, #ff0000 0%, #ffff00 16.67%, #00ff00 33.33%,
+                #00ffff 50%, #0000ff 66.67%, #ff00ff 83.33%, #ff0000 100%);
+  }
+  .rgb-hue-dot {
+    position: absolute; top: 0; left: 0; width: 4px; height: 16px;
+    border-radius: 2px; background: transparent; border: 2px solid #fff;
+    transform: translateX(-50%); pointer-events: none; box-sizing: border-box;
+  }
+  /* 当前色 + hex (QML 4270-4273) */
+  .rgb-val { display: flex; align-items: center; gap: 8px; }
+  .rgb-hex { font-size: 13.3px; color: var(--q-title-2); }   /* 11pt #666 */
+  /* 亮度: 10px 圆角轨 + 左侧填充当前色 + 18px 白底彩边圆钮 (QML 4275-4306) */
+  .rgb-brs { display: flex; align-items: center; gap: 6px; }
+  .rgb-brs-label { font-size: 13.3px; color: var(--q-text-3); width: 36px; }   /* 11pt #888 */
+  .rgb-track {
+    position: relative; flex: 1; height: 10px; border-radius: 5px;
+    background: #e0e0e0; cursor: pointer; touch-action: none;
+  }
+  [data-theme="dark"] .rgb-track { background: #333a41; }
+  .rgb-fill { position: absolute; left: 0; top: 0; height: 10px; border-radius: 5px; background: var(--accent); }
+  /* 填充色与手柄描边由 paintRgbUi() 写成当前色 (QML 4301 / 4305 用 Qt.hsva 当前色) */
+  .rgb-knob {
+    position: absolute; top: 50%; left: 0; width: 18px; height: 18px; border-radius: 9px;
+    background: #fff; border: 3px solid var(--accent);
+    transform: translate(-50%, -50%); pointer-events: none; box-sizing: border-box;
+  }
+  .rgb-brs-val { font-size: 13.3px; color: var(--q-title-2); width: 36px; text-align: right; }
+  /* 弹窗内分组块 (空中鼠标设置等): 对齐 QML EC 分组块 4648-4654
+     —— radius 8 / 底 #f4f7f5 / 边 #e3eae5, 不再是网页端原来的白底大卡片 */
+  .modal-body .panel {
+    border: 1px solid var(--q-group-border); border-radius: 8px;
+    background: var(--q-info-bg-ec); padding: 10px; margin: 0 0 10px; box-shadow: none;
+  }
+  .modal-body .panel:last-child { margin-bottom: 0; }
+  .modal-body .panel-title { font-size: 16px; font-weight: 700; color: var(--q-title); margin-bottom: 8px; }
+  .modal-body .panel-grid { display: block; }
+  .modal-body .panel-grid .form-group {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 10px;
+  }
+  .modal-body .panel-grid .form-group > label { margin-bottom: 0; }
+  .modal-body .panel-grid .form-group:last-child { margin-bottom: 0; }
+  .modal-body .panel-grid .form-group > label {
+    width: 62px; flex-shrink: 0; margin: 0; white-space: nowrap;
+    font-size: 13.3px; font-weight: 700; color: var(--q-label);   /* 10pt */
+  }
+  .modal-body .panel-grid .form-group > select { flex: 1; min-width: 0; height: 30px; }
+  .modal-body .panel-grid .form-group:last-child { margin-bottom: 0; }
+  .modal-body .panel .hint { margin-top: 6px; }
+  .ed-block select,
+  .ed-block input[type="text"] {
+    background-color: var(--bg-card);
+    border: 1px solid var(--q-field-border);
+    border-radius: 8px;
+    color: var(--q-title); font-size: 13.3px;           /* QML 2931 = 10pt */
+  }
+  .ed-block select { height: 30px; padding: 0 24px 0 9px; }
+  .ed-block select:focus { outline: none; border-color: var(--accent); background: var(--q-sel-bg); }
+  .hint { font-size: 13.3px; color: var(--q-text-3); }   /* QML 4416 = 10pt / #999 */
+  /* 模式行的同行提示: 9pt #999 右对齐, 撑满剩余宽度 (QML 2966-2971) */
+  .ed-row-hint {
+    flex: 1; min-width: 0; text-align: right; white-space: nowrap;
+    font-size: 12px; padding-left: 6px;
+    overflow: hidden; text-overflow: ellipsis;   /* 窄弹窗下宁可省略也不要横向滚动条 */
+  }
+  /* ===== 手势区: 三张手势卡片装在灰盒里 (QML 3274-3340) =====
+     盒 radius8 #f7f7f7 / margins 10 / spacing 4; 卡 fillWidth x52 radius6,
+     选中 #e6f5ec + #07c160 边, 未选 白底 + #d5e0da 边 */
+  /* ===== 摇一摇弹窗 (QML 4381-4518) =====
+     盒 radius8 #f4f7f5 / 边 #e3eae5 / 内边距 10;
+     块内首行 = 标签(左) + 控件(右), 「按下」块在手势模式下多一行「模式」 */
+  .sh-desc { font-size: 13.3px; color: var(--q-text-3); line-height: 1.6; }  /* QML 4418 = 10pt #999 */
+  .sh-label { font-size: 16px; font-weight: 700; color: var(--q-title); }        /* QML 4424 = 12pt #333 */
+  .sh-label-block { margin-bottom: 10px; }
+  .ed-flex { flex: 1; }
+  .seg.seg-fill { display: flex; gap: 8px; }   /* 双类提权重: 基类 .seg{display:inline-flex} 在后面 */
+  .seg.seg-fill .seg-btn { flex: 1; padding: 0; }   /* QML 4435-4449: 等分, gap 8, 高 32 */
+  .sh-hint { line-height: 1.6; margin-top: 10px; }   /* QML 4451 三行说明 */
+  /* 触发快捷键框: 52 高 radius 8, 左边标题 11pt #666 + 右边状态 11pt 粗 (QML 4455-4473) */
+  .sh-kb { height: 52px; justify-content: flex-start; padding: 0 10px; gap: 8px; }
+  .sh-kb-label { font-size: 14.7px; color: var(--q-title-2); flex-shrink: 0; }
+  .sh-kb .ed-kb-text { font-weight: 700; padding: 0; text-align: left; }
+  .sh-kb .ed-kb-text.capturing { color: var(--accent); }
+  /* 「按下」块动作行标签 (QML 4815: 手势模式显示手势名, 常规显示「动作」12pt #333)。
+     min-width 必须与 .ec-row-label 同为 60px, 否则三组控件左缘会差 20px */
+  .ec-act-label { font-size: 16px; font-weight: 700; color: var(--q-title); min-width: 60px; flex-shrink: 0; }
+  .ed-label-inline { font-size: 14.7px; color: var(--q-title-2); }  /* QML 4668 「模式」11pt #666 */
+  .ec-group {
+    background: var(--q-ec-group-bg); border: 1px solid var(--q-group-border);
+    border-radius: 8px; padding: 10px; margin-bottom: 10px;
+  }
+  .ec-group .ed-block { flex: 1; min-width: 0; margin: 0; }
+  .ec-row { display: flex; align-items: center; gap: 6px; }
+  .ec-row + .ed-block, .ec-group .ed-block + .ed-block { margin-top: 8px; }
+  .ec-row-label { font-size: 17.3px; font-weight: 700; color: var(--q-title); min-width: 60px; flex-shrink: 0; }
+
+  .ed-ges { background: #f7f7f7; border-radius: 8px; padding: 10px; }
+  [data-theme="dark"] .ed-ges { background: #22282f; }
+  .ed-ges-row { display: flex; gap: 8px; }
+  .ed-ges-card {
+    flex: 1; min-width: 0; height: 52px; border-radius: 6px; cursor: pointer;
+    background: var(--bg-card); border: 1px solid #d5e0da;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 2px; padding: 4px;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  [data-theme="dark"] .ed-ges-card { border-color: #3d4a44; }
+  .ed-ges-card:hover { border-color: var(--accent); }
+  .ed-ges-card.on { background: var(--q-sel-bg); border-color: var(--accent); }
+  .ed-ges-t { font-size: 13.3px; font-weight: 700; color: var(--q-title-2); }  /* QML 3311 = 10pt */
+  .ed-ges-card.on .ed-ges-t { color: var(--accent); }                            /* QML 3310 选中 #07c160 */
+  .ed-ges-s {
+    max-width: 100%; font-size: 10.7px; color: var(--q-title);   /* QML 3318 = 8pt / #333 */
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: center;
+  }
+  .ed-ges-hint {
+    margin-top: 4px; font-size: 10.7px; color: #aaa;          /* QML 3334 = 8pt / #aaa */
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  /* 分段按钮: 高 32 radius 6, 选中 #e6f5ec + 绿边绿字, 未选 #f2f3f5 + #666 (QML 4330-4339) */
+  .seg { display: inline-flex; gap: 6px; background: none; border: none; padding: 0; }
+  .seg-btn {
+    border: 1px solid transparent; background: var(--q-seg-off);
+    height: 32px; padding: 0 18px; border-radius: 6px;
+    font-size: 13.3px; cursor: pointer; color: var(--q-title-2); transition: all 0.15s;  /* QML 4341 = 10pt */
+  }
+  .seg-btn:hover { color: var(--q-title); }
+  .seg-btn.active {
+    background: var(--q-sel-bg); border-color: var(--accent);
+    color: var(--accent); font-weight: 400;
+  }
+  /* 弹窗内沿用 QML 的 RGB 开关 50x26 radius 13 (4218) */
+  .modal-body .toggle { width: 50px; height: 26px; border-radius: 13px; }
+  /* 复用的 buildBlockCard 卡片：弹窗内隐去自身标题与 RGB 段 (标题已在弹窗头, RGB 单独渲染) */
+  .ed-block .key-card { border: none; padding: 0; background: transparent; }
+  .ed-block .key-card-header { display: none; }
+  .ed-block .rgb-section { display: none; }
+
+  

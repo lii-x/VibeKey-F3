@@ -521,6 +521,12 @@ async function readLoop() {
       reader.releaseLock();
       if (done) break;
       if (value && value.length > 0) {
+        /* ★ 11-24 串口日志模式：设备此时推的是纯文本，直接渲染，
+         * 不进 rxBuffer（否则会污染请求-应答的长度匹配）。 */
+        if (srLogOn) {
+          srLogAppend(srLogDecoder.decode(value, { stream: true }));
+          continue;
+        }
         // 追加到缓冲区
         const newBuf = new Uint8Array(rxBuffer.length + value.length);
         newBuf.set(rxBuffer, 0);
@@ -539,6 +545,12 @@ async function readLoop() {
         log('读取循环错误: ' + e.message, 'error');
         // 设备意外断开，自动更新 UI 状态
         keepReading = false;
+        /* 断开时同步退出日志模式，否则重连后仍会按文本解析 */
+        if (srLogOn) {
+          srLogOn = false;
+          const b = document.getElementById('srLogToggleBtn');
+          if (b) b.textContent = '开始';
+        }
         port = null;
         document.getElementById('statusDot').classList.remove('connected');
         document.getElementById('statusText').textContent = '已断开';
@@ -641,6 +653,47 @@ function waitForLine(timeout) {
   });
 }
 
+// ============================================================
+// 串口写入与失效自愈（11-25）
+// ------------------------------------------------------------
+// 背景：某些主机（不供电的测试台）在设备侧完全正常的情况下**不再下发 OUT 数据**，
+//       设备日志显示 out 计数停住、IN 端点空闲。
+// 关键现象：Chrome 的 writer.write() 在这种"半死管道"上**依然 resolve** ——
+//       数据进了内核缓冲就返回，页面无从知道它没真的发出去。
+// 因此页面必须自己判断"发了但没人回"，并主动重开端口（close + 重新 open），
+//       让内核丢弃旧句柄上的残留缓冲、重建管道。
+// ============================================================
+let serialFailStreak = 0;
+let serialRecovering = false;
+
+async function serialWrite(bytes) {
+  if (!port || !port.writable) throw new Error('串口不可写');
+  const w = port.writable.getWriter();
+  try {
+    await w.write(bytes);
+  } finally {
+    /* 必须 finally：write 抛异常时不释放锁，后续 getWriter() 会一直失败
+       （表现为"发不出也收不到"，且错误信息很隐蔽） */
+    try { w.releaseLock(); } catch (e) {}
+  }
+}
+
+async function serialRecover(reason) {
+  if (serialRecovering || !port) return;
+  serialRecovering = true;
+  serialFailStreak = 0;
+  log('串口疑似失效（' + reason + '），正在重开端口…', 'warn');
+  try {
+    keepReading = false;
+    try { await port.close(); } catch (e) {}
+  } catch (e) {}
+  port = null;
+  await new Promise(r => setTimeout(r, 300));
+  serialRecovering = false;
+  keepReading = true;
+  autoConnectUsb();          /* 会重新 getPorts → open → verify */
+}
+
 // 从 rxBuffer 提取一行并移除
 function extractLine() {
   const idx = rxBuffer.indexOf(0x0A);
@@ -670,10 +723,8 @@ async function sendAndReceive(data, expectLen = 16, timeout = 3000) {
   // 清空接收缓冲区
   rxBuffer = new Uint8Array(0);
 
-  // 发送
-  writer = port.writable.getWriter();
-  await writer.write(data);
-  writer.releaseLock();
+  // 发送（11-25: 走 serialWrite，异常也必定释放锁）
+  await serialWrite(data);
   log('→ 发送: ' + bytesToHex(data), 'info');
 
   // 等待响应
@@ -697,15 +748,16 @@ async function sendQuery() {
   try {
     rxBuffer = new Uint8Array(0);
     const q = buildHeader(CMD_QUERY, 0, 0);
-    writer = port.writable.getWriter();
-    await writer.write(q);
-    writer.releaseLock();
+    await serialWrite(q);                 /* 11-25: 统一写入，异常必定释放锁 */
     log('→ 查询设备信息: ' + bytesToHex(q), 'info');
     const got = await waitForLine(1500);
     if (!got) {
       log('设备未响应信息查询', 'warn');
+      serialFailStreak++;                 /* 连续无响应 → 交给看门狗重开端口 */
+      if (serialFailStreak >= 3) serialRecover('信息查询连续无响应');
       return null;
     }
+    serialFailStreak = 0;
     const line = extractLine();
     log('← 设备信息: ' + line, 'success');
     return parseDeviceInfo(line);
@@ -765,8 +817,74 @@ function applyDeviceInfo(info, syncSlot) {
 
 // 08-31: 周期轮询设备信息(电量/槽位)，上位机由 PortDetector 每 1.5s 轮询；
 // 网页版 5s 一次，读/写进行中自动跳过，避免抢占串口
+// ============================================================
+// 串口日志（设备控制台经 USB 转发，CONF_CMD_LOG = 0x07）
+// ------------------------------------------------------------
+// 设备侧把 rt_kprintf 镜像进环形缓冲，收到本命令后开始往 CDC IN 推纯文本。
+// 由于共用同一条串口，采用【互斥模式】：开日志期间暂停一切查询，
+// 收到的字节一律按 UTF-8 文本渲染。
+// ============================================================
+const CMD_LOG = 0x07;
+let srLogOn = false;
+const srLogDecoder = new TextDecoder('utf-8');
+const SRL0G_MAX = 200000;   /* 文本上限，超出截断，避免长时间挂着吃内存 */
+
+function clearSerialLog() {
+  const el = document.getElementById('srLog');
+  if (el) el.textContent = '';
+}
+
+function srLogAppend(text) {
+  const el = document.getElementById('srLog');
+  if (!el || !text) return;
+  el.textContent += text;
+  if (el.textContent.length > SRL0G_MAX)
+    el.textContent = el.textContent.slice(-SRL0G_MAX / 2);
+  el.scrollTop = el.scrollHeight;
+}
+
+async function srLogSendCmd(enable) {
+  const hdr = buildHeader(CMD_LOG, 1, 0);
+  const pkt = new Uint8Array(hdr.length + 1);
+  pkt.set(hdr, 0);
+  pkt[hdr.length] = enable ? 1 : 0;
+  writer = port.writable.getWriter();
+  await writer.write(pkt);
+  writer.releaseLock();
+}
+
+async function toggleSerialLog() {
+  const btn = document.getElementById('srLogToggleBtn');
+  if (!port || !port.writable) { toast('请先连接设备', 'error'); return; }
+
+  if (!srLogOn) {
+    try {
+      rxBuffer = new Uint8Array(0);
+      await srLogSendCmd(true);
+      await waitForBytes(2, 1500);          // 设备回 2 字节 code
+      rxBuffer = new Uint8Array(0);
+      srLogDecoder.decode(new Uint8Array(0));   /* 复位解码器状态 */
+      srLogOn = true;
+      if (btn) btn.textContent = '停止';
+      srLogAppend('[已开启] 日志经 USB 转发中…\n');
+    } catch (e) {
+      toast('开启失败: ' + e.message, 'error');
+    }
+  } else {
+    srLogOn = false;                        // 先退出文本模式，再发命令
+    if (btn) btn.textContent = '开始';
+    srLogAppend('\n[已停止]\n');
+    try {
+      await srLogSendCmd(false);
+      await new Promise(r => setTimeout(r, 120));
+      rxBuffer = new Uint8Array(0);         // 丢掉尾部残留
+    } catch (e) { /* 断开时忽略 */ }
+  }
+}
+
 async function pollDeviceInfo() {
-  if (isBusy || capturingPath || otaTransferring || !port) return;
+  /* 日志模式下绝不能再发查询 —— 会和日志文本混在一起 */
+  if (isBusy || capturingPath || otaTransferring || srLogOn || !port) return;
   const info = await sendQuery();
   if (!info || !info.name) return;
   applyDeviceInfo(info, true);
@@ -799,9 +917,7 @@ function parseKeyBlock(dv, off) {
 async function sendRaw(data) {
   if (!port || !port.writable) throw new Error('设备未连接');
   rxBuffer = new Uint8Array(0);
-  writer = port.writable.getWriter();
-  await writer.write(data);
-  writer.releaseLock();
+  await serialWrite(data);        /* 11-25: 唯一写入口，异常必释放锁 */
   log('→ 发送: ' + bytesToHex(data), 'info');
 }
 
@@ -833,7 +949,12 @@ async function readConfig() {
     const resp = rxBuffer.slice();
     rxBuffer = new Uint8Array(0);
 
-    if (resp.length < 8) throw new Error('响应太短 (' + resp.length + ' 字节)');
+    if (resp.length < 8) {
+      /* 11-25: 空响应也算一次失效，连续 3 次交给自愈（见 serialRecover） */
+      serialFailStreak++;
+      if (serialFailStreak >= 3) serialRecover('读取配置无响应');
+      throw new Error('响应太短 (' + resp.length + ' 字节)');
+    }
 
     const dv = new DataView(resp.buffer, resp.byteOffset, resp.byteLength);
     const magic = dv.getUint32(0, true);
@@ -1995,6 +2116,7 @@ window.addEventListener('load', () => {
   updateOtaUI();
   updateOtaControls();
   log('VibeKey-F3 已就绪 (C/L/EC 三手势 · 摇一摇 · 空中鼠标 · 槽位 · 休眠 · LED · OTA)', 'success');
+  log('[自愈] 串口断线自动重连已启用 (build 1125-2)', 'info');
   if (!('serial' in navigator)) {
     log('警告: 当前浏览器不支持 Web Serial API', 'error');
     toast('请使用 Chrome 或 Edge 浏览器', 'error');
@@ -2008,5 +2130,16 @@ window.addEventListener('load', () => {
   }
   // 08-31: 周期轮询设备信息(电量/槽位同步)
   setInterval(pollDeviceInfo, 5000);
+
+  /* ★★ 11-25 周期性"确保连接"（对齐客户端行为）。
+   * 客户端（Qt/pyserial）是**短连接 + 不断重试打开端口**：每次配置操作
+   * 开→写→读→关，失败就再试。网页端原来只在页面加载和 USB 插拔事件时尝试，
+   * 一旦读取循环报错把 port 置空，而设备在系统层面并没有断开（不会触发
+   * connect 事件），页面就永久停在"设备未连接"——自愈计数也永远到不了 3。
+   * 这里每 3 秒兜底重连一次，等价于客户端的重试 */
+  setInterval(() => {
+    if (!port && !isBusy && !otaTransferring && !capturingPath && !serialRecovering)
+      autoConnectUsb();
+  }, 3000);
 });
 

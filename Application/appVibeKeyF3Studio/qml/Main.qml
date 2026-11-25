@@ -952,15 +952,14 @@ ApplicationWindow {
                     /* OTA Tab */
                     Rectangle {
                         color: "white"
-                        /* 中心背景图标: 绝对定位居中, 不参与布局, 不被挤压 */
-                        Image {
-                            anchors.centerIn: parent
-                            width: 120; height: 120
-                            source: "qrc:/otabg.png"
-                            fillMode: Image.PreserveAspectFit
-                            z: 2
-                            opacity: 0.4
-                        }
+                        /* ★ 11-23: 中心水印(otabg.png)已按需求移除。
+                         * 原先它 z:2 顶在内容上、盖住"传输完成/进度条"；
+                         * 改成 z:-1 后用户仍觉多余，直接删掉。
+                         * 若以后要恢复，加回:
+                         *   Image { anchors.centerIn: parent; width:120; height:120
+                         *           source:"qrc:/otabg.png"; fillMode: Image.PreserveAspectFit
+                         *           z: -1; opacity: 0.4 }
+                         */
                         /* 09-14: 整页可滚动 —— 新固件横幅 + 在线版本列表可能把底部"开始升级"
                          * 顶出可视区(用户实测: 横幅出现后按钮被挤掉且滚不动)。用 ScrollView
                          * 包裹; 内层 ColumnLayout 里 Item{Layout.fillHeight} 占位在 ScrollView
@@ -1714,15 +1713,27 @@ ApplicationWindow {
                             property real ecCardNaturalY: 59
                             property real c2CardNaturalY: 169
                             property real c3CardNaturalY: 259
-                            /* 09-06: 右列卡片整体下移微调(自然单位, 随 deviceScale 缩放)；
-                             * 09-10: 再向上调一点，避免底部卡片被裁。 */
-                            property real rightCardsYOffset: 8
+                            /* 09-06: 右列卡片整体垂直偏移(自然单位, 随 deviceScale 缩放)。
+                             * ★ 11-23 由 +8 改为 -6，让右列【上下居中于设备图】：
+                             *   列顶 C1 = -51，列底 C3 = 259 + 卡片高(≈51) = 310
+                             *   ⇒ 列中心 = 129.5，而设备中心 = 230/2 = 115
+                             *   ⇒ 需上移 14.5；原 +8 反而又往下推了 8，合计偏低 ~22px，
+                             *     表现为"右列明显偏下、C3 卡片贴到面板底边"(用户反馈)。
+                             * 微调只需改这一个数：负数上移、正数下移。 */
+                            property real rightCardsYOffset: -6
                             /* 09-05: L2/L3 侧键(设备图左缘的两个小圆点凸起)。
                              * l2/l3NaturalY = 热点矩形顶部; 连线端点 = 矩形中心。
                              * lHotNaturalX = 圆点中心 X(自然坐标, 按设备图 82x230 目测)。
                              * 偏了只影响热点/红线的视觉对位, 可微调。 */
-                            property real l2NaturalY: 63
-                            property real l3NaturalY: 105
+                            /* ★ 11-23 对齐网页版：网页端用的是【按设备图高度归一化】的
+                             * 锚点（web_config/js/15-capture-edit.js 的 L_NUB）：
+                             *   l_key.0=0.1383  l_key.1=0.2880  l_key.2=0.4543
+                             * 乘本端自然高度 230 ⇒ 中心 31.8 / 66.2 / 104.5。
+                             * 原值 38 / 73 / 115 是"目测"出来的，整体偏低 6~10px，
+                             * 表现为虚线端点落在按键上沿而非中心（用户反馈）。
+                             * 端点 = 热点矩形中心，所以热点与虚线一并修正。 */
+                            property real l2NaturalY: 56.2     /* 66.2 - lNaturalH/2 */
+                            property real l3NaturalY: 94.5     /* 104.5 - lNaturalH/2 */
                             property real lNaturalW: 14
                             property real lNaturalH: 20
                             property real lHotNaturalX: 3
@@ -1768,15 +1779,44 @@ ApplicationWindow {
                                 distributeCardGaps(items)
                             }
 
-                            function relayoutRCards() {
+                            /* ★★ 11-23 右列改为【按真实高度整体垂直居中】。
+                             * 原来的 distributeCardGaps() 是"顶卡片不动、底卡片按 defY 固定"，
+                             * 卡片一变高就只能往下长 —— 手势模式下每张 C 卡多一排
+                             * "单击/双击/长按"、EC 卡也变高，整列直接长出面板底边被裁
+                             * (用户反馈"还是会被挤下")。
+                             * 现在按实际 height 求和后把整列居中到设备中心：
+                             * 常规/手势两种密度都自动居中，多出来的高度上下各分一半，
+                             * 不会再全部堆在下面。 */
+                            function centerRCards() {
                                 var items = []
                                 for (var i = 0; i < 3; i++) {
                                     var it = cCardRepeater.itemAt(i)
                                     if (it && it.visible) items.push(it)
                                 }
                                 if (ecInfoCard.visible) items.push(ecInfoCard)
-                                distributeCardGaps(items)
+                                if (items.length < 2) return
+
+                                items.sort(function(a, b) { return a.defY - b.defY })
+
+                                var gap = 8 * deviceScale          /* 视觉间距 8px, 随缩放 */
+                                var totalH = 0
+                                for (var k = 0; k < items.length; k++) totalH += items[k].height
+                                var span = totalH + gap * (items.length - 1)
+
+                                /* rightCardsYOffset 仍作为【整体微调】保留：
+                                 * 居中之后想再上下挪一点，改那个数即可（负数上移）。 */
+                                var centerY = deviceFrame.y + deviceFrame.height / 2
+                                              + rightCardsYOffset * deviceScale
+                                var y = centerY - span / 2
+                                for (var j = 0; j < items.length; j++) {
+                                    /* 改写 dragOffsetY 而不是 y —— 保持 defY 的声明式绑定，
+                                     * 窗口缩放时默认位置仍会重算（同 distributeCardGaps 的约定） */
+                                    if (y !== items[j].y) items[j].dragOffsetY = y - items[j].defY
+                                    y += items[j].height + gap
+                                }
                             }
+
+                            function relayoutRCards() { centerRCards() }
 
                             function showKeySettings(ki) {
                                 if (keyConfig.captureIndex >= 0 && keyConfig.captureIndex !== ki)
@@ -1842,7 +1882,9 @@ ApplicationWindow {
                                 var cx, cy
                                 if (ki === 3) { // L1 -> 设备左侧长条侧键中心（侧键凸出在设备图外，用硬坐标修正）
                                     cx = deviceFrame.x - 4 * deviceScale   /* 凸出在设备图左侧外 */
-                                    cy = deviceFrame.y + 38 * deviceScale  /* 侧键上部 */
+                                    /* 11-23: 38 → 31.8。网页端 L1 锚点 = 0.1383 × 高度，
+                                     * 230 × 0.1383 = 31.8。原值偏低 6px，线插在按键上沿。 */
+                                    cy = deviceFrame.y + 31.8 * deviceScale
                                 } else if (ki >= 0 && ki < 3) { // C1-C3 -> 各自色块右侧边缘中点
                                     cx = deviceFrame.x + (keyNaturalX + keyNaturalW) * deviceScale
                                     cy = deviceFrame.y + (keyNaturalY + ki * (keyNaturalH + keyNaturalGap) + keyNaturalH / 2) * deviceScale

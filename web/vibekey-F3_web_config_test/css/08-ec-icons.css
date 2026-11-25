@@ -1,0 +1,34 @@
+/* ==========================================================================
+   EC 编码器动作图标 (2026-10-05)
+   --------------------------------------------------------------------------
+   用途: EC 摘要卡的三颗行首小图标 —— 旋转 / 按压 / 按压旋转(按压滚动)。
+   源图: web/assets/img/旋转.png · 按压.png · 按压旋转.png (各 200x200)
+   压缩: 裁到内容边界 + 缩到 32x32 + 转灰阶+alpha(仅 alpha 参与遮罩),
+         三颗合计 3.8KB (原 17.2KB, -78%), 以 base64 内联 —— 与本项目其余
+         图标同样"data URI 内嵌、产物自包含"的做法。
+   着色: 走 CSS mask —— 图标颜色 = 元素 background-color, 因此自动跟随
+         浅色/深色主题(颜色见 .ec-ic, 用 --q-label)。
+         镜像由 .ec-ic.flip 的 scaleX(-1) 完成, 不额外切图。
+         ★ 方向约定: **原图 = 「下 / 压下」**; 「上 / 压上」才加 flip。
+   ========================================================================== */
+:root {
+  --ec-ic-rot:   url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAQAAADZc7J/AAAEKUlEQVR42pWVbWiWVRjHf9c59/3saa2sjaYR9upbKWQo5ESaCVlhmrrdmR9CJIn6YuiHyFUMoRkRCVIk7kMQ9GaPm6JgwlL3qB9SiEFYJDJ8w7ZmJtqq53nuc87Vh+1xm7mc/0/n5pz/df7X/1zXfQkjIYnJeYCk2k529zJOhX5zjlO588P2BZ7J3Lo1nps2yXB2YnMelt0dL9PFPKrjjRFACXCJE+aA3912FJpNj21NkwXRfsWdkZH0pTXxG7Imqg54QBgIoIDB4qCTD77ZC4k1z0suFfpkOD1ZIlui+0tATMD1y696GaRKx9tqi8eH2EDYUXpzV/cLDWaHgx4ZyqyhKW4JeJeJ3O+0u92+63Jf3gGytNpONfNZZmcrLs3E4WJYKc4eSNFeAaiP8q5hU3ZDoWQzeN3M5lxv2VRAy+sVi7Qpqit6a72nQxaKCb0yIH75a9lPSkVboWf8S22HoT6q1VwYJAskpk/yHp0VP7SO98R4LF5FQq8kNueTmXIsYGM9oQtzZ1+JW93VW6+DhunR1+ERDViR0CvNBo4fieu8k8uurv3krPiH9DosgSVVFWv1PhX5U2fYp4KCiPYINDyX2VNycVRqbG8bhU59lHeNWyrXlgDB452AioRLEbA+aBSlHe1t9VE+HV26mPLKEkWgRPx9Klo+Teq8WHgfqR0187wHNhR+04kaVABE1fgrujWSZ6NswHXXHGLA9+tDIdfPu//diGSOYglHWtOBTvgfSL0d+pgqrSlApJMChtDFsLIeTUXeDQXL69IplVP+6DBSA4r0cBNoNujyB+OjZk/VFxED3jqo1bEG+FkgeszeUfT6hNF/QNDbx5DCVfQJ+CoUKxeNnBPATkK4KcgUROC84UchoHPQ+WGs5PkBmBsQ6DLhO8VD3YqJG7XZjM3CjZrco497lHDQVOb9adFMZboa7RxTgE6D6urMLaL+rD1kPv+Lr2JJffR6MiHvb6yh2eR9MsGscz4Wvsz1GyT9OO1HbbVuRTvNDcyUToOGbbYaTfvjjxCb2J1Xpvns08VCZsbU6Nv9iU0kr6PdXmv2+saWijWlQkWm9E5uX2IFSQxoR+bJUiHOppt2vAX10fywMVxL7jR5B40tcVOpUJEtHjALIRdkwNUXa/1hO9kVMlm3W9Zv7y63Tq0OlE3eo5BMkg/tkrQYV7iTbt7OCwhBBh8mLH4guy+eUixksu4K28JnbT+NVLDiYV3Fq3ZcqVCRdSdKi3Z1N5uNgbJlic35ZbXxp/GiIqoZSR3H5Pvwi7nk1dboNJmjs+M4VSSD25eu2tlXbn4ZVh4BkrXydnSXI2AxQ391Ah5DhLugLbkt5dMjApSHSDKBl1nJdDM4ExmckQGOy/a0dWffiGFz7avXR3kHSYZ5LGCm3q+3idIvp+ni4J2HW9PyiSH8Cx347uMrreDmAAAAAElFTkSuQmCC");
+  --ec-ic-press: url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAQAAADZc7J/AAAEt0lEQVR42oWVW2xUVRSG/7X2mQsZIFzGgrcnobSFeItFLg1TCSY8CDadHqRDYkQKicaYEEl8wuMRY2KCJNAHbqnCC6E9XAIhREQKDbUgYNREhou8KrS2iFDtzDmz9/LhzNCZArqeds5e/8rea6/z/YSKsJWnAVvRIrOI6qUaU4RoiG7gIrrRG+55ulxB5WuHXNM01VrDrfI8QyAQAAQCQQv/LJ3o8P5w2A03Kgs47BrAfptc66kCDBQYKBYADDQYFoKb2Oh1lLLLCjjsmuUTYh0RO4AxUQ4CXJDv+Dpua6EpVI0GvByxfMNsobA/v+7ovVIJKslXTjNHrbn5fCSmh2mH3nPwcmV3VsyRNWhT44N8LBZcxHLvVliCwrv/mIh/a83N52LxoJvf67wCgFIKqBJggIAeDQGaa7g9ssTPReOFH9BY90+xF7YCWroykh5pFbsdBKQsh4ttZYdLp0xZAGC3t0p6JCPNXaEStgKa38pIOtcq6W2Aw6HYYVuNNjhc28phIL2tVdK5jLSsBmxFoMwk/wonSekzB16xlWcgpddeNXHkCSDev+/P+30nmz2dPhVZbLQZCmYd+YshubboNA0ZprVA6eU83bzQ7vKzdJl+CbIrDjUvcQ0IBKkTQK8zwxrRqmgbRC2NRXcgGeHC9gP7UtZxDbJV1rR8Yu1Vs2UiiJjHq1r15qwJV76xVRY9krJODNVURRdoMU/P2c2JuVxjKAhkB6jRAA55Or0pvtFoXxuBQIz4OtDjPkhv9rRDQKMByc5CYIhnmQVkf8wOUDh3cAEIYitP2/O5TxegKsZcoC3LX3zotK08DYKk+6z5gP6MZZ6Awb1Aqth1Wc9j/xKAhEh4A1AnYSb3MgTyImOGADBXwzRPL5+ABg0ojAniAsm8pqmuCZ9ZXwME9AzLZIEAQ0CVOARY0/GYwcNCQJPVdCCcTxoUCCTJY476P2HGZgvTIIHASWCAXAHUTennh4oZGLJ+B1wZIECSBALdYfxKAExtWM9W3jD1KUA/cAGjBOe92w6HMOGZAIGuM10iGGAh0FMU6S0GhFHmhHoSIbMFyBLQYwBpMCCYC0ynjGjwC03VgMOedvjwef/TqEVGdJFqIlpM3Aq+CKfAYcgb1VyvYYS7+e73cpnFiql3IWcYcI2tDm/Mb2IVVUwgEFNURVRu88ENDnsGOMOQwjtWlMVcxTl1Q9fGo0t9zc/O7jo+aKusZAWUPV1zkibKFEnA0ICclPe9naAeQBzeq+0ZtLugomw+P9BrgWJ7/A9VkhOFXVgMgCAQh90+9L0+iR5n8W8duTP6O2cJJLusBGm/P9EBqgCK3V4OFIfHAiX81rI1UwaUEpM6M5IeyYjdDvw30lq2tkp6ZJW0FJF2H6qxU1a9n4vGCyd4/aOhqtqtJX4uFi9ciLw6Y9gtjabDrlk2LX4s8lI+H4npv2m7fOVlKwcpPZvbsFYlQqyrZfv7R7E+aiy7IitLxiKXcBbX5DbAk6lWFqI+EvENcwSBd6/t67sVxlJmbWvItZ58tLUVfpOPvC8fYm2j5vpactxqZPAc01hzpZ/QOdJxbPAR5lpu7ykr2cCNUo+ZMpUEd3CdLqK77qxrHrT3fwHJwF/Bc1ilNwAAAABJRU5ErkJggg==");
+  --ec-ic-prot:  url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAQAAADZc7J/AAAFNUlEQVR42mWVbYicVxXHf+fe+zwzbmJqNmSTItW2pkm6FRtpwWxpnW3RoKSN2Z08prFICYraFwtVCTa+DIMkIsVgCnZxPghRhLazb6bQBlKTnaYf2kAJ1BqMJZi+ucu2aUgTujvz3HuPH2Ym2U3up8u953/e/+cIi49kph4Asl57k/8c16hw0bzLf+vvL/gX+Ea6ZCS5I98tC9GZrQcYujYZ0vu4VVcZI4AS4RynzJFwcOw1qJhpW8uze9w/FP+2LIZvXZHsku+73kgAhLYCBQwWD1M8+dwLkFnzLannwqwshGdbZL+7vgUkRPxF+Z+eB1mqq2yvJRBiYiCOtn4+efrbZTPqYVouR1beneyJBJ86/yHj/mA4cX624QHZ2mvXmUGG7O2Kz9Mkno07xNsjOTojACXX8OW9xSfmWzYl6D721We6SQW0e9++WXe7gWawNgQOyyYxcUbazg8/VHy61bQFfTt8d+wYlFyf1iNUBKoKmZmVRkBvS77wOL8VE7AEFYkzktl6yDbI8YhN9JRuqr/zg6Tm0Yo5Ke2CQmb7tRq72Srf4p6J/RqxInFGKgbefCUZCF7O+4Hxt25LXs+7Bc2s73O6/Gwth8w2ewqP6edV5IJ+0X49KojotED53vT5lk9ca9v4WBteMdU4vN49qnfrdahM08hrk6+Xn1ry4xYgBIIXUJF4TqB8xA0i/vDYppJr+Lb1bQ+bJ11PIHY6IHj/MDcseaKFLMit45Pjbni9DASx8DukTzv98FDyx5ymx4iA1xCxaS3/1dxPuTl4EQBRNeFjHXHyTVeM+NMrXkbrsWKqIVvHH3yIIq5TPcFozFV+7W+ceO8K7uBko2KJr9TyzNbDlCXGRwtpy4tdxDGDTxL2ZjsvuLkAsE5qOYDTNRFDPAGzgjR8ycnXgqqRK00Zr3qXpIfmEBRp6Na1PWs/OmxkBSgy3ZXrW87qKHIVHlFhJb0AFYMO35i8Zp5f+jeDAcBDnwJ40avBl5R4ATgp4L7sPtMM+lWjcyDoMjrM/NJH8p5R1SuxqqI6s+xDaEuGpShWzhp5VwC7pl3akqt6pqxIvMp4dMLRA/OZbZNL1iIC7xveECK6ER2MMBjBP5U3xegiFRpFfDD7oV/bUtwREThh4ktKgIHt11W1Yqoxs5P/CY8nxhj1GlFUI14ktX5X/Z+ZrcaKqWr2Wf1KQIlHTU8jnBFNe/Kd6JSBesjs+EjrEfmk4JwREXEmdcY3fza+r02xKYPqzvRTouEd+7J9I+9fld6VB7uh/y8vXKiYhp7Uihk53j+mosu0QIszcZwfjk5UzNMRKuZAzFabv8Y0MWFk9EVBtlxbOEXRuXxydKjkGgHt0rnkeldepnM9AFKyDV/+e7rFe+btumemySwM73pAy3M7tPwbyGzFtJsls5cH7sK3bXu+o+W5B3R4F2RWkMyAHk7vbs0nxXzv6C+g5AZjNXZYS3sqVsyUaXjYtifZ3ZovFJtHzCaoR4GKqer9feGYvcnPp0V/UH7y7Om2s+3unBXoBLZGfm+35M2k4N/yd058gBCl7Vo13ndD8VCytjmfFv3H/CkeGPvX4kbafrM+yI/sNa35QtGfam2ePF0x1XjJyczWw1Bf8udkcxPVVHLPcXk1/tucC2pX6HrZqLcnSa5Iij+UPzgx20nqpShp68sek1+6lZ6IxXRWggCRgMHhP9A99f1d6UUKuoMuW8332MEtprMT6ezICG/Ks3ltYnbRsuEK6nbGasqd3MMGvV4/LcpFOcMJji4/Vsu7EpfP/wHaIY6htmlivQAAAABJRU5ErkJggg==");
+}
+
+.ec-ic {
+  flex: 0 0 auto;
+  width: 12px; height: 12px;
+  background-color: var(--q-knob-off);   /* 未启用灰: 浅色 #ccc / 深色 #3a4046
+                                          * (10-05 用户要求"再浅一点、跟灰框差不多" ——
+                                          *  灰框本身是 --q-info-bg #f5f5f5, 图标若取同值在白底上
+                                          *  几乎不可见, 故取比它深一档的这一档) */
+  -webkit-mask-repeat: no-repeat;   mask-repeat: no-repeat;
+  -webkit-mask-position: center;    mask-position: center;
+  -webkit-mask-size: contain;       mask-size: contain;
+}
+.ec-ic.ec-ic-rot   { -webkit-mask-image: var(--ec-ic-rot);   mask-image: var(--ec-ic-rot); }
+.ec-ic.ec-ic-press { -webkit-mask-image: var(--ec-ic-press); mask-image: var(--ec-ic-press); }
+.ec-ic.ec-ic-prot  { -webkit-mask-image: var(--ec-ic-prot);  mask-image: var(--ec-ic-prot); }
+.ec-ic.flip { transform: scaleX(-1); }   /* 上/压上: 原图是「下/压下」方向, 镜像过来 */
