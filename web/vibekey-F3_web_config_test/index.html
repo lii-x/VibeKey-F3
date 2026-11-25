@@ -1440,6 +1440,10 @@ async function readConfig() {
     if (has(313)) config.ec_cw_press  = rd(304);
     if (has(322)) config.ec_ccw_press = rd(313);
     // ---- 11-25: HID 通道 @324, 蓝牙开关 @328（回包 332B 的新固件才有）----
+    /* 11-25 诊断：把设备回的原始字节打出来（含长度），确认到底是没写进去还是解析错位 */
+    log('· READ len=' + len + ' raw[324]=' +
+        (has(325) ? '0x' + dv.getUint8(324).toString(16) : 'N/A') +
+        ' raw[328]=' + (has(329) ? '0x' + dv.getUint8(328).toString(16) : 'N/A'), 'info');
     if (has(325)) {
         const t = dv.getUint8(324);
         config.hid_transport = (t === 0) ? 0 : 1;
@@ -1593,6 +1597,11 @@ async function writeConfig() {
     /* ★ 11-25 蓝牙开关已从界面移除：两套协议栈固定全开（0x03），不允许用户关闭。
      * 恒发 0x03 可把历史上被写成 0 的槽位一并纠正。 */
     payload[316] = 0x03;
+
+    /* 11-25 诊断：打印 payload 尾部（[313..316]），确认 hid_transport / bt_en_flags 真的发出去了 */
+    log('· payload len=' + payload.length + ' tail=' +
+        [payload[313], payload[314], payload[315], payload[316]]
+          .map(v => v.toString(16).padStart(2, '0')).join(' '), 'info');
 
     const header = buildHeader(CMD_WRITE, payload.length, currentSlot);
     const data = new Uint8Array(header.length + payload.length);
