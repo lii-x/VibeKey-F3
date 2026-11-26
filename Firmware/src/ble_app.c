@@ -2159,6 +2159,14 @@ void ble_app_advertising_start(void)
  * 重启广播给主机回连窗口, 但进待机不能广播, 故用本标志屏蔽之。 */
 static volatile uint8_t g_standby_teardown = 0;
 
+/* ★★ 11-26 配对模式"拒绝已配对设备"的延迟删密钥：
+ * 必须**先断开、再删 bond**。原实现先删再断，链路处于加密态时删除会让
+ * 协议栈/控制器状态异常 —— 断开命令根本没发出去，最后靠监督超时(84s)拖死，
+ * 表现为"重新配对时第一次必被拒、而且要等一分多钟"。
+ * 现在只发断开并把地址记下来，真正的删除放到 DISCONNECTED 事件里做。 */
+static volatile uint8_t g_pair_reject_pending = 0;
+static uint8_t          g_pair_reject_addr[6];
+
 /* 供 power.c 在进连接态待机前调用: 标记"待机拆除中" + 主动断开当前 BLE 链路。
  * 断开事件(will 走 BLE_GAP_DISCONNECTED_IND)负责 air_mouse_stop/enc_stop/
  * 清补发/清 g_bt_connected 等收尾, 但不会重启广播(被 g_standby_teardown 抑制)。 */
@@ -2419,16 +2427,16 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
          *       主机才能意识到旧密钥失效、引导用户重新配对。
          * 例外：地址属于其它槽位时只拒绝、不删密钥（见 bt_multi_pair_mode_reject）。 */
         if (bt_multi_is_pairing_window() && hfp_peer_is_bonded(g_hid_env.peer_addr)) {
-            extern int bt_multi_pair_mode_reject(const uint8_t *addr);
-            int cleared = bt_multi_pair_mode_reject(g_hid_env.peer_addr);
-            rt_kprintf("[BTSLOT] PAIR mode: bonded peer -> clear bond & disconnect, "
-                       "let it re-pair (%s)\n", cleared ? "cleared" : "nothing to clear");
+            /* 记下地址，断开**之后**再删密钥（见 g_pair_reject_pending 说明） */
+            memcpy(g_pair_reject_addr, g_hid_env.peer_addr, 6);
+            g_pair_reject_pending = 1;
+            rt_kprintf("[BTSLOT] PAIR mode: bonded peer -> disconnect first, "
+                       "clear bond after link down\n");
             ble_gap_disconnect_t d;
             d.conn_idx = ind->conn_idx;
-            d.reason = 0x05;              /* Authentication Failure */
+            d.reason = 0x13;              /* Remote User Terminated：主机侧会立刻重连 */
             ble_gap_disconnect(&d);
             g_hid_env.is_connected = 0;
-            memset(g_hid_env.peer_addr, 0, 6);
             break;
         }
         /* 三设备切换(方案B): 不再有"配对模式拒绝已配对设备"逻辑 —— 每槽独立
@@ -2553,6 +2561,16 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
          * 断得快/恢复快/语音不中断. */
         ble_gap_disconnected_ind_t *dind = (ble_gap_disconnected_ind_t *)data;
         uint8_t ble_disc_reason = dind ? dind->reason : 0xFF;
+
+        /* 配对模式的"拒绝老设备"：链路已断，此刻删密钥是安全的 */
+        if (g_pair_reject_pending) {
+            extern int bt_multi_pair_mode_reject(const uint8_t *addr);
+            g_pair_reject_pending = 0;
+            int cleared = bt_multi_pair_mode_reject(g_pair_reject_addr);
+            rt_kprintf("[BTSLOT] PAIR reject done after disconnect (%s)\n",
+                       cleared ? "bond cleared, re-pair now" : "nothing to clear");
+            memset(g_pair_reject_addr, 0, 6);
+        }
         const char *rs = "?";
         switch (ble_disc_reason) {
         case 0x08: rs = "conn timeout"; break;
