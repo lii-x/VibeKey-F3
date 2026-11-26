@@ -2159,13 +2159,6 @@ void ble_app_advertising_start(void)
  * 重启广播给主机回连窗口, 但进待机不能广播, 故用本标志屏蔽之。 */
 static volatile uint8_t g_standby_teardown = 0;
 
-/* ★★ 11-26 配对模式"拒绝已配对设备"的延迟删密钥：
- * 必须**先断开、再删 bond**。原实现先删再断，链路处于加密态时删除会让
- * 协议栈/控制器状态异常 —— 断开命令根本没发出去，最后靠监督超时(84s)拖死，
- * 表现为"重新配对时第一次必被拒、而且要等一分多钟"。
- * 现在只发断开并把地址记下来，真正的删除放到 DISCONNECTED 事件里做。 */
-static volatile uint8_t g_pair_reject_pending = 0;
-static uint8_t          g_pair_reject_addr[6];
 
 /* 供 power.c 在进连接态待机前调用: 标记"待机拆除中" + 主动断开当前 BLE 链路。
  * 断开事件(will 走 BLE_GAP_DISCONNECTED_IND)负责 air_mouse_stop/enc_stop/
@@ -2420,25 +2413,10 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         memcpy(g_hid_env.peer_addr, ind->peer_addr.addr, 6);
         rt_kprintf("[BLE HID] connected idx=%d\n", ind->conn_idx);
 
-        /* ★★ 11-26 配对模式只接受新设备：已配对的老设备立即拒绝。
-         * 场景：电脑端没删记录 → 拿旧 LTK 直接连进来占位 → 新设备再也配不上。
-         * 判据：hfp_peer_is_bonded() 为真即"设备侧有它的 bond"（新设备不会有）。
-         * 动作：删 bond（让它必须重配）+ 断开，reason 用 Authentication Failure，
-         *       主机才能意识到旧密钥失效、引导用户重新配对。
-         * 例外：地址属于其它槽位时只拒绝、不删密钥（见 bt_multi_pair_mode_reject）。 */
-        if (bt_multi_is_pairing_window() && hfp_peer_is_bonded(g_hid_env.peer_addr)) {
-            /* 记下地址，断开**之后**再删密钥（见 g_pair_reject_pending 说明） */
-            memcpy(g_pair_reject_addr, g_hid_env.peer_addr, 6);
-            g_pair_reject_pending = 1;
-            rt_kprintf("[BTSLOT] PAIR mode: bonded peer -> disconnect first, "
-                       "clear bond after link down\n");
-            ble_gap_disconnect_t d;
-            d.conn_idx = ind->conn_idx;
-            d.reason = 0x13;              /* Remote User Terminated：主机侧会立刻重连 */
-            ble_gap_disconnect(&d);
-            g_hid_env.is_connected = 0;
-            break;
-        }
+        /* ★ 11-26 最终定案（用户选择）：配对模式对老设备**不打断**。
+         * 曾经试过两版"拒绝/清密钥"方案，都会让老设备被踢一次再重配，用户不接受。
+         * 现在配对模式只做两件事：① 广播关白名单（任何设备可连）② 可被发现。
+         * 已配对设备连上来照常使用；要重置配对请在主机端删除设备，或换一个槽位。 */
         /* 三设备切换(方案B): 不再有"配对模式拒绝已配对设备"逻辑 —— 每槽独立
          * BD_ADDR, 其他地址下的设备看不见本槽广播, 不存在抢配; 任何设备都可
          * 连接(已配对→直接连/回连, 未配对→走 create_bond/等配对)。 */
@@ -2562,15 +2540,7 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         ble_gap_disconnected_ind_t *dind = (ble_gap_disconnected_ind_t *)data;
         uint8_t ble_disc_reason = dind ? dind->reason : 0xFF;
 
-        /* 配对模式的"拒绝老设备"：链路已断，此刻删密钥是安全的 */
-        if (g_pair_reject_pending) {
-            extern int bt_multi_pair_mode_reject(const uint8_t *addr);
-            g_pair_reject_pending = 0;
-            int cleared = bt_multi_pair_mode_reject(g_pair_reject_addr);
-            rt_kprintf("[BTSLOT] PAIR reject done after disconnect (%s)\n",
-                       cleared ? "bond cleared, re-pair now" : "nothing to clear");
-            memset(g_pair_reject_addr, 0, 6);
-        }
+
         const char *rs = "?";
         switch (ble_disc_reason) {
         case 0x08: rs = "conn timeout"; break;

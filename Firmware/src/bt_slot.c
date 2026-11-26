@@ -329,8 +329,10 @@ uint8_t bt_multi_is_pairing_window(void)
 /* ============================ 配对删除 ============================ */
 
 /* 删除当前槽位记录的配对信息: BLE 侧(Connection Manager) + 经典蓝牙侧(linkkey)。
- * 需在 BLE 栈就绪后调用(connection_manager_get_bonded_devices 才有效)。 */
-static void bt_multi_clear_slot_bond(void)
+ * 需在 BLE 栈就绪后调用(connection_manager_get_bonded_devices 才有效)。
+ * ⚠️ 11-26 起**不再被调用**：配对模式改为非破坏性（见 bt_multi_apply_mode），
+ *    这里保留实现仅因其"按槽位删 bond"的逻辑将来可能还要用。 */
+__attribute__((unused)) static void bt_multi_clear_slot_bond(void)
 {
     uint8_t addr[6];
     if (!bt_slot_get_addr(g_cur_slot, addr)) {
@@ -474,8 +476,14 @@ void bt_multi_apply_mode(void)
     /* 仅显式 L 键配对模式: 清当前槽位 bond(旧设备回连无法认证, 天然防抢配)。
      * C 键连接模式(含空槽)不做任何处理: 空槽也接受已配对设备回连并记录到槽位。 */
     if (g_cur_mode == BT_MODE_PAIR) {
-        rt_kprintf("[BTSLOT] PAIR mode: clearing slot%d bond, re-pair ready\n", g_cur_slot);
-        bt_multi_clear_slot_bond();
+        /* ★ 11-26 最终定案：配对模式**不再删除任何 bond**。
+         * 理由（用户选择）："老设备连上就直接用，不要打断"。
+         * 之前"进配对模式就清当前槽 bond"会让该设备下次连上必须重配，
+         * 等同于把人踢下线一次。
+         * 现在配对模式的语义收敛为：
+         *   ① BLE 广播关闭白名单（任何设备可连） ② 经典 inquiry+page scan 全开（可被发现）
+         * 要重置某台设备的配对，在主机端删除设备即可；本设备不主动清。 */
+        rt_kprintf("[BTSLOT] PAIR mode: open for new device (bond kept, non-destructive)\n");
     }
 }
 
@@ -655,45 +663,7 @@ void bt_multi_set_white_list(void)
                g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], ret);
 }
 
-/* ★★ 11-26 配对模式下拒绝"已配对设备"。
- * 需求：进配对模式是想绑**新设备**；老电脑若没删记录，会拿旧密钥直接连进来占位，
- * 用户就再也配不了新设备。
- * 处理：删掉它的 bond（BLE LTK + 经典 linkkey），让下一次连接必须重新配对。
- * 例外：该地址若记录在**其它槽位**，说明它归属别的槽，只拒绝连接、不动它的密钥。
- * 返回 1 = 已删除 bond；0 = 属于其它槽位，仅拒绝。 */
-int bt_multi_pair_mode_reject(const uint8_t *addr)
-{
-    if (!addr) return 0;
-    /* ★ 11-26 修正：不再对"该地址也被其它槽位记录"做例外。
-     * 原实现只拒绝连接、不删密钥 —— 结果电脑拿着旧密钥每 30s 重连一次、
-     * 被踢一次，**永远配不上**（实测日志一屏几十次 reject）。
-     * 配对模式的本意就是"重新绑定"，所以这里一律清掉它的 bond：
-     * 清完之后下一次连接就是"未配对"状态，才会真正走配对流程。 */
-    for (int i = 0; i < BT_SLOT_NUM; i++) {
-        uint8_t a[6];
-        if ((i + 1) != g_cur_slot && bt_slot_get_addr((uint8_t)(i + 1), a) &&
-            memcmp(a, addr, 6) == 0) {
-            rt_kprintf("[BTSLOT] PAIR reject: clear bond of %02x:%02x:%02x:%02x:%02x:%02x "
-                       "(also recorded in slot%d, that record becomes stale)\n",
-                       addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], i + 1);
-            break;
-        }
-    }
-    {
-        conn_manager_get_bonded_dev_t bonded;
-        uint8_t count = connection_manager_get_bonded_devices((uint8_t *)&bonded);
-        for (int i = 0; i < count; i++) {
-            if (memcmp(addr, bonded.peer_addr[i].addr.addr, 6) == 0) {
-                uint8_t ret = connection_manager_delete_bond(bonded.peer_addr[i]);
-                rt_kprintf("[BTSLOT] PAIR reject: BLE bond deleted (ret=%d)\n", ret);
-            }
-        }
-    }
-    { extern void bt_cm_delete_bonded_devs_and_linkkey(uint8_t *addr);
-      bt_cm_delete_bonded_devs_and_linkkey((uint8_t *)addr); }
-    rt_kprintf("[BTSLOT] PAIR reject: BR/EDR linkkey cleared\n");
-    return 1;
-}
+
 
 void bt_multi_on_disconnected(void)
 {
