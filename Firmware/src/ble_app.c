@@ -2056,14 +2056,29 @@ static uint8_t g_adv_wl_configured = 0;
 
 void ble_app_advertising_start(void)
 {
-    sibles_advertising_para_t para = {0};
-    
-    ble_gap_dev_name_t *dev_name = malloc(sizeof(ble_gap_dev_name_t) + strlen(local_name));
-    if (!dev_name) { LOG_E("[HID] malloc dev_name failed"); return; }
+    /* ★★ 11-26 生命周期修复（配合 OTA 后 bus fault on KE_EVT2 排查）
+     * 症状：OTA 后开机广播时 hard fault，pc 在 memcpy，调用者
+     *       gapm_adv_send_hci_le_set_ext_adv_data_cmd，写向 0x4009AEFC
+     *       （BT_MAC 外设段）——典型的"指针被野掉"。
+     * 成因：下面两个对象都在**函数栈/堆**上，而 SDK 的 init 是异步消费
+     *       （真正的数据下发发生在 KE_EVT2 任务里，函数早已返回）：
+     *   ① para 是栈变量：若 SDK 保存了 &para，返回后栈被复用，
+     *      里面的指针字段就变成上一次占用者的残留(常常是外设寄存器地址)
+     *   ② dev_name 用完即 free：若 SDK 只存指针不拷贝，立刻悬空
+     * 处理：para 改静态并每次清零；设备名缓冲改静态、不再 free。
+     *       代价是几十字节 BSS，换掉一整类"偶发野指针"故障。 */
+    static sibles_advertising_para_t para;
+    static ble_gap_dev_name_t *dev_name = RT_NULL;
+    rt_memset(&para, 0, sizeof(para));
+
+    if (!dev_name) {
+        dev_name = malloc(sizeof(ble_gap_dev_name_t) + strlen(local_name) + 1);
+        if (!dev_name) { LOG_E("[HID] malloc dev_name failed"); return; }
+    }
     dev_name->len = strlen(local_name);
     memcpy(dev_name->name, local_name, dev_name->len);
     ble_gap_set_dev_name(dev_name);
-    free(dev_name);
+    /* 不 free：SDK 可能异步引用，见上方注释 */
     para.own_addr_type = GAPM_STATIC_ADDR;
     para.config.adv_mode = SIBLES_ADV_CONNECT_MODE;
     para.config.mode_config.conn_config.duration = 0x0;

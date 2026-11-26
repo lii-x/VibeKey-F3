@@ -46,7 +46,7 @@
 
 /* 设备身份信息（App 端握手据此确认是 VibeKey-F3）。版本号随发布 bump。 */
 #define VIBEKEY_MODEL      "VibeKey-F3"
-#define VIBEKEY_FW_VERSION "1.3.4"
+#define VIBEKEY_FW_VERSION "1.3.5"
 
 #ifdef CONFIG_USBDEV_ADVANCE_DESC
 
@@ -1088,6 +1088,10 @@ static void usbd_event_handler(uint8_t busid, uint8_t event)
  * 于是 payload 尾部读出来是上一帧残留）。 */
 static void conf_asm_feed(uint8_t busid, const uint8_t *data, uint32_t nbytes)
 {
+    /* ★ 11-26 防写穿：OUT 端点是按 2048 字节武装的，一次回调最多可能给
+     * 2048 字节，而组装缓冲只有 CONF_PKT_MAX+16=352 —— 不夹紧就是一次
+     * 静态缓冲区溢出，会踩坏相邻全局变量（表现为别处莫名其妙的野指针）。 */
+    if (nbytes > sizeof(s_asm_buf)) nbytes = sizeof(s_asm_buf);
     if (s_asm_len + nbytes > sizeof(s_asm_buf))
         s_asm_len = 0;                       /* 异常累积，丢弃重来 */
     memcpy(s_asm_buf + s_asm_len, data, nbytes);
