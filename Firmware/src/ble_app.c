@@ -1132,7 +1132,13 @@ static void hid_clear_stale_conn_slot(BTS2S_BD_ADDR *bd)
             rt_kprintf("[CLS HID] clear stale hid conn slot #%d (%02x:%02x:%02x:%02x:%02x:%02x)\n",
                        i, bd->lap & 0xFF, (bd->lap >> 8) & 0xFF, (bd->lap >> 16) & 0xFF,
                        (bd->lap >> 24) & 0xFF, bd->uap, bd->nap & 0xFF);
-            memset(&app->hid_inst.conn[i].rmt_bd, 0, sizeof(app->hid_inst.conn[i].rmt_bd));
+            /* ★★ 11-26 必须清**整条记录**，不能只清 rmt_bd。
+             * 只清地址会留下"地址全 0 + 旧 CID/状态"的半残项：SDK 的判重放行、
+             * 把新连接塞进同一槽，而旧的 L2CAP 通道句柄还在 →
+             * 后续 l2cb_send_hci_data_pkt 用到已失效的缓冲区指针 →
+             * mem manage fault(DACCVIOL, MMAR=0x200020B0) 实测崩溃。
+             * 这里整条清零，让槽位回到"真正空闲"的语义。 */
+            memset(&app->hid_inst.conn[i], 0, sizeof(app->hid_inst.conn[i]));
         }
     }
 }
