@@ -931,6 +931,15 @@ static void page_scan_timeout_cb(void *param)
      * ⚠️ g_stale_bond_cleared: 清 bond 只删经典蓝牙 link key, BLE LTK 还在
      * → hfp_peer_is_bonded 仍返回 1 → 必须用此标志强制未配对路径, 否则
      * 无 key 主动连 → Numeric 卡死(实测日志 11 回归)。 */
+    /* ★★ 11-26 配对模式：**只等对端主动连**，设备绝不主动发起。
+     * 为什么单列一条：配对模式下 bond 可能只清了经典侧（跨槽保护会跳过删除），
+     * hfp_peer_is_bonded() 仍返回 1 ⇒ 躲过下面的"未配对"判据 ⇒ 设备带着
+     * 半残 bond 主动连 → 对端不接受 → 弹 Numeric 确认 → 无人点 → 卡 270s。
+     * 实测就是"每次重连都要配对、手机 3 分钟后断开"的循环。 */
+    if (bt_multi_is_pairing_window()) {
+        page_scan_window_start(10000);  /* 只开监听窗口, 等电脑主动 page 我们 */
+        return;
+    }
     if (!hfp_peer_is_bonded(g_hid_env.peer_addr)) {
         page_scan_window_start(5000);   /* 未配对: 等手机来连 */
         return;
@@ -2409,10 +2418,16 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
          * 首次配对(未 bonded)设备无 key, mgr 不唤醒, 只等手机 CTKD 派生后来连。 */
         /* 三设备切换: 配对窗口内(新设备 BLE 已连、配对尚未完成)经典蓝牙保持关闭,
          * 防已配对设备趁 page scan 从 BR/EDR 抢连 HFP; 配对成功后恢复(PAIRING_SUCCEED)。 */
+        /* ★ 11-26 配对模式保持**可被发现 + 可被寻呼**(1,1)：
+         * 既然改成"只等对端主动连"，就必须让对端既搜得到也连得上。
+         * 原实现这里写死 (0,0)，等于把门关上了 —— 设备只能自己往外连，
+         * 正是"反复主动连 → 弹配对确认 → 卡死"循环的一部分。
+         * 方案B 下每槽独立 BD_ADDR，别的槽设备 page 不到本地址，
+         * 因此不必再用"关扫描"来防抢连。 */
         if (bt_multi_is_pairing_window())
-            vk_set_scan_mode(0, 0);
+            vk_set_scan_mode(1, 1);     /* 配对: 可发现 + 可连接 */
         else
-            vk_set_scan_mode(0, 1);
+            vk_set_scan_mode(0, 1);     /* 正常: 仅可连接 */
         {
             uint8_t bonded = hfp_peer_is_bonded(g_hid_env.peer_addr);
             uint8_t boot_first = !g_boot_first_connect;
@@ -2435,7 +2450,8 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
              * BR/EDR key 就绪(CTKD 派生)后主动连(正常重启 key 在 → 秒连;
              * 重配场景等新 key → 用新 key 认证必过), 线程内 mdelay 不阻塞
              * 事件分发。与 pscan 链兜底互斥: hfp_connect_timer 闩锁。 */
-            if (bonded && !g_hfp_failed_once && !g_stale_bond_cleared) {
+            if (bonded && !g_hfp_failed_once && !g_stale_bond_cleared
+                && !bt_multi_is_pairing_window()) {
                 if (g_hfp_mgr_sem)
                     rt_sem_release(g_hfp_mgr_sem);   /* 唤醒 mgr 线程(非阻塞) */
             }

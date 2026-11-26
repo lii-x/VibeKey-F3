@@ -447,13 +447,14 @@ key_config_storage_t *key_config_get_slot(uint8_t slot)
 /* 当前蓝牙槽位的配置(按键处理/空中鼠标参数随槽切换) */
 uint8_t key_config_bt_flags(void)
 {
-    /* ★★ 11-25 固定"两套蓝牙全开"，不再读配置。
-     * 原因：需求变更 —— 蓝牙开关从界面移除，不允许用户关闭任一协议栈。
-     * 保留字段与协议(WRITE payload[316])只为向前兼容：老配置里可能残留 0，
-     * 若仍按其执行，那些槽位会表现为"蓝牙莫名其妙全关"，且界面已无入口可改。
-     * 这里直接常量返回，等于把所有历史配置一次性纠正过来。
-     * 若将来要恢复该功能，改回读 cfg->bt_en_flags 即可。 */
-    return KEY_CONFIG_BT_ALL;
+    /* ★ 11-26 恢复为**读配置**（11-25 曾临时改常量返回全开）。
+     * 现状：网页测试版保留了「蓝牙」开关，需要它能真正生效；
+     * 上位机侧写入恒发 0x03（界面没有该开关），所以普通用户仍是全开。
+     * 0xFF(擦除态)/越界一律回落到全开，避免老槽位"莫名其妙蓝牙全关"。 */
+    key_config_storage_t *cfg = key_config_get();
+    if (!cfg) return KEY_CONFIG_BT_DEFAULT;
+    if (cfg->bt_en_flags > KEY_CONFIG_BT_ALL) return KEY_CONFIG_BT_DEFAULT;
+    return cfg->bt_en_flags;
 }
 
 uint8_t key_config_hid_transport(void)
