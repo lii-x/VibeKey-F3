@@ -655,6 +655,40 @@ void bt_multi_set_white_list(void)
                g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], ret);
 }
 
+/* ★★ 11-26 配对模式下拒绝"已配对设备"。
+ * 需求：进配对模式是想绑**新设备**；老电脑若没删记录，会拿旧密钥直接连进来占位，
+ * 用户就再也配不了新设备。
+ * 处理：删掉它的 bond（BLE LTK + 经典 linkkey），让下一次连接必须重新配对。
+ * 例外：该地址若记录在**其它槽位**，说明它归属别的槽，只拒绝连接、不动它的密钥。
+ * 返回 1 = 已删除 bond；0 = 属于其它槽位，仅拒绝。 */
+int bt_multi_pair_mode_reject(const uint8_t *addr)
+{
+    if (!addr) return 0;
+    for (int i = 0; i < BT_SLOT_NUM; i++) {
+        uint8_t a[6];
+        if ((i + 1) != g_cur_slot && bt_slot_get_addr((uint8_t)(i + 1), a) &&
+            memcmp(a, addr, 6) == 0) {
+            rt_kprintf("[BTSLOT] PAIR reject: %02x:%02x:%02x:%02x:%02x:%02x belongs to slot%d, keep bond\n",
+                       addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], i + 1);
+            return 0;
+        }
+    }
+    {
+        conn_manager_get_bonded_dev_t bonded;
+        uint8_t count = connection_manager_get_bonded_devices((uint8_t *)&bonded);
+        for (int i = 0; i < count; i++) {
+            if (memcmp(addr, bonded.peer_addr[i].addr.addr, 6) == 0) {
+                uint8_t ret = connection_manager_delete_bond(bonded.peer_addr[i]);
+                rt_kprintf("[BTSLOT] PAIR reject: BLE bond deleted (ret=%d)\n", ret);
+            }
+        }
+    }
+    { extern void bt_cm_delete_bonded_devs_and_linkkey(uint8_t *addr);
+      bt_cm_delete_bonded_devs_and_linkkey((uint8_t *)addr); }
+    rt_kprintf("[BTSLOT] PAIR reject: BR/EDR linkkey cleared\n");
+    return 1;
+}
+
 void bt_multi_on_disconnected(void)
 {
     extern int bt_host_linked(void);

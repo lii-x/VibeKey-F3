@@ -2411,6 +2411,26 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         g_hid_env.bas_ntf_enabled = 1;
         memcpy(g_hid_env.peer_addr, ind->peer_addr.addr, 6);
         rt_kprintf("[BLE HID] connected idx=%d\n", ind->conn_idx);
+
+        /* ★★ 11-26 配对模式只接受新设备：已配对的老设备立即拒绝。
+         * 场景：电脑端没删记录 → 拿旧 LTK 直接连进来占位 → 新设备再也配不上。
+         * 判据：hfp_peer_is_bonded() 为真即"设备侧有它的 bond"（新设备不会有）。
+         * 动作：删 bond（让它必须重配）+ 断开，reason 用 Authentication Failure，
+         *       主机才能意识到旧密钥失效、引导用户重新配对。
+         * 例外：地址属于其它槽位时只拒绝、不删密钥（见 bt_multi_pair_mode_reject）。 */
+        if (bt_multi_is_pairing_window() && hfp_peer_is_bonded(g_hid_env.peer_addr)) {
+            extern int bt_multi_pair_mode_reject(const uint8_t *addr);
+            int cleared = bt_multi_pair_mode_reject(g_hid_env.peer_addr);
+            rt_kprintf("[BTSLOT] PAIR mode: reject already-paired peer (%s), disconnect\n",
+                       cleared ? "bond cleared, must re-pair" : "other slot, bond kept");
+            ble_gap_disconnect_t d;
+            d.conn_idx = ind->conn_idx;
+            d.reason = 0x05;              /* Authentication Failure */
+            ble_gap_disconnect(&d);
+            g_hid_env.is_connected = 0;
+            memset(g_hid_env.peer_addr, 0, 6);
+            break;
+        }
         /* 三设备切换(方案B): 不再有"配对模式拒绝已配对设备"逻辑 —— 每槽独立
          * BD_ADDR, 其他地址下的设备看不见本槽广播, 不存在抢配; 任何设备都可
          * 连接(已配对→直接连/回连, 未配对→走 create_bond/等配对)。 */
