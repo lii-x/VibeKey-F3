@@ -2421,8 +2421,8 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         if (bt_multi_is_pairing_window() && hfp_peer_is_bonded(g_hid_env.peer_addr)) {
             extern int bt_multi_pair_mode_reject(const uint8_t *addr);
             int cleared = bt_multi_pair_mode_reject(g_hid_env.peer_addr);
-            rt_kprintf("[BTSLOT] PAIR mode: reject already-paired peer (%s), disconnect\n",
-                       cleared ? "bond cleared, must re-pair" : "other slot, bond kept");
+            rt_kprintf("[BTSLOT] PAIR mode: bonded peer -> clear bond & disconnect, "
+                       "let it re-pair (%s)\n", cleared ? "cleared" : "nothing to clear");
             ble_gap_disconnect_t d;
             d.conn_idx = ind->conn_idx;
             d.reason = 0x05;              /* Authentication Failure */

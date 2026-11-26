@@ -664,13 +664,19 @@ void bt_multi_set_white_list(void)
 int bt_multi_pair_mode_reject(const uint8_t *addr)
 {
     if (!addr) return 0;
+    /* ★ 11-26 修正：不再对"该地址也被其它槽位记录"做例外。
+     * 原实现只拒绝连接、不删密钥 —— 结果电脑拿着旧密钥每 30s 重连一次、
+     * 被踢一次，**永远配不上**（实测日志一屏几十次 reject）。
+     * 配对模式的本意就是"重新绑定"，所以这里一律清掉它的 bond：
+     * 清完之后下一次连接就是"未配对"状态，才会真正走配对流程。 */
     for (int i = 0; i < BT_SLOT_NUM; i++) {
         uint8_t a[6];
         if ((i + 1) != g_cur_slot && bt_slot_get_addr((uint8_t)(i + 1), a) &&
             memcmp(a, addr, 6) == 0) {
-            rt_kprintf("[BTSLOT] PAIR reject: %02x:%02x:%02x:%02x:%02x:%02x belongs to slot%d, keep bond\n",
+            rt_kprintf("[BTSLOT] PAIR reject: clear bond of %02x:%02x:%02x:%02x:%02x:%02x "
+                       "(also recorded in slot%d, that record becomes stale)\n",
                        addr[5], addr[4], addr[3], addr[2], addr[1], addr[0], i + 1);
-            return 0;
+            break;
         }
     }
     {
