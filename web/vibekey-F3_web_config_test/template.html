@@ -150,6 +150,13 @@
              写入时恒发 bt_en_flags=0x03。本卡片按槽独立，随「写入」下发。 -->
         <div class="bthid-row">
           <div class="bthid-card">
+            <div class="bthid-title">蓝牙:</div>
+            <div class="bthid-pills">
+              <button class="bthid-pill" id="btClassicBtn" onclick="toggleBtFlag(1)" disabled>BR/EDR</button>
+              <button class="bthid-pill" id="btLeBtn" onclick="toggleBtFlag(2)" disabled>BLE</button>
+            </div>
+          </div>
+          <div class="bthid-card">
             <div class="bthid-title">HID 通道:</div>
             <div class="bthid-pills">
               <button class="bthid-pill" id="hidBleBtn" onclick="setHidTransport(0)" disabled>BLE</button>

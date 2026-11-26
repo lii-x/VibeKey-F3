@@ -1043,7 +1043,11 @@ async function readConfig() {
         const t = dv.getUint8(324);
         config.hid_transport = (t === 0) ? 0 : 1;
     }
-    /* 11-25: 蓝牙开关已固定全开，读回的 bt_en_flags 不再使用（字段保留在协议里） */
+    if (has(329)) {
+        const f = dv.getUint8(328);
+        /* 0xFF(擦除态)/越界按全开处理，与固件侧兜底一致 */
+        config.bt_en_flags = (f <= 3) ? f : 3;
+    }
 
     // ---- 同步头部/摇一摇的 UI 控件（键块由 renderKeys 统一渲染）----
     const _amMode = document.getElementById('airMouseMode'); if (_amMode) _amMode.value = config.air_mouse_mode;
@@ -1077,20 +1081,38 @@ async function readConfig() {
 // ============================================================
 function bthidBtns() {
   return {
+    classic: document.getElementById('btClassicBtn'),
+    ble:     document.getElementById('btLeBtn'),
     hidBle:  document.getElementById('hidBleBtn'),
     hidCls:  document.getElementById('hidClsBtn'),
   };
 }
 
-/* 11-25: 蓝牙开关已移除（固定全开、不可改），这里只维护 HID 通道 */
+/* 11-26: 测试版恢复蓝牙开关（正式版/上位机不提供，固件按槽读取） */
 function updateBtHidUI() {
   const b = bthidBtns();
+  const on = (el, flag) => {
+    if (!el) return;
+    el.classList.toggle('on', flag);
+    el.classList.toggle('off', !flag);
+    el.disabled = !port;
+  };
+  on(b.classic, (config.bt_en_flags & 1) !== 0);
+  on(b.ble,     (config.bt_en_flags & 2) !== 0);
   if (b.hidBle) { b.hidBle.classList.toggle('on', config.hid_transport === 0);
                   b.hidBle.classList.toggle('off', config.hid_transport !== 0);
                   b.hidBle.disabled = !port; }
   if (b.hidCls) { b.hidCls.classList.toggle('on', config.hid_transport === 1);
                   b.hidCls.classList.toggle('off', config.hid_transport !== 1);
                   b.hidCls.disabled = !port; }
+}
+
+function toggleBtFlag(bit) {
+  config.bt_en_flags = (config.bt_en_flags & bit) ? (config.bt_en_flags & ~bit)
+                                                  : (config.bt_en_flags | bit);
+  updateBtHidUI();
+  log('蓝牙开关: BR/EDR=' + ((config.bt_en_flags & 1) ? '开' : '关') +
+      ' BLE=' + ((config.bt_en_flags & 2) ? '开' : '关') + '（写入后生效，重启设备）', 'info');
 }
 
 function setHidTransport(v) {
@@ -1189,9 +1211,8 @@ async function writeConfig() {
 
     // 315: HID 通道（0=BLE 1=BR/EDR）  316: 蓝牙开关位（bit0 经典 bit1 BLE）
     payload[315] = config.hid_transport & 0xFF;
-    /* ★ 11-25 蓝牙开关已从界面移除：两套协议栈固定全开（0x03），不允许用户关闭。
-     * 恒发 0x03 可把历史上被写成 0 的槽位一并纠正。 */
-    payload[316] = 0x03;
+    /* 11-26 测试版恢复「蓝牙」开关：按界面状态下发 bit0=经典 bit1=BLE */
+    payload[316] = config.bt_en_flags & 0xFF;
 
     /* 11-25 诊断：打印 payload 尾部（[313..316]），确认 hid_transport / bt_en_flags 真的发出去了 */
     log('· payload len=' + payload.length + ' tail=' +
