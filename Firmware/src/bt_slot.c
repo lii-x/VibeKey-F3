@@ -509,22 +509,40 @@ void bt_multi_on_connected(void)
     uint8_t addr[6];
     if (!find_identity_addr(g_hid_env.peer_addr, addr))
         memcpy(addr, g_hid_env.peer_addr, 6);
-    /* 防跨槽污染: 若连接设备已是其他槽位的记录(早期无白名单固件"按C2却被蓝牙1
-     * 抢连"会把蓝牙1记进slot2, 导致 L2 配对模式误删蓝牙1 bond), 不覆盖当前槽位。
-     * 归属校验交给配对成功(on_paired)与白名单(连接模式只放行本槽位目标)。 */
+    /* ★★ 11-27 修正：跨槽判断改为"本槽优先"。
+     * 背景：需求允许**同一台电脑配多个槽**（电脑端看到多个设备，各自一套配置）。
+     * 原逻辑先查"该地址是否在其它槽"，命中就不记录 —— 于是同一台电脑配了槽1、
+     * 槽2 之后，回槽1 连接时永远被判定 other_slot，日志打出
+     * "(other slot, not recorded)" 这种自相矛盾的提示（槽1 明明有记录，
+     * 白名单也正是拿它填的），而且"槽位记录"这条链路再也刷新不了。
+     * 新逻辑：
+     *   ① 本槽已记录该地址 → 正常，什么都不用做
+     *   ② 本槽为空 / 记录的是别的地址 → 再判断是否属于其它槽：
+     *        属于 → 不记录（防止"按C2却被蓝牙1设备抢连"污染别的槽）
+     *        不属于 → 记录到本槽
+     * 注意：on_paired() 仍然**无条件**写入本槽 —— 配对是用户的明确意图，
+     * 允许同一台设备进入多个槽；只有"被动连接"才需要这道防污染检查。 */
+    uint8_t cur_addr[6];
+    int cur_has = (bt_slot_get_addr(g_cur_slot, cur_addr) &&
+                   memcmp(cur_addr, addr, 6) == 0);
     uint8_t other_slot = 0;
-    for (int i = 0; i < BT_SLOT_NUM; i++) {
-        if (i != g_cur_slot - 1 && g_slot.slot_valid[i] &&
-            memcmp(addr, g_slot.slot_addr[i], 6) == 0) {
-            other_slot = 1;
-            break;
+    const char *note = "";
+    if (cur_has) {
+        note = " (already recorded)";
+    } else {
+        for (int i = 0; i < BT_SLOT_NUM; i++) {
+            if (i != g_cur_slot - 1 && g_slot.slot_valid[i] &&
+                memcmp(addr, g_slot.slot_addr[i], 6) == 0) {
+                other_slot = 1;
+                break;
+            }
         }
+        if (other_slot) note = " (belongs to another slot, not recorded)";
+        else { bt_slot_set_addr(g_cur_slot, addr); note = " (recorded)"; }
     }
-    if (!other_slot)
-        bt_slot_set_addr(g_cur_slot, addr);
     rt_kprintf("[BTSLOT] connected -> slot%d addr %02x:%02x:%02x:%02x:%02x:%02x%s, LED %s\n",
                g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0],
-               other_slot ? " (other slot, not recorded)" : "",
+               note,
                g_hfp_live ? "off (HFP alive)" : "cyan (wait HFP)");
     /* ★ 11-25 经典被配置关闭时**不要闪青**。
      * 青闪的语义是"已连上、等 HFP 建好"；经典关了 HFP 永远不会来，
@@ -580,6 +598,24 @@ paired_led_done:
 void bt_multi_on_br_paired(const uint8_t *addr)
 {
     if (!bt_multi_is_pairing_window()) return;
+
+    /* ★★ 11-27 与 bt_multi_on_connected 同一原则：**本槽已记录时先认账**。
+     * 需求允许同一台电脑配多个槽；此时"该地址也出现在别的槽"是正常状态，
+     * 不能因此把本次连接判成"别人的设备回连"而拒绝记录/不结束窗口。 */
+    {
+        uint8_t cur[6];
+        if (bt_slot_get_addr(g_cur_slot, cur) && memcmp(cur, addr, 6) == 0) {
+            rt_kprintf("[BTSLOT] BR/EDR conn from slot%d's own dev (already recorded), "
+                       "pair window end\n", g_cur_slot);
+            g_cur_mode = BT_MODE_CONNECT;
+            bt_slot_save();
+            bt_multi_led_stop();
+            { extern uint8_t bt_interface_set_scan_mode(uint8_t, uint8_t);
+              bt_interface_set_scan_mode(0, 1); }
+            return;
+        }
+    }
+
     /* 防跨槽污染: 来连设备若已属于其他槽位(已配对设备自动回连, 非新设备),
      * 不记录、不结束窗口 —— 否则手机(配过 BR/EDR 自动回连)会顶替当前空槽,
      * 导致该槽位对应的电脑 HFP 异常(实测: C1/C2 连接不对, 即手机地址被误记)。 */
