@@ -74,6 +74,18 @@ static uint32_t bt_rgb_dim(uint32_t c)
 void bt_slot_init(void)
 {
     rt_flash_read(BT_SLOT_FLASH_ADDR, (uint8_t *)&g_slot, sizeof(g_slot));
+    /* v3 -> v4 迁移：老数据只有 rand_base（每槽地址 = base + 槽偏移），
+     * 把推导结果固化到 self_addr，升级前后地址完全不变（主机侧无感）。 */
+    if (g_slot.magic == BT_SLOT_MAGIC && g_slot.version == 3) {
+        for (int i = 0; i < BT_SLOT_NUM; i++) {
+            memcpy(&g_slot.self_addr[i][0], g_slot.rand_base, 6);
+            g_slot.self_addr[i][0] = (uint8_t)(g_slot.self_addr[i][0] + i);
+        }
+        g_slot.self_valid = 1;
+        g_slot.version = BT_SLOT_VERSION;
+        bt_slot_save();
+        rt_kprintf("[BTSLOT] migrated v3->v4 (self_addr fixed from rand_base)\n");
+    }
     if (g_slot.magic != BT_SLOT_MAGIC || g_slot.version != BT_SLOT_VERSION) {
         rt_kprintf("[BTSLOT] invalid magic, init defaults\n");
         memset(&g_slot, 0, sizeof(g_slot));
@@ -118,6 +130,44 @@ uint8_t bt_slot_get_addr(uint8_t slot, uint8_t *out6)
     if (!g_slot.slot_valid[slot - 1]) return 0;
     if (out6) memcpy(out6, g_slot.slot_addr[slot - 1], 6);
     return 1;
+}
+
+/* ---- v4: 每槽本地地址（本机自己的 BT 地址，不是对端） ---- */
+uint8_t bt_slot_get_self_addr(uint8_t slot, uint8_t *out6)
+{
+    if (slot < 1 || slot > BT_SLOT_NUM) return 0;
+    if (!g_slot.self_valid) return 0;
+    if (out6) memcpy(out6, g_slot.self_addr[slot - 1], 6);
+    return 1;
+}
+
+void bt_slot_set_self_addr(uint8_t slot, const uint8_t *in6)
+{
+    if (slot < 1 || slot > BT_SLOT_NUM || !in6) return;
+    memcpy(g_slot.self_addr[slot - 1], in6, 6);
+    g_slot.self_valid = 1;
+    bt_slot_save();
+}
+
+/* 换址：最低字节 +1。模 256 回绕也不怕 —— 三个槽同时回绕的概率可忽略，
+ * 这里仍做一次碰撞检查，撞上就再 +1。 */
+void bt_slot_rotate_self_addr(uint8_t slot)
+{
+    if (slot < 1 || slot > BT_SLOT_NUM || !g_slot.self_valid) return;
+    uint8_t *a = g_slot.self_addr[slot - 1];
+    uint8_t old = a[0];
+    a[0] = (uint8_t)(a[0] + 1);
+    for (int guard = 0; guard < 4; guard++) {
+        int clash = 0;
+        for (int i = 0; i < BT_SLOT_NUM; i++) {
+            if (i != slot - 1 && memcmp(g_slot.self_addr[i], a, 6) == 0) { clash = 1; break; }
+        }
+        if (!clash) break;
+        a[0] = (uint8_t)(a[0] + 1);
+    }
+    rt_kprintf("[BTSLOT] slot%d 换址 0x%02x->0x%02x, 新本地地址 %02x:%02x:%02x:%02x:%02x:%02x\n",
+               slot, old, a[0], a[5], a[4], a[3], a[2], a[1], a[0]);
+    bt_slot_save();
 }
 
 void bt_slot_set_addr(uint8_t slot, const uint8_t *addr6)
@@ -436,6 +486,22 @@ void bt_multi_boot_select(void)
     g_cur_slot = slot;
     g_cur_mode = mode;
     g_mode_applied = 0;
+
+    /* ★★ 11-28 配对模式换址（对标多槽键盘的做法）：
+     * 老主机手里是"旧地址 + 旧密钥"，地址一换它就根本找不到设备，
+     * 不可能再静默抢占槽位；新设备则以新地址完成配对。
+     * 时机必须在这里（BLE 身份回调 ble_request_public_address 之前）。
+     * 同时清掉本槽的设备记录 —— 旧记录绑的是旧地址，已作废。 */
+    if (mode == BT_MODE_PAIR) {
+        bt_slot_rotate_self_addr(slot);
+        if (g_slot.slot_valid[slot - 1]) {
+            memset(g_slot.slot_addr[slot - 1], 0, 6);
+            g_slot.slot_valid[slot - 1] = 0;
+            bt_slot_save();
+            rt_kprintf("[BTSLOT] slot%d 旧设备记录已清除(地址已变, 旧配对作废)\n", slot);
+        }
+    }
+
     bt_slot_set_last(slot);
 }
 

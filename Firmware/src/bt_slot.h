@@ -14,7 +14,7 @@
 
 #define BT_SLOT_NUM         3
 #define BT_SLOT_MAGIC       0x42534C54   /* "BSLT" */
-#define BT_SLOT_VERSION     3             /* v2(08-26): rand_base 随机基址; v3: TRNG 修复后强制重生成 */
+#define BT_SLOT_VERSION     4             /* v4(11-28): 每槽独立本地地址 self_addr(配对模式换址) */
 #define BT_SLOT_FLASH_ADDR  0x12329000   /* 紧跟 KEY_CONFIG(0x12328000) 之后独立 4KB 页; ⚠️ 绝对地址, 布局变动须同步 */
 
 /* 上电按键选择的蓝牙模式 */
@@ -29,7 +29,13 @@ typedef struct {
     uint8_t  rand_valid;            /* rand_base 随机基址是否已生成(0=未生成) */
     uint8_t  slot_addr[BT_SLOT_NUM][6]; /* 每槽位配对设备 BLE/BR-EDR 地址 */
     uint8_t  rand_base[6];          /* 每设备唯一随机静态地址基址(首次生成后固定,
-                                     * 每槽 = rand_base + 槽偏移, 重启不变) */
+                                     * 旧方案: 每槽 = rand_base + 槽偏移; v4 起仅作首次派生种子) */
+    /* ---- v4 新增: 每槽独立本地地址 ----
+     * 背景(对标多槽键盘的做法): 进入配对模式时给**当前槽**换一个新地址，
+     * 老主机手里是旧地址的密钥，根本找不到设备 ⇒ 不会静默抢占槽位。
+     * 地址一变，由它派生的 IRK 也跟着变，主机侧就是彻底的另一个设备。 */
+    uint8_t  self_valid;                  /* self_addr 是否已生成 */
+    uint8_t  self_addr[BT_SLOT_NUM][6];   /* 每槽本地(BLE/BR-EDR 共用)地址 */
 } bt_slot_storage_t;
 
 /* ---- 存储层 ---- */
@@ -38,6 +44,10 @@ void bt_slot_save(void);
 uint8_t bt_slot_get_last(void);     /* 返回 1~3 */
 void bt_slot_set_last(uint8_t slot);
 uint8_t bt_slot_get_addr(uint8_t slot, uint8_t *out6);  /* 返回 1=有效 0=空 */
+/* v4: 每槽本地地址（不是对端地址，是本机自己的 BT 地址） */
+uint8_t bt_slot_get_self_addr(uint8_t slot, uint8_t *out6);   /* 1=已生成 */
+void    bt_slot_set_self_addr(uint8_t slot, const uint8_t *in6);
+void    bt_slot_rotate_self_addr(uint8_t slot);               /* 换址: 最低字节 +1, 落盘 */
 void bt_slot_set_addr(uint8_t slot, const uint8_t *addr6);
 void bt_slot_clear(uint8_t slot);
 uint8_t bt_slot_get_rand_base(uint8_t *out6);   /* 返回 1=已生成 0=未生成 */

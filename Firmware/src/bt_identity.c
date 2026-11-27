@@ -96,19 +96,27 @@ static void btid_ensure_rand_base(uint8_t base[6])
 
 ble_common_update_type_t ble_request_public_address(bd_addr_t *addr)
 {
-    uint8_t base[6] = {0};
     uint8_t slot = bt_multi_get_slot();   /* 1..3, boot 时已定 */
 
     if (slot < 1 || slot > BT_SLOT_NUM)
         slot = 1;
 
-    btid_ensure_rand_base(base);
-    /* 最低字节偏移: +0/+1/+2 模 256 必互异(即使进位回绕也互异) */
-    base[0] = (uint8_t)(base[0] + (slot - 1));
+    /* ★★ 11-28 v4: 地址改为**每槽存一份**（不再是 base + 偏移实时计算）。
+     * 原因：进入配对模式时要把本槽地址换掉，让老主机找不到设备（对标多槽键盘）。
+     * 首次使用（升级迁移已补，或全新设备）才用 rand_base 派生一次并固化。 */
+    uint8_t a[6] = {0};
+    if (!bt_slot_get_self_addr(slot, a)) {
+        uint8_t base[6] = {0};
+        btid_ensure_rand_base(base);
+        memcpy(a, base, 6);
+        a[0] = (uint8_t)(a[0] + (slot - 1));   /* +0/+1/+2 模 256 必互异 */
+        bt_slot_set_self_addr(slot, a);
+        rt_kprintf("[BTID] slot%d self addr 首次生成\n", slot);
+    }
 
-    memcpy(addr->addr, base, 6);
+    memcpy(addr->addr, a, 6);
     rt_kprintf("[BTID] slot%d public addr %02x:%02x:%02x:%02x:%02x:%02x\n",
-               slot, base[5], base[4], base[3], base[2], base[1], base[0]);
+               slot, a[5], a[4], a[3], a[2], a[1], a[0]);
     return BLE_UPDATE_ALWAYS;
 }
 
@@ -134,8 +142,12 @@ ble_common_update_type_t ble_request_local_irk(ble_gap_sec_key_t *local_irk)
 
     if (slot < 1 || slot > BT_SLOT_NUM)
         slot = 1;
-    btid_ensure_rand_base(base);
-    base[0] = (uint8_t)(base[0] + (slot - 1));
+    /* ★ 11-28: IRK 改为从**本槽自己的地址**派生 —— 地址一换 IRK 跟着换，
+     * 主机侧看到的就是彻底另一个设备（bond 不会串）。 */
+    if (!bt_slot_get_self_addr(slot, base)) {
+        btid_ensure_rand_base(base);
+        base[0] = (uint8_t)(base[0] + (slot - 1));
+    }
 
     for (int i = 0; i < GAP_KEY_LEN; i++)
         local_irk->key[i] = (uint8_t)(base[i % 6] ^ pat[i]);
