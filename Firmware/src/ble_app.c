@@ -488,6 +488,31 @@ uint8_t ble_app_hfp_connected(void)
 /* 查询 peer_addr 是否已在已配对设备列表中（区分首次配对 vs 重连/重启）。
  * 已配对 → 设备主动发起 HFP（重连场景，手机不会主动来连 HFP）；
  * 未配对 → 开 page scan 等手机配对时主动建立经典蓝牙链路（首次配对场景）。*/
+/* ★★ 11-27 诊断：打印 SDK bond 表全貌。
+ * 目的：验证"同一台电脑在不同槽位配对时会互相覆盖"这一判断 ——
+ *       bond 表只按对端地址索引（结构体里没有本地地址维度），
+ *       所以同一 PC 配第二个槽时，旧槽的密钥应当被顶掉。
+ * 用法：刷入后分别用槽1、槽2 配同一台电脑，对比两次日志的 [BOND] 段。
+ * 看完可整段删除（无副作用，只读）。 */
+void bt_dump_bonds(const char *tag)
+{
+    extern conn_manager_pair_dev_t g_bond_info;
+    rt_kprintf("[BOND] ==== %s ====\n", tag ? tag : "");
+    int shown = 0;
+    for (int i = 0; i < MAX_PAIR_DEV; i++) {
+        if (!g_bond_info.priority[i]) continue;
+        const uint8_t *a = g_bond_info.peer_addr[i].addr.addr;
+        rt_kprintf("[BOND] #%d pri=%d type=%d addr=%02x:%02x:%02x:%02x:%02x:%02x "
+                   "ltk=%d auth=%d\n",
+                   i, g_bond_info.priority[i], g_bond_info.peer_addr[i].addr_type,
+                   a[5], a[4], a[3], a[2], a[1], a[0],
+                   (int)g_bond_info.ltk_present[i], (int)g_bond_info.auth[i]);
+        shown++;
+    }
+    if (!shown) rt_kprintf("[BOND] (empty)\n");
+    rt_kprintf("[BOND] ==== end (%d entries, MAX=%d) ====\n", shown, MAX_PAIR_DEV);
+}
+
 static uint8_t hfp_peer_is_bonded(const uint8_t *addr)
 {
     conn_manager_get_bonded_dev_t bonded;
@@ -1388,6 +1413,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             /* 经典蓝牙名: 默认与 BLE 名相同(bt_classic_name 为 NULL 时回落到 local_name) */
             const char *cls_name = bt_classic_name ? bt_classic_name : local_name;
             bt_interface_set_local_name(strlen(cls_name), (void *)cls_name);
+            { extern void bt_dump_bonds(const char *); bt_dump_bonds("BT stack ready"); }
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
                   cls_name, local_name);
             /* ★ 11-24 按槽位开关决定是否拉起经典蓝牙。
@@ -2412,6 +2438,7 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         g_hid_env.bas_ntf_enabled = 1;
         memcpy(g_hid_env.peer_addr, ind->peer_addr.addr, 6);
         rt_kprintf("[BLE HID] connected idx=%d\n", ind->conn_idx);
+        { extern void bt_dump_bonds(const char *); bt_dump_bonds("BLE connected"); }
 
         /* ★ 11-26 最终定案（用户选择）：配对模式对老设备**不打断**。
          * 曾经试过两版"拒绝/清密钥"方案，都会让老设备被踢一次再重配，用户不接受。
@@ -2617,6 +2644,7 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
     }
     case CONNECTION_MANAGER_PAIRING_SUCCEED: {   /* BLE 配对成功(新设备绑定) */
         rt_kprintf("[BLE HID] pairing succeeded (slot%d)\n", bt_multi_get_slot());
+        bt_dump_bonds("after pairing");
         /* 三设备切换: 把新配对设备地址记录到当前槽位 + 熄灭指示 */
         bt_multi_on_paired();
         /* 配对完成 = 配对窗口结束: 恢复经典蓝牙 page scan(可被新设备 BR/EDR
