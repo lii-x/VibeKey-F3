@@ -514,6 +514,65 @@ void bt_dump_bonds(const char *tag)
     rt_kprintf("[BOND] ==== end (%d entries, MAX=%d) ====\n", shown, MAX_PAIR_DEV);
 }
 
+/* ★★ 11-27 按槽恢复经典密钥（同一电脑多槽场景的关键一步）。
+ *
+ * 背景：经典 link key 在控制器里**只按对端地址存一份**，同一台电脑配了槽1、
+ * 槽2 后，控制器里只剩最后配对那一槽的 key —— 换槽回连必然认证失败
+ * （实测：classic_bond=YES 但无 ENCRYPTION_IND，30 秒后被电脑断开，再弹配对）。
+ *
+ * BLE 侧不受影响：bond 表每条带 local_irk，协议栈能按本地身份区分，多条并存。
+ *
+ * 解法：经典 key 本来就是**从 BLE LTK 经 CTKD 派生**的（日志 `ilk to lk`）。
+ * 只要在开机选定槽位后，找到"本槽对应的那条 bond"，重新派生一次写回控制器，
+ * 经典密钥就自动变成这一槽的正确值 —— 不需要读出/保存明文密钥。
+ *
+ * 怎么精确找到本槽的 bond：`ble_get_local_irk()` 拿到当前本地 IRK，
+ * 与 bond 表里每条 `local_irk[i]` 比对（同一台电脑的多条记录，IRK 各不相同），
+ * 再加对端地址匹配，双重确认。
+ */
+static uint8_t g_cls_key_synced = 0;   /* 本次上电是否已同步过（避免重复派生） */
+
+void ble_app_sync_classic_key(const char *why)
+{
+    extern uint8_t bt_multi_get_slot(void);
+    extern uint8_t bt_slot_get_addr(uint8_t slot, uint8_t *out6);
+    extern conn_manager_pair_dev_t g_bond_info;
+    extern uint8_t key_config_bt_flags(void);
+
+    if (!(key_config_bt_flags() & KEY_CONFIG_BT_CLASSIC_EN)) return;  /* 经典关着, 不用管 */
+    if (g_cls_key_synced) return;
+
+    uint8_t slot = bt_multi_get_slot();
+    uint8_t peer[6];
+    if (!bt_slot_get_addr(slot, peer)) {
+        rt_kprintf("[CLS KEY] slot%d 无记录, 跳过经典密钥同步 (%s)\n", slot, why);
+        return;
+    }
+
+    ble_gap_sec_key_t my_irk;
+    rt_memset(&my_irk, 0, sizeof(my_irk));
+    if (ble_get_local_irk(&my_irk) != 0) {
+        rt_kprintf("[CLS KEY] 取本机 IRK 失败, 跳过 (%s)\n", why);
+        return;
+    }
+
+    for (int i = 0; i < MAX_PAIR_DEV; i++) {
+        if (!g_bond_info.priority[i]) continue;
+        if (memcmp(peer, g_bond_info.peer_addr[i].addr.addr, BD_ADDR_LEN) != 0) continue;
+        if (memcmp(my_irk.key, g_bond_info.local_irk[i].key, GAP_KEY_LEN) != 0) continue;
+
+        /* 命中：这条就是"本槽 + 本机地址"对应的 bond */
+        connection_manager_convert_ltk_to_ilk(i);   /* LTK->ILK, H6 回调链式写回经典栈 */
+        g_cls_key_synced = 1;
+        rt_kprintf("[CLS KEY] slot%d 命中 bond#%d (peer %02x:%02x:%02x:%02x:%02x:%02x, IRK 匹配), "
+                   "re-derive classic key (%s)\n",
+                   slot, i, peer[5], peer[4], peer[3], peer[2], peer[1], peer[0], why);
+        return;
+    }
+    rt_kprintf("[CLS KEY] slot%d 没有与本机 IRK 匹配的 bond (共 %d 条), 等配对后再说 (%s)\n",
+               slot, MAX_PAIR_DEV, why);
+}
+
 static uint8_t hfp_peer_is_bonded(const uint8_t *addr)
 {
     conn_manager_get_bonded_dev_t bonded;
@@ -1413,7 +1472,8 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             /* 经典蓝牙名: 默认与 BLE 名相同(bt_classic_name 为 NULL 时回落到 local_name) */
             const char *cls_name = bt_classic_name ? bt_classic_name : local_name;
             bt_interface_set_local_name(strlen(cls_name), (void *)cls_name);
-            { extern void bt_dump_bonds(const char *); bt_dump_bonds("BT stack ready"); }
+            bt_dump_bonds("BT stack ready");
+            ble_app_sync_classic_key("bt stack ready");
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
                   cls_name, local_name);
             /* ★ 11-24 按槽位开关决定是否拉起经典蓝牙。
@@ -2458,7 +2518,8 @@ static int ble_hid_event_handler(uint16_t event_id, uint8_t *data, uint16_t len,
         g_hid_env.bas_ntf_enabled = 1;
         memcpy(g_hid_env.peer_addr, ind->peer_addr.addr, 6);
         rt_kprintf("[BLE HID] connected idx=%d\n", ind->conn_idx);
-        { extern void bt_dump_bonds(const char *); bt_dump_bonds("BLE connected"); }
+        bt_dump_bonds("BLE connected");
+        ble_app_sync_classic_key("ble connected");
 
         /* ★ 11-26 最终定案（用户选择）：配对模式对老设备**不打断**。
          * 曾经试过两版"拒绝/清密钥"方案，都会让老设备被踢一次再重配，用户不接受。
