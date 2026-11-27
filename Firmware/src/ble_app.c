@@ -12,6 +12,7 @@
 #include "att.h"
 #include "ble_led_service.h"
 #include "ble_connection_manager.h"
+#include "bt_connection_manager.h"   /* bt_cm_get_bonded_dev_by_addr() */
 #include "power.h"
 #include "bts2_app_inc.h"
 #include "bts2_app_interface.h"
@@ -576,7 +577,7 @@ static uint8_t  g_hfp_connect_dir = 0;  /* 本次 HFP 由谁建立: 0=设备抢�
  * 写入设备侧(wr lk), 此后主动连才有效。08-07 实测日志 13 定案。 */
 static uint8_t hfp_bt_key_valid(void)
 {
-    extern void *bt_cm_get_bonded_dev_by_addr(uint8_t *addr);
+    /* 类型由 bt_connection_manager.h 提供（原来这里写的是 void*，与头文件冲突） */
     return bt_cm_get_bonded_dev_by_addr(g_hid_env.peer_addr) != NULL;
 }
 
@@ -741,7 +742,6 @@ static int cls_enabled(void)
 static void cls_autoconn_cb(void *param)
 {
     if (!cls_enabled()) return;                               /* 经典已关闭 */
-    extern void *bt_cm_get_bonded_dev_by_addr(uint8_t *addr);
     extern volatile int g_pm_shutting_down;
 
     if (g_pm_shutting_down) return;                           /* 关机中: 不许再拉蓝牙 */
@@ -1504,6 +1504,21 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
                                acl->acl_dir, acl->res, acl->handle);
                     break;      /* 失败: 不计链路时刻、不当作已连接 */
                 }
+                /* ★ 11-27 诊断：经典链路建起来时，协议栈的**经典配对表**里还有没有这台设备。
+                 * 用例：同一台电脑配了槽1/槽2 后回槽1，若这里返回 NULL，
+                 * 说明经典侧记录已被覆盖/清除 —— 与"BLE 有多条 bond、经典只有一条"吻合。 */
+                {
+                    bt_notify_device_base_info_t *d0 = (bt_notify_device_base_info_t *)msg->data;
+                    extern uint8_t bt_multi_get_slot(void);
+                    void *bd = d0 ? bt_cm_get_bonded_dev_by_addr(d0->mac.addr) : NULL;
+                    rt_kprintf("[CLS BOND-DIAG] slot%d peer=%02x:%02x:%02x:%02x:%02x:%02x "
+                               "classic_bond=%s\n",
+                               bt_multi_get_slot(),
+                               d0 ? d0->mac.addr[5] : 0, d0 ? d0->mac.addr[4] : 0,
+                               d0 ? d0->mac.addr[3] : 0, d0 ? d0->mac.addr[2] : 0,
+                               d0 ? d0->mac.addr[1] : 0, d0 ? d0->mac.addr[0] : 0,
+                               bd ? "YES" : "NO(key lost)");
+                }
                 rt_kprintf("[HID] ACL connected: dir=%d (0=device-init, 1=phone-init)\n",
                     acl->acl_dir);
                 /* ⚠️ 只记录"链路建立时刻"，**不能直接当作连上过**：
@@ -1555,6 +1570,11 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
                         LOG_I("[HID] ACL auth-fail disc reason=0x%02x (keep bt key, wait CTKD renew)", dev->res);
                     }
                 }
+                /* 11-27 诊断：任何 reason 都打一行，便于对照
+                 * 0x19(25)=远端终止(常伴随认证不通过) / 0x05,0x06,0x22=认证类 */
+                if (dev)
+                    rt_kprintf("[CLS BOND-DIAG] ACL down res=0x%02x(%u), auth_fail_cnt=%d\n",
+                               dev->res, dev->res, g_auth_fail_cnt);
                 g_phone_acl_up = 0;   /* 手机来连的 ACL 已断开(或设备主动连的断): 恢复主动连候选 */
                 acl_up_watchdog_stop();   /* ACL 断开, 看门狗无意义 */
             }
