@@ -14,7 +14,7 @@
 
 #define BT_SLOT_NUM         3
 #define BT_SLOT_MAGIC       0x42534C54   /* "BSLT" */
-#define BT_SLOT_VERSION     4             /* v4(11-28): 每槽独立本地地址 self_addr(配对模式换址) */
+#define BT_SLOT_VERSION     5             /* v5(11-28): 换址改为"每槽独占字节位", 序列互不相交 */
 #define BT_SLOT_FLASH_ADDR  0x12329000   /* 紧跟 KEY_CONFIG(0x12328000) 之后独立 4KB 页; ⚠️ 绝对地址, 布局变动须同步 */
 
 /* 上电按键选择的蓝牙模式 */
@@ -35,7 +35,11 @@ typedef struct {
      * 老主机手里是旧地址的密钥，根本找不到设备 ⇒ 不会静默抢占槽位。
      * 地址一变，由它派生的 IRK 也跟着变，主机侧就是彻底的另一个设备。 */
     uint8_t  self_valid;                  /* self_addr 是否已生成 */
-    uint8_t  self_addr[BT_SLOT_NUM][6];   /* 每槽本地(BLE/BR-EDR 共用)地址 */
+    uint8_t  self_addr[BT_SLOT_NUM][6];   /* 每槽本地(BLE/BR-EDR 共用)地址。
+                                           * v5 约定: [1] = 0x10+槽号（每槽独占），
+                                           * [0] = 换址计数器（只有这一字节递增），
+                                           * [5..2] = 设备前缀（三槽相同）。
+                                           * 这样三槽的换址序列各走各的区间，永不交叉。 */
 } bt_slot_storage_t;
 
 /* ---- 存储层 ---- */

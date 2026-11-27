@@ -74,17 +74,38 @@ static uint32_t bt_rgb_dim(uint32_t c)
 void bt_slot_init(void)
 {
     rt_flash_read(BT_SLOT_FLASH_ADDR, (uint8_t *)&g_slot, sizeof(g_slot));
-    /* v3 -> v4 迁移：老数据只有 rand_base（每槽地址 = base + 槽偏移），
-     * 把推导结果固化到 self_addr，升级前后地址完全不变（主机侧无感）。 */
-    if (g_slot.magic == BT_SLOT_MAGIC && g_slot.version == 3) {
+    /* 迁移到 v5：地址布局改为"每槽独占字节位"。
+     * v3(只有 rand_base) / v4(每槽地址但共用倒数第二字节) 都统一重排一次：
+     *   [5..2] 沿用设备前缀，[1] = 0x10 + 槽号，[0] = 换址计数器（从 0 起）
+     * ⚠️ 这会改变本机地址 —— 升级后需要在主机端重新配对一次。
+     * 但这是必要的：旧布局下三槽的换址序列共用同一段数字，早晚撞车。 */
+    if (g_slot.magic == BT_SLOT_MAGIC &&
+        (g_slot.version == 3 || g_slot.version == 4)) {
+        uint8_t tpl[6] = {0};
+        uint8_t oldver = g_slot.version;                 /* 打印用（下面会把 version 改成 5） */
+        if (g_slot.version == 4 && g_slot.self_valid) {
+            memcpy(tpl, g_slot.self_addr[0], 6);      /* 用槽1 现有前缀 */
+        } else {
+            memcpy(tpl, g_slot.rand_base, 6);
+        }
         for (int i = 0; i < BT_SLOT_NUM; i++) {
-            memcpy(&g_slot.self_addr[i][0], g_slot.rand_base, 6);
-            g_slot.self_addr[i][0] = (uint8_t)(g_slot.self_addr[i][0] + i);
+            memcpy(&g_slot.self_addr[i][0], tpl, 6);
+            g_slot.self_addr[i][1] = (uint8_t)(0x10 + (i + 1));  /* 0x11/0x12/0x13 */
+            g_slot.self_addr[i][0] = (uint8_t)i;                 /* 计数器起点错开 */
         }
         g_slot.self_valid = 1;
         g_slot.version = BT_SLOT_VERSION;
         bt_slot_save();
-        rt_kprintf("[BTSLOT] migrated v3->v4 (self_addr fixed from rand_base)\n");
+        rt_kprintf("[BTSLOT] migrated v%d->v5: 每槽独占字节位 "
+                   "(slot1 %02x:%02x:%02x:%02x:%02x:%02x / slot2 %02x:%02x:%02x:%02x:%02x:%02x / "
+                   "slot3 %02x:%02x:%02x:%02x:%02x:%02x)\n",
+                   oldver,
+                   g_slot.self_addr[0][5], g_slot.self_addr[0][4], g_slot.self_addr[0][3],
+                   g_slot.self_addr[0][2], g_slot.self_addr[0][1], g_slot.self_addr[0][0],
+                   g_slot.self_addr[1][5], g_slot.self_addr[1][4], g_slot.self_addr[1][3],
+                   g_slot.self_addr[1][2], g_slot.self_addr[1][1], g_slot.self_addr[1][0],
+                   g_slot.self_addr[2][5], g_slot.self_addr[2][4], g_slot.self_addr[2][3],
+                   g_slot.self_addr[2][2], g_slot.self_addr[2][1], g_slot.self_addr[2][0]);
     }
     if (g_slot.magic != BT_SLOT_MAGIC || g_slot.version != BT_SLOT_VERSION) {
         rt_kprintf("[BTSLOT] invalid magic, init defaults\n");
@@ -156,15 +177,14 @@ void bt_slot_rotate_self_addr(uint8_t slot)
     if (slot < 1 || slot > BT_SLOT_NUM || !g_slot.self_valid) return;
     uint8_t *a = g_slot.self_addr[slot - 1];
     uint8_t old = a[0];
+
+    /* ★ 11-28 v5：只有最低字节是"换址计数器"，倒数第二字节固定为本槽专属
+     * （0x11/0x12/0x13）。三槽的序列各自在自己的字节位上走，永远不会相交 ——
+     * 旧实现三槽共用倒数第二字节，靠"撞槽检查"临时避让，历史序列仍会交叉。
+     * 这里顺手把 [1] 钉正，兼容从旧布局升级过来、尚未重排的残留数据。 */
+    a[1] = (uint8_t)(0x10 + slot);
     a[0] = (uint8_t)(a[0] + 1);
-    for (int guard = 0; guard < 4; guard++) {
-        int clash = 0;
-        for (int i = 0; i < BT_SLOT_NUM; i++) {
-            if (i != slot - 1 && memcmp(g_slot.self_addr[i], a, 6) == 0) { clash = 1; break; }
-        }
-        if (!clash) break;
-        a[0] = (uint8_t)(a[0] + 1);
-    }
+
     rt_kprintf("[BTSLOT] slot%d 换址 0x%02x->0x%02x, 新本地地址 %02x:%02x:%02x:%02x:%02x:%02x\n",
                slot, old, a[0], a[5], a[4], a[3], a[2], a[1], a[0]);
     bt_slot_save();
