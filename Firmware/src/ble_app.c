@@ -532,6 +532,65 @@ void bt_dump_bonds(const char *tag)
  */
 static uint8_t g_cls_key_synced = 0;   /* 本次上电是否已同步过（避免重复派生） */
 
+/* ★★ 11-28 死 bond 清理。
+ * 配对模式换址后，旧地址的 bond 条目仍占着表位（MAX_PAIR_DEV=3）。
+ * 多配几次就会把活条目挤掉。这里在栈就绪时做一次垃圾回收：
+ * 用三个槽各自的本机 IRK 去比对每条 bond 的 local_irk，
+ * 一条都不匹配的 ⇒ 属于"已经被换掉的旧地址" ⇒ 清掉。
+ * 安全阀：若一条都匹配不上（说明算法/表示对不上，例如 IRK 字节序不同），
+ * **整轮放弃**，绝不清空 —— 宁可留着死条目，也不能把正常配对全删了。 */
+void ble_app_gc_dead_bonds(void)
+{
+    extern conn_manager_pair_dev_t g_bond_info;
+    extern void btid_derive_irk_for_slot(uint8_t slot, ble_gap_sec_key_t *out);
+
+    ble_gap_sec_key_t irk[BT_SLOT_NUM];
+    uint8_t have[BT_SLOT_NUM];
+    for (int s = 1; s <= BT_SLOT_NUM; s++) {
+        have[s - 1] = bt_slot_get_self_addr((uint8_t)s, NULL);
+        btid_derive_irk_for_slot((uint8_t)s, &irk[s - 1]);
+    }
+
+    int keep = 0, dead = 0;
+    for (int i = 0; i < MAX_PAIR_DEV; i++) {
+        if (!g_bond_info.priority[i]) continue;
+        int m = 0;
+        for (int s = 0; s < BT_SLOT_NUM; s++) {
+            if (have[s] &&
+                memcmp(g_bond_info.local_irk[i].key, irk[s].key, GAP_KEY_LEN) == 0) { m = 1; break; }
+        }
+        if (m) keep++; else dead++;
+    }
+
+    if (dead == 0) return;
+    if (keep == 0) {
+        rt_kprintf("[BOND GC] %d 条全部与本机 IRK 不匹配, 放弃清理(防止误删)\n", dead);
+        return;
+    }
+
+    int cleared = 0;
+    for (int i = 0; i < MAX_PAIR_DEV; i++) {
+        if (!g_bond_info.priority[i]) continue;
+        int m = 0;
+        for (int s = 0; s < BT_SLOT_NUM; s++) {
+            if (have[s] &&
+                memcmp(g_bond_info.local_irk[i].key, irk[s].key, GAP_KEY_LEN) == 0) { m = 1; break; }
+        }
+        if (m) continue;
+        const uint8_t *a = g_bond_info.peer_addr[i].addr.addr;
+        rt_kprintf("[BOND GC] 清除死条目 #%d (peer %02x:%02x:%02x:%02x:%02x:%02x, 属已被换掉的旧地址)\n",
+                   i, a[5], a[4], a[3], a[2], a[1], a[0]);
+        g_bond_info.priority[i] = 0;
+        g_bond_info.ltk_present[i] = false;
+        memset(&g_bond_info.ltk[i], 0, sizeof(g_bond_info.ltk[i]));
+        memset(&g_bond_info.local_irk[i], 0, sizeof(g_bond_info.local_irk[i]));
+        memset(&g_bond_info.peer_irk[i], 0, sizeof(g_bond_info.peer_irk[i]));
+        memset(&g_bond_info.peer_addr[i], 0, sizeof(g_bond_info.peer_addr[i]));
+        cleared++;
+    }
+    rt_kprintf("[BOND GC] 本轮清理 %d 条, 保留 %d 条 (MAX=%d)\n", cleared, keep, MAX_PAIR_DEV);
+}
+
 void ble_app_sync_classic_key(const char *why)
 {
     extern uint8_t bt_multi_get_slot(void);
@@ -1473,6 +1532,7 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             const char *cls_name = bt_classic_name ? bt_classic_name : local_name;
             bt_interface_set_local_name(strlen(cls_name), (void *)cls_name);
             bt_dump_bonds("BT stack ready");
+            ble_app_gc_dead_bonds();
             ble_app_sync_classic_key("bt stack ready");
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
                   cls_name, local_name);

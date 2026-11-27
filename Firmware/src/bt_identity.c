@@ -130,6 +130,26 @@ ble_common_update_type_t ble_request_public_address(bd_addr_t *addr)
  * 让 SMP 眼里每个槽是真正不同的本机身份, 避免 bond 冲突/覆盖。
  * 派生: 槽地址(与上面地址一致)+ 固定模式异或, 每槽不同且重启稳定。
  * ========================================================================== */
+/* 供其它模块复用的 IRK 派生（与 ble_request_local_irk 完全同一套算法）。
+ * 用途：判断 bond 表里某一条属于哪个槽 —— 每条 bond 存的是配对当时本机的 IRK，
+ * 拿三个槽各自的 IRK 去比，比不上的就是"换址后遗留的死条目"。 */
+void btid_derive_irk_for_slot(uint8_t slot, ble_gap_sec_key_t *out)
+{
+    static const uint8_t pat[16] = {
+        0x56, 0x69, 0x62, 0x65, 0x4B, 0x65, 0x79, 0x46,
+        0x33, 0x2D, 0x49, 0x52, 0x4B, 0x2D, 0x53, 0x6C
+    };
+    uint8_t base[6] = {0};
+    if (slot < 1 || slot > BT_SLOT_NUM) slot = 1;
+    if (!bt_slot_get_self_addr(slot, base)) {
+        btid_ensure_rand_base(base);
+        base[0] = (uint8_t)(base[0] + (slot - 1));
+    }
+    if (!out) return;
+    for (int i = 0; i < GAP_KEY_LEN; i++)
+        out->key[i] = (uint8_t)(base[i % 6] ^ pat[i]);
+}
+
 ble_common_update_type_t ble_request_local_irk(ble_gap_sec_key_t *local_irk)
 {
     uint8_t base[6] = {0};
