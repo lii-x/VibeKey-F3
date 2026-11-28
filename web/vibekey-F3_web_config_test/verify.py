@@ -64,10 +64,13 @@ if '.sel-pop' not in html and 'sel-pop' not in blocks[-1]:
 
 # 4) index.html 引用的 CSS 必须真实存在(补充68 裸页面的根因就是这条断了)
 for href in re.findall(r'<link rel="stylesheet" href="css/([^"]+)">', html):
-    p = os.path.join(WS, "css", href)
+    # ⚠️ href 带 ?v= 缓存参数(build.py 保留), 拼路径前必须剥掉, 否则 os.path.exists
+    #    永远为 False —— 9 个 CSS 全报"缺失", VERIFY 恒 FAIL, 真问题反而被淹没。
+    href_fs = href.split("?")[0]
+    p = os.path.join(WS, "css", href_fs)
     if not os.path.exists(p) or os.path.getsize(p) == 0:
-        fail.append("css " + href)
-        print("  CSS 缺失或为空:", href)
+        fail.append("css " + href_fs)
+        print("  CSS 缺失或为空:", href_fs)
 print("CSS 引用: %d 个, 全部就位" % len(re.findall(r'<link rel="stylesheet"', html)))
 
 print()

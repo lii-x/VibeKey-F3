@@ -4268,14 +4268,31 @@ function otaCmpVer(a, b) {
   return 0;
 }
 
-// 取固件字节数: 逐条通道试 HEAD, 首个成功即用; 全失败返回 0(UI 显示 "-")。
+// 取固件真实字节数: 逐条通道试 HEAD, 首个成功即用; 全失败返回 0(UI 不显示大小)。
+//
+// ★★ 2026-11-28 实测坑(显示成 799.2 KB 而不是 1.04 MB 的元凶, 别改回去):
+//   浏览器发 HEAD 时会**自动**带 `Accept-Encoding: gzip, deflate, br`(该头在 fetch 里
+//   属于禁止修改的头, 想指定 identity 也改不了), jsDelivr 于是回:
+//       HTTP/1.1 200, Content-Encoding: br, Content-Length: 818377
+//   —— 这是 **br 压缩后**的长度, 不是文件字节数(真实 1,087,568)。
+//   想从 jsDelivr 绕过去也绕不开: `Range: bytes=0-0` 回 206 + `Content-Range: bytes 0-0/818377`,
+//   末尾的总数**依旧是压缩后的值**。所以规则只有两条:
+//     ① 探测顺序把 raw.githubusercontent 提到最前 —— 它对 .bin 不压缩, 返回真实长度
+//        (1,087,568) 且带 access-control-allow-origin: *;
+//     ② 任何通道只要 Content-Encoding 不是 identity/空, 一律跳过 —— 宁可大小空着不显示,
+//        也不能显示一个错的数量(比真实值小 25%, 会让人误判固件是否完整)。
 async function otaHeadSize(rel) {
-  for (let i = 0; i < OTA_MIRRORS.length; i++) {
-    const url = OTA_MIRRORS[i].build(rel);
+  const order = OTA_MIRRORS.slice().sort(function (a, b) {
+    return (b.name === 'GitHub raw' ? 1 : 0) - (a.name === 'GitHub raw' ? 1 : 0);
+  });
+  for (let i = 0; i < order.length; i++) {
+    const url = order[i].build(rel);
     if (!url) continue;
     try {
       const r = await fetch(url, { method: 'HEAD', headers: { 'User-Agent': OTA_UA } });
       if (r.ok) {
+        const enc = String(r.headers.get('Content-Encoding') || '').toLowerCase();
+        if (enc && enc !== 'identity') continue;   // 压缩表示的 Content-Length ≠ 文件大小
         const n = parseInt(r.headers.get('Content-Length') || '0', 10) || 0;
         if (n > 0) return n;
       }
@@ -4345,7 +4362,7 @@ async function otaDownloadRelease(idx) {
         var r = await fetch(url, { headers: { 'User-Agent': OTA_UA }, signal: otaNetAbort.signal });
         if (!r.ok) throw new Error('HTTP ' + r.status);
         if (!r.body || !r.body.getReader) throw new Error('浏览器不支持流式读取');
-        var got = await otaReadStream(r, rel.file);
+        var got = await otaReadStream(r, rel.file, rel.size);
         if (!got) throw new Error('未读取到数据');
         otaProgress = 0; updateOtaUI();
         otaApplyFirmware(rel.file, got, '下载');
@@ -4381,8 +4398,14 @@ async function otaDownloadRelease(idx) {
 }
 
 // 流式读取固件并实时推进进度条
-async function otaReadStream(r, fname) {
-  const total = parseInt(r.headers.get('Content-Length') || '0', 10) || 0;
+// expectBytes: otaHeadSize 探到的真实字节数(可为 0)。用途见下面 Content-Encoding 注释。
+async function otaReadStream(r, fname, expectBytes) {
+  let total = parseInt(r.headers.get('Content-Length') || '0', 10) || 0;
+  /* ★ Content-Encoding 非 identity(jsDelivr 走 br)时, Content-Length 是**压缩后**长度,
+     而 reader 吐出来的是浏览器解压后的字节 ⇒ 拿它当分母会算到 130% 以上, 进度条冲出去。
+     这种情况改用调用方传入的真实字节数; 两者都没有就不报百分比(只是没有进度, 不会算错)。 */
+  const enc = String(r.headers.get('Content-Encoding') || '').toLowerCase();
+  if (enc && enc !== 'identity') total = (expectBytes > 0 ? expectBytes : 0);
   const reader = r.body.getReader();
   const chunks = [];
   let done = 0, lastPct = -1;
@@ -4392,7 +4415,8 @@ async function otaReadStream(r, fname) {
     chunks.push(res.value);
     done += res.value.length;
     if (total > 0) {
-      const pct = Math.floor(done * 100 / total);
+      // 99 封顶: 100% 由传输流程在真正结束时置位, 别让进度条提前满格赖着不动
+      const pct = Math.min(99, Math.floor(done * 100 / total));
       if (pct !== lastPct) { lastPct = pct; otaProgress = pct; updateOtaUI(); }
     }
   }
@@ -4404,9 +4428,13 @@ async function otaReadStream(r, fname) {
 }
 
 // ---------- 渲染 ----------
-function fmtSizeBytes(n) {                     // 对齐 QML fmtSizeBytes
+function fmtSizeBytes(n) {                     // 口径对齐 QML fmtSizeBytes(Main.qml:76)
   // 拿不到字节数时返回空串(而不是 "-"): Gitee 不允许跨域 HEAD, size 常常取不到,
   // 显示 "-" 会和右侧日期粘成一团("- 2026-09-18"), 干脆不显示更干净。
+  // ⚠️ 传进来的 n 必须是**真实文件字节数**: jsDelivr 的 Content-Length 是 br 压缩后长度,
+  //    拿它来算会把 1.04 MB 显示成 799.2 KB(2026-11-28 踩过, 见 otaHeadSize)。
+  // 小数位**故意比 QML 多一位**(MB 2 位 / KB 1 位): QML 全取 1 位时 1.04 与 1.03 MB
+  // 会并成两个 "1.0 MB", 列表里看不出差别; 多一位既有用又不失真, 不会误报。
   if (!n || n <= 0) return '';
   if (n < 1024) return n + ' B';
   if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
