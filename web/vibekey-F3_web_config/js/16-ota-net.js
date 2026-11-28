@@ -123,7 +123,12 @@ var otaFwAutoTried = false; // 设备上线时"列表为空就补拉一次"只�
      ② 请求成功 -> 写缓存;
      ③ 请求失败 -> 用旧缓存兜底(最多 7 天), 至少让界面/红点还有判断依据。
    ⚠️ localStorage 在无痕模式/某些 file:// 场景会抛异常, 一律 try/catch 静默降级。 */
-var OTA_CACHE_KEY = 'vkf3_ota_list_v1';
+// ★ 2026-11-28: key 从 v1 升到 v2。v1 缓存里的 size 是 **br 压缩后长度**(旧口径),
+//   新代码读到缓存就直接用, 根本不会再探测一次 —— 于是修好代码仍显示 799.2 KB。
+//   正式版与测试版同源(同一个 lii-x.github.io), localStorage 共享同一个 key,
+//   所以换 key 必须两套一起换, 否则旧数据会继续污染两边。
+var OTA_CACHE_KEY = 'vkf3_ota_list_v2';
+var OTA_CACHE_SCHEMA = 2;                 // 缓存口径版本: 1=Content-Length(可能被压缩) 2=真实字节
 var OTA_CACHE_TTL_SEC = 1800;             // 30 分钟
 var OTA_CACHE_STALE_MAX_SEC = 7 * 86400;  // 失败兜底最多用 7 天前的缓存
 var OTA_DISMISS_KEY = 'vkf3_ota_notice_dismissed_v1';  // "稍后"忽略的版本号(对齐 fwNoticeDismissed)
@@ -133,11 +138,13 @@ function otaCacheRead(maxAgeSec) {
     const raw = localStorage.getItem(OTA_CACHE_KEY);
     if (!raw) return null;
     const o = JSON.parse(raw);
-    if (!o || !Array.isArray(o.list) || !o.list.length || !o.ts) return null;
+    // 口径不符(schema 旧/缺失) 一律作废: 宁可重新拉一次列表, 也不能把旧口径的 size 当真的用
+    if (!o || o.ver !== OTA_CACHE_SCHEMA) return null;
+    if (!Array.isArray(o.list) || !o.list.length || !o.ts) return null;
     const ageSec = (Date.now() - o.ts) / 1000;
     if (!(ageSec <= maxAgeSec)) return null;
     o.ageSec = ageSec;
-    return o;                     // {ts, ageSec, list}
+    return o;                     // {ver, ts, ageSec, list}
   } catch (e) { return null; }
 }
 function otaCacheWrite(list) {
@@ -146,7 +153,9 @@ function otaCacheWrite(list) {
     const clean = list.map(function (r) {
       return { tag: r.tag, name: r.name, date: r.date, file: r.file, url: r.url, size: r.size, src: r.src };
     });
-    localStorage.setItem(OTA_CACHE_KEY, JSON.stringify({ ts: Date.now(), list: clean }));
+    localStorage.setItem(OTA_CACHE_KEY, JSON.stringify({
+      ver: OTA_CACHE_SCHEMA, ts: Date.now(), list: clean,
+    }));
   } catch (e) { /* 配额满/无痕模式: 不缓存也能用, 只是下次要重新拉 */ }
 }
 function otaDismissedVer() {
