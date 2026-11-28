@@ -256,6 +256,7 @@ static int bt_app_interface_event_handle(uint16_t type, uint16_t event_id, uint8
                                           * 已配对回连时 CTKD 早已派生, 1200ms 足矣(原 3000 偏长致"连得久") */
 #define HFP_RETRY_INTERVAL_MS  2000   /* 重试间隔：给手机 page 建立经典蓝牙链路留时间 */
 static uint8_t hfp_connect_timer;   /* 1=本次 BLE 连接期间已发起过 HFP 连接(防重复发起) */
+static uint8_t g_hfp_conn_phase = 0; /* 0=待改扫描模式 1=已改完, 等待发建链请求 */
 static uint8_t hfp_connect_retry;
 static uint8_t g_hfp_rederive_cnt;  /* 本次 BLE 会话已重派生经典 key 次数(HFP_REDERIVE_MAX 上限) */
 static uint8_t g_hfp_connected;     /* HFP 链路已建立(麦克风可用) */
@@ -1581,14 +1582,21 @@ static void hfp_connect_timer_cb(void *parameter)
     /* ⚠️ 原子获取闩锁(含 g_phone_acl_up 校验): 已有连接在途或手机已来连 → 跳过,
      * 杜绝 mgr 线程与定时器回调并发各发一次连接 → 双连接认证混乱(日志 17)。
      * 连接失败/断开由 PROFILE_DISCONNECTED 清零, 成功保持(已连不重复)。 */
-    if (!hfp_connect_latch_take())
-        return;
+    /* ★★★ 11-28 修正：闩锁只在"第一阶段"获取。
+     * 之前把这段放在相位判断之前，导致第二阶段(50ms 后续期)再进来时
+     * `hfp_connect_latch_take()` 必然失败（闩锁已被第一阶段拿走）→ 直接 return
+     * ⇒ **建链请求从来没发出去**，表现为"经典蓝牙连不上"（1.3.10 实测）。
+     * 第二阶段的闩锁本来就由第一阶段持有，无需重复获取。 */
+    if (g_hfp_conn_phase == 0) {
+        if (!hfp_connect_latch_take())
+            return;
+    }
     /* 已达重试上限：不无脑死循环重试(避免刷屏/耗电), 但也不永久放弃——
      * 复位计数并重新开 page scan 窗口, 等主机来连或下一轮兜底主动连(自愈)。
      * ⚠️ 08-26 整改: 【不再删除 bonded/linkkey】—— 删 key 会让主机以为配对
      * 丢失, 触发重新配对(用户明确不要)。仅复位计数 + 开 page scan 等主机侧。
      * 若主机确实删了配对, 由主机发起配对时 SDK 会正常走首次配对流程。 */
-    if (hfp_connect_retry >= HFP_CONNECT_RETRY_MAX) {
+    if (g_hfp_conn_phase == 0 && hfp_connect_retry >= HFP_CONNECT_RETRY_MAX) {
         rt_kprintf("[BLE HID] HFP retry %d exhausted, keep bond, re-arm page scan\n",
                    HFP_CONNECT_RETRY_MAX);
         hfp_connect_retry = 0;
@@ -1599,8 +1607,24 @@ static void hfp_connect_timer_cb(void *parameter)
         return;
     }
 
+    /* ★★★ 11-28 两条 HCI 命令必须错开：扫描模式 + 经典建链。
+     * 现象（实测）：偶发 `rwip_assert ... ke_state_set line 499` + fatal error，
+     *   崩前日志正是
+     *     45727 bt_interface_set_scan_mode ...
+     *     45727 HFP connect attempt 0
+     *     45750 bt_hfp_hf_connect_request
+     *   —— 两条 HCI 落在同一时刻，控制器状态机被要求做非法转移 ⇒ 断言。
+     *   "有时候崩有时候不崩"就是两命令是否落在同一处理周期里的时序竞争。
+     * 处理：分两步，先改扫描模式，50ms 后再发建链请求（用同一个定时器续期）。 */
+    if (g_hfp_conn_phase == 0) {
+        hfp_connect_timer = 1;
+        vk_set_scan_mode(0, 1);   // 不可被搜索(关 inquiry)，保持可连接(page 开)
+        g_hfp_conn_phase = 1;
+        hfp_retry_schedule_delayed(50);
+        return;
+    }
+    g_hfp_conn_phase = 0;
     hfp_connect_timer = 1;
-    vk_set_scan_mode(0, 1);   // 不可被搜索(关 inquiry)，保持可连接(page 开)
     rt_kprintf("[BLE HID] HFP connect attempt %d -> %02x:%02x:%02x:%02x:%02x:%02x\n",
         hfp_connect_retry,
         g_hid_env.peer_addr[5], g_hid_env.peer_addr[4], g_hid_env.peer_addr[3],
@@ -2595,7 +2619,14 @@ static int conn_param_throttled(void)
 void ble_app_conn_param_tighten(void)
 {
     if (!g_hid_env.is_connected) return;
-    if (conn_param_throttled()) return;   /* 2s 内刚更新过, 跳过(协商风暴防护) */
+    if (conn_param_throttled()) {
+        /* ★ 11-28 可观测：被节流挡掉时留痕。
+         * 场景（用户实测）：空闲放久后拿起，一直"有点小跳"——如果这次收紧正好
+         * 落在 relax 刚发出的 2 秒节流窗内，请求会被**静默丢弃**，链路一直停在
+         * 空闲档（30~40ms），整段使用期都跳。原来这里没有任何日志，根本看不出。 */
+        rt_kprintf("[BLE] param tighten SKIPPED (2s throttle, still idle interval)\n");
+        return;
+    }
     conn_param_throttle_enter();
     ble_gap_update_conn_param(BLE_GAP_CREATE_UPDATE_CONN_PARA(
         g_hid_env.conn_idx, 6, 12, 0, 500));
@@ -2625,9 +2656,18 @@ void ble_app_conn_param_relax(void)
      *
      * 数值换算: interval 单位 1.25ms ⇒ 40 = 50ms, 64 = 80ms。
      * timeout 600 = 6s，远大于 (1+latency)×interval×2 = 160ms，满足规范约束。 */
+    /* ★★ 11-28 实测调整：50~80ms → **30~40ms(24~32)**。
+     * 用户反馈："通道切到 BLE 后，静止久了再拿起来，鼠标跳跳的"。
+     * 原因正是这里：50~80ms 意味着每秒只有 12~20 次连接事件，控制器会把这段时间
+     * 累积的位移在事件到来时**一次性灌出** ⇒ 拾起后 1~2 秒（等 tighten 协商完成）
+     * 光标一跳一跳；而协商本身还要 1~2s 才生效，两个延迟叠加。
+     * 30~40ms 下每秒 25~33 次更新，跳变幅度减半以上，肉眼基本顺；
+     * 功耗代价：唤醒次数从 ~15/s 增到 ~28/s，空闲电流会升一些（原先压到 50~80ms
+     * 是为把 BLE 射频底噪压下去），但换来的是"拿起来就能用"。
+     * 若后续更在意待机电流，可考虑按"空闲时长"分档（前 10s 用 30ms，之后回 60ms）。 */
     ble_gap_update_conn_param(BLE_GAP_CREATE_UPDATE_CONN_PARA(
-        g_hid_env.conn_idx, 40, 64, 0, 600));
-    LOG_I("[BLE] conn param relaxed (idle: 50~80ms, latency 0)");
+        g_hid_env.conn_idx, 24, 32, 0, 600));
+    LOG_I("[BLE] conn param relaxed (idle: 30~40ms, latency 0)");
 }
 
 /* 空闲深睡: 强制放松 BLE 连接间隔(绕过 2s 节流), 削 BLE 射频基线功耗.

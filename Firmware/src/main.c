@@ -1090,14 +1090,17 @@ static void mouse_send_thread(void *param)
          * 此处 10ms 睡眠等待通话结束, 不会空转饿死其他任务.
          * 通话结束 g_sco_active=0 后立即恢复发包(陀螺全程未关, 零延迟跟手). */
         extern volatile uint8_t g_sco_active;
-        if (g_sco_active) {
-            rt_enter_critical();
-            g_pending_dx = 0.0f;
-            g_pending_dy = 0.0f;
-            rt_exit_critical();
-            rt_thread_mdelay(10);
-            continue;
-        }
+        /* ★★ 11-28 用户要求：**通话中不抑制任何通道**（经典 / BLE 都允许移动）。
+         * 历史顾虑（保留在此，出问题好回退）：
+         *   BLE 与 SCO 抢同一套射频资源，通话中持续发鼠标包可能饿死 SCO 上行，
+         *   08-06 实测表现为 "msbc uplink full" 刷屏 + 麦克风无声。
+         * 现有缓解措施（仍然有效）：
+         *   ① 通话开始即调 ble_app_conn_param_sco_quiet()，把 BLE 间隔放到 40~80ms、
+         *      监督超时 32s —— 单位时间占用大幅下降；
+         *   ② 发送线程节拍自适应（BLE+PC 10ms），不会无脑高频。
+         * 若实测出现"通话中鼠标一动、对方就听不清"：
+         *   把本判断恢复成 `if (g_sco_active && transport != CLASSIC) { 丢弃; continue; }`
+         *   或按需把通话期节拍放宽到 25~30ms。 */
         /* 阻塞直到有累积位移(IMU 回调有位移即释放)或断开(air_mouse_stop 释放),
          * 取代原 2ms 轮询 —— 这是连接态空闲能让 HCPU 进 LIGHT/DEEP 的关键.
          * 08-27 看门狗: 改 2s 超时(原永久阻塞), 超时即检查 IMU 心跳(见下). */
@@ -1290,7 +1293,11 @@ static void air_mouse_set_active(int active, int cold)
             rt_pm_request(PM_SLEEP_MODE_LIGHT);
             g_light_held = 1;
         }
-        ble_app_conn_param_tighten();       /* C: 收紧连接参数(低延迟) */
+        /* ★★ 11-28 改走 by_activity：它会**先清掉 2 秒节流**再收紧。
+         * 原来直接调 tighten()，若正好落在空闲 relax 的节流窗内会被静默跳过，
+         * 链路整段使用期停在 30~40ms ⇒ 用户"放久后拿起一直有点小跳"。 */
+        { extern void ble_app_conn_param_by_activity(void);
+          ble_app_conn_param_by_activity(); }   /* C: 收紧连接参数(低延迟, 免节流) */
         /* ★ 10-31: 退出经典链路 Sniff 并禁止再进 —— 否则每帧报文都要等
          * 500ms 级的 sniff 锚点，表现就是"掉帧、跟手差"。空闲分支会恢复。 */
         { extern void ble_app_mouse_sniff_ctl(int); ble_app_mouse_sniff_ctl(1); }
@@ -1716,6 +1723,7 @@ static void shake_reset(void)
 
 static void imu_drdy_cb(const lsm_frame_t *frame)
 {
+    extern ble_hid_env_t g_hid_env;   /* 预收紧判据要用 BLE 连接状态 */
     g_imu_last_frame_tick = rt_tick_get();   /* IMU 帧心跳: 每帧更新(08-27 看门狗用) */
     /* 鼠标故障红闪恢复(08-27): 帧流恢复(看门狗重启成功)且距判停 ≥2s 才清除,
      * 保证红闪至少可见 ~2s; 判停后若帧流未恢复, 本函数不执行, 红闪持续。 */
@@ -1723,6 +1731,33 @@ static void imu_drdy_cb(const lsm_frame_t *frame)
         g_mouse_err = 0;
         bt_multi_set_mouse_error(0);
     }
+    /* ★★ 11-28 空闲态"预收紧"BLE 参数（解决"静止久了拿起来，前 1~2 秒跳变"）。
+     * 原理：按激活键时才调 ble_app_conn_param_tighten()，但 **协商要 1~2 秒才生效**，
+     * 这段时间链路还是空闲的 30~80ms 间隔 ⇒ 控制器把累积位移一次灌出 ⇒ 光标一跳一跳。
+     * 空闲时加速度计仍以 12.5Hz 采样（只是陀螺关了），足够判断"设备被拿起/晃动"。
+     * 一旦检出明显加速度偏离，就提前收紧 —— 等用户真正按键时参数往往已经生效。
+     * 代价：拿动设备（不按键）也会收紧一次，2s 节流 + 空闲后自动 relax，功耗影响很小。 */
+    if (g_imu_lp && g_hid_env.is_connected) {
+        static uint8_t mv_cnt = 0;
+        lsm_data3_t acc_mg;
+        lsm_xl_to_mg(&frame->accel_raw, LSM_XL_FS_4G, &acc_mg);
+        /* 合加速度与 1g 的偏差（mg）。静止时接近 0，拿起/晃动时几十~几百 mg */
+        int32_t mag = (int32_t)acc_mg.x * acc_mg.x + (int32_t)acc_mg.y * acc_mg.y +
+                      (int32_t)acc_mg.z * acc_mg.z;
+        /* |a|^2 与 1000^2 比较：开方太慢，直接用平方判据（阈值 150mg ⇒ 约 1.32e6） */
+        int32_t dev = mag - 1000000;
+        if (dev < 0) dev = -dev;
+        if (dev > 320000) {                  /* ≈ 150mg 偏差 */
+            if (++mv_cnt >= 2) {             /* 连续 2 帧确认，滤掉偶发毛刺 */
+                mv_cnt = 0;
+                extern void ble_app_conn_param_tighten(void);
+                ble_app_conn_param_tighten();   /* 内部 2s 节流 */
+            }
+        } else {
+            mv_cnt = 0;
+        }
+    }
+
     //rt_kprintf("imu_drdy_cb\n");
     lsm_data3_t gyro_mdps;
     lsm_g_to_mdps(&frame->gyro_raw, LSM_G_FS_500DPS, &gyro_mdps);
