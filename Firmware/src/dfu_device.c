@@ -46,7 +46,7 @@
 
 /* 设备身份信息（App 端握手据此确认是 VibeKey-F3）。版本号随发布 bump。 */
 #define VIBEKEY_MODEL      "VibeKey-F3"
-#define VIBEKEY_FW_VERSION "1.3.30"
+#define VIBEKEY_FW_VERSION "1.3.11"
 
 /* 启动日志里打印版本，刷机后一眼确认跑的是哪一版（避免刷错镜像还以为是新代码） */
 const char *vk_fw_version(void) { return VIBEKEY_FW_VERSION; }
