@@ -35,6 +35,8 @@
  * ⚠️ 不用 HAL_RNG_Generate: 其 RNG_TIMEOUT_VALUE=2(仅 2ms), TRNG 出数来不及
  * 就超时返回(实测地址走兜底路径, 熵不足)。这里手动: 开时钟→复位→先 seed→
  * 两次 rand, 每步等 STAT 置位, 超时放宽到 50ms。成功返回 1。 */
+uint8_t btid_rand8(void);   /* 前向声明：下面的地址/IRK 生成会用到 */
+
 static uint8_t btid_trng_rand6(uint8_t out[6])
 {
     uint32_t r0 = 0, r1 = 0;
@@ -109,7 +111,11 @@ ble_common_update_type_t ble_request_public_address(bd_addr_t *addr)
         uint8_t base[6] = {0};
         btid_ensure_rand_base(base);
         memcpy(a, base, 6);
-        a[0] = (uint8_t)(a[0] + (slot - 1));   /* +0/+1/+2 模 256 必互异 */
+        /* ★ 11-28 v5：布局为 [1]=0x10+槽号(独占) / [0]=换址计数器。
+         * 计数器起点必须随机 —— 若固定从 0 起，设备间唯一性只剩 [5..2]
+         * 四个字节(30 位有效熵)，万级出货撞车概率约 4.7%。 */
+        a[1] = (uint8_t)(0x10 + slot);
+        a[0] = btid_rand8();
         bt_slot_set_self_addr(slot, a);
         rt_kprintf("[BTID] slot%d self addr 首次生成\n", slot);
     }
@@ -130,6 +136,16 @@ ble_common_update_type_t ble_request_public_address(bd_addr_t *addr)
  * 让 SMP 眼里每个槽是真正不同的本机身份, 避免 bond 冲突/覆盖。
  * 派生: 槽地址(与上面地址一致)+ 固定模式异或, 每槽不同且重启稳定。
  * ========================================================================== */
+/* 取 1 字节真随机（TRNG）；失败时退回 tick 混合。
+ * 用途：每槽地址的"换址计数器"初始值 —— 若从 0 开始，设备间唯一性只剩
+ * 4 个随机字节（30 位有效熵），万级出货约 4.7% 撞车；随机起点可补 8 位。 */
+uint8_t btid_rand8(void)
+{
+    uint8_t b[6] = {0};
+    if (btid_trng_rand6(b)) return b[0];
+    return (uint8_t)((uint32_t)rt_tick_get() ^ 0x5A);
+}
+
 /* 供其它模块复用的 IRK 派生（与 ble_request_local_irk 完全同一套算法）。
  * 用途：判断 bond 表里某一条属于哪个槽 —— 每条 bond 存的是配对当时本机的 IRK，
  * 拿三个槽各自的 IRK 去比，比不上的就是"换址后遗留的死条目"。 */
@@ -162,8 +178,13 @@ ble_common_update_type_t ble_request_local_irk(ble_gap_sec_key_t *local_irk)
 
     if (slot < 1 || slot > BT_SLOT_NUM)
         slot = 1;
-    /* ★ 11-28: IRK 改为从**本槽自己的地址**派生 —— 地址一换 IRK 跟着换，
-     * 主机侧看到的就是彻底另一个设备（bond 不会串）。 */
+    /* ★★★ 11-28 实测结论：IRK **必须跟着本地地址变**。
+     * 曾试过"IRK 按槽固定"（想让协议栈原地更新条目、避免新增），结果：
+     *   地址换了但 IRK 不变 ⇒ 主机侧认出"这台我已经配过"⇒ 拒绝重新绑定，
+     *   日志稳定复现 `GAPC_PAIRING_FAILED 120`（配对走到 IRK 交换后失败）。
+     * 恢复成"地址变、IRK 跟着变"以后，主机会当成新设备正常绑定。
+     * 代价：同槽反复配对会在 bond 表里新增条目（表 3 个位置）——
+     *   由 bt_multi_apply_mode 的"表满且全是同一设备就整体清空"兜底。 */
     if (!bt_slot_get_self_addr(slot, base)) {
         btid_ensure_rand_base(base);
         base[0] = (uint8_t)(base[0] + (slot - 1));

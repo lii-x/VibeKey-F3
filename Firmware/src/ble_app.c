@@ -269,9 +269,14 @@ static uint8_t g_hfp_connected;     /* HFP 链路已建立(麦克风可用) */
 int bt_host_linked(void)
 {
     extern unsigned char classic_hid_linked(void);
+    extern unsigned char classic_hid_ready(void);
     if (g_hid_env.is_connected) return 1;   /* BLE(PC/上位机)已连 */
     if (g_hfp_connected) return 1;          /* 经典 ACL + HFP 已连(手机主路径) */
-    return classic_hid_linked() ? 1 : 0;    /* 经典 HID 通道已建 */
+    if (classic_hid_linked()) return 1;     /* 经典 HID 通道已建 */
+    /* ★ 11-28：经典 ACL 在就说明主机连着，只是 HID 通道的"已连接"事件没到
+     * （睡眠前就开着，唤醒后主机不会重开 ⇒ 事件不再发）。
+     * 不加这条会误判成"没连"，槽位灯一直蓝闪（实测用户反馈）。 */
+    return classic_hid_ready() ? 1 : 0;
 }
 
 /* 经典链路对端地址（6 字节，小端）。由 BT_NOTIFY_HF_PROFILE_CONNECTED 事件填充。
@@ -399,6 +404,10 @@ static uint8_t g_boot_first_connect = 0;  /* 上电后是否已发生过 BLE 连
  * 若 link policy 没 sniff bit 则 sniff 永不进入。此处显式补上。
  * 注意：有 SCO 连接时 sniff 可能进不去（controller 限制），无 SCO 时可生效。 */
 static BTS2S_BD_ADDR g_sniff_bd;   /* 静态生存期：定时器回调时仍有效 */
+/* ★ 11-29 诊断开关：0 = 完全不请求 sniff（链路保持 active）。
+ * 用途：区分"Mac 上的一点点掉帧"是不是嗅探锚点造成的。
+ * 串口 `sniff 0` 关闭 / `sniff 1` 恢复。 */
+uint8_t g_sniff_policy_enable = 1;
 static rt_timer_t g_sniff_timer = RT_NULL;
 static void hfp_sniff_timer_cb(void *param)
 {
@@ -408,17 +417,28 @@ static void hfp_sniff_timer_cb(void *param)
      *   sco=1  ⇒ 通话中，controller 不允许 sniff（正常现象，通完会重发）
      *   idle 为 0 相关的判断不在本函数，但可对照 air_mouse 日志看当时是否活跃
      * 若这里一切正常却始终进不去，就是**对端(手机/PC)拒绝了 HCI Sniff_Mode**。 */
+    if (!g_sniff_policy_enable) {
+        rt_kprintf("[HID] sniff req skipped (policy disabled by cmd)\n");
+        return;
+    }
     LOG_I("[HID] sniff req: hfp=%d sco=%d", g_hfp_connected, g_sco_active);
     /* ① 写 link policy：出向连接禁用 role switch(0x0004=sniff only)，保持 master。
      * sniff bit 确保链路可进 sniff（若 SCO 未活动时 sniff 可生效）。 */
     bt_wr_link_policy(&g_sniff_bd, 0x0004);
     /* ② 设置 DM 策略 KEEP_SNIFF_INTERVAL：1s 空闲即进 sniff（SDK 默认 5s，太慢）。
-     * interval=798(~499ms), attempt=4, timeout=1 */
+     * ★★ 11-28 把 interval 从 798(499ms) 压到 160(100ms)。
+     * 原因（用户实测）：「划完了光标才跟过来」且**时好时坏**——取决于本次开机手机
+     * 有没有让链路进 sniff。499ms 的嗅探间隔意味着：
+     *   · 报文要等下一个锚点才能发 → 最多延迟半秒；
+     *   · 连"退出 sniff"这条 LMP 指令本身也要等锚点送达 → 越等越久。
+     * 压到 100ms 后，最坏延迟降到 1/5，退出指令也能及时送达；
+     * 代价只是空闲时唤醒 2 次/秒 → 10 次/秒（鼠标使用期本来就退出 sniff）。 */
+    #define VK_SNIFF_INTERVAL_SLOTS  160   /* 160 × 0.625ms = 100ms */
     hcia_wr_lp_settings_keep_sniff_interval(&g_sniff_bd, 0x0004,
-        1, 798, 798, 4, 1, NULL);
+        1, VK_SNIFF_INTERVAL_SLOTS, VK_SNIFF_INTERVAL_SLOTS, 4, 1, NULL);
     /* ③ 主动请求 sniff（立即进入，不等 1s 空闲）。
      * 注意：有 SCO 连接时 sniff 可能进不去（controller 限制），但无 SCO 时可生效。 */
-    bt_etner_sniff_mode(&g_sniff_bd, 798, 4);
+    bt_etner_sniff_mode(&g_sniff_bd, VK_SNIFF_INTERVAL_SLOTS, 4);
     /* ④ 重试 BLE 连接参数恢复: 按当前活动状态收紧/放宽.
      * 不能无条件 relax——活跃态鼠标被降到 25Hz 会掉帧. */
     ble_app_conn_param_by_activity();
@@ -495,6 +515,42 @@ uint8_t ble_app_hfp_connected(void)
  *       所以同一 PC 配第二个槽时，旧槽的密钥应当被顶掉。
  * 用法：刷入后分别用槽1、槽2 配同一台电脑，对比两次日志的 [BOND] 段。
  * 看完可整段删除（无副作用，只读）。 */
+/* sniff —— 现场开关嗅探（诊断 Mac/PC 上"轻微掉帧"是否由嗅探锚点造成）
+ *   sniff 0  不请求 sniff，链路保持 active（费电但最稳）
+ *   sniff 1  恢复默认策略 */
+static int cmd_sniff(int argc, char **argv)
+{
+    extern uint8_t g_sniff_policy_enable;
+    if (argc > 1) g_sniff_policy_enable = (argv[1][0] != '0');
+    rt_kprintf("[HID] sniff policy = %s\n", g_sniff_policy_enable ? "ON" : "OFF (active)");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_sniff, sniff, enable/disable sniff request: sniff 0|1);
+
+void bt_dump_bonds(const char *tag);   /* 前向声明：下面清空后要打表 */
+
+/* ★★ 11-28 清空全部配对（官方 API，用于恢复"表被占满"的坏状态）。
+ * 场景：早期版本每次换址都新增 bond，同一台电脑可能占满 3 条 ⇒ 新配对报
+ * GAPC_PAIRING_FAILED 120（无空间），连不上。此时只能整体清掉重来。 */
+void bt_bond_clear_all(void)
+{
+    extern uint8_t connection_manager_delete_all_bond(void);
+    extern void bt_cm_delete_bonded_devs(void);
+    uint8_t ret = connection_manager_delete_all_bond();
+    bt_cm_delete_bonded_devs();          /* 经典侧记录一起清 */
+    rt_kprintf("[BOND] 清除全部配对: BLE ret=%d, 经典已清\n", ret);
+    bt_dump_bonds("after clear all");
+}
+
+static int cmd_bondclr(int argc, char **argv)
+{
+    (void)argc; (void)argv;
+    bt_bond_clear_all();
+    rt_kprintf("[BOND] 请在主机端也删除该设备, 然后重新配对\n");
+    return 0;
+}
+MSH_CMD_EXPORT_ALIAS(cmd_bondclr, bondclr, clear ALL bt bonds (recovery));
+
 void bt_dump_bonds(const char *tag)
 {
     extern conn_manager_pair_dev_t g_bond_info;
@@ -1414,9 +1470,14 @@ static void hid_link_sync_start(void)
  * 缓冲区首字节是协议头（DATA|INPUT），栈会剥掉它并把 report_id 作为报文首字节。 */
 void bt_classic_hid_send_mouse_raw(unsigned char buttons, int dx, int dy, int wheel)
 {
-    extern unsigned char classic_hid_linked(void);
-
-    if (!bts2g_app_p || !classic_hid_linked()) return;
+    /* ★★ 11-28 修"唤醒后键盘能用、鼠标/滚轮全废"：
+     * 原来这里要求 classic_hid_linked()，而该标志只由 BT_NOTIFY_HID_PROFILE_CONNECTED
+     * 置位 —— 若通道在睡眠前就是开着的，主机唤醒后不会"重新打开"，事件不会再发，
+     * 标志永远停在 0（实测日志：keyboard 正常、mouse 全丢、kick 连踢 6 次无用）。
+     * 键盘路径本就不检查它（只走 hid_tx_gate 看 ACL），这里对齐：
+     * 真没连时 SDK 会自行丢弃并打 "hid is not connect"，不会出错。 */
+    extern unsigned char classic_hid_ready(void);
+    if (!bts2g_app_p || !classic_hid_ready()) return;
 
     if (dx > 127) dx = 127; else if (dx < -127) dx = -127;
     if (dy > 127) dy = 127; else if (dy < -127) dy = -127;
@@ -1463,7 +1524,44 @@ void bt_classic_hid_send_mouse_raw(unsigned char buttons, int dx, int dy, int wh
      * 带地址的 hid_send_report_req_ext 会按 bd 去内部连接表里查，查不到就打
      * "[U-L]hid is not connect,can't send data" 直接丢弃 —— 实测 PC/手机两端都会踩到
      * （表里明明有连接）。本机只有一路经典 HID，用单连接接口即可，彻底绕开地址匹配。 */
-    hid_send_report_req(bts2g_app_p->phdl, sizeof(msg), msg, TRUE);
+    /* ★★ 11-28 诊断：测量每次提交的耗时 + 实际发包速率。
+     * 背景：手机端"划完才跟过来、但最终位置正确"= 报文被队列攒住晚到。
+     * 需要区分两种成因：
+     *   ① 提交被阻塞（SDK/L2CAP 队列满）→ 单次耗时明显 >10ms，send/s 掉到几十
+     *   ② 提交很快但链路吞吐不够 → 耗时正常，但队列在栈里堆积（这层看不到）
+     * 判读：lag 时若 avg/max 明显 >10ms ⇒ ①；若 avg≈0 且 rate≈100 ⇒ ②，问题在
+     *       对端的轮询/链路参数（角色、sniff、包类型），不在我们这一侧。
+     * 只统计移动报文(buttons/wheel=0)，避免按键诊断打印干扰。 */
+    {
+        static rt_tick_t t_last = 0;
+        static uint32_t  n_win = 0, n_total = 0;
+        static uint32_t  sum_us = 0, max_us = 0;
+        uint32_t t0 = (uint32_t)(rt_tick_get() * 1000000 / RT_TICK_PER_SECOND);
+        hid_send_report_req(bts2g_app_p->phdl, sizeof(msg), msg, TRUE);
+        uint32_t dt = (uint32_t)(rt_tick_get() * 1000000 / RT_TICK_PER_SECOND) - t0;
+
+        if (!buttons && !wheel) {
+            n_total++;
+            n_win++;
+            sum_us += dt;
+            if (dt > max_us) max_us = dt;
+            rt_tick_t now = rt_tick_get();
+            if (t_last == 0) t_last = now;
+            else if ((now - t_last) >= rt_tick_from_millisecond(5000)) {
+                uint32_t secs = (uint32_t)((now - t_last) / RT_TICK_PER_SECOND);
+                if (secs == 0) secs = 1;
+                /* 只在"看起来不正常"时打印：平均耗时 >8ms 或速率 <80/s */
+                uint32_t avg_us = n_win ? (sum_us / n_win) : 0;
+                uint32_t rate = n_win / secs;
+                /* 正常节拍 71Hz（经典 14ms），阈值放宽到 45/s 才报异常 */
+                if (avg_us > 8000 || rate < 45) {
+                    rt_kprintf("[CLS TX] rate=%u/s avg=%uus max=%uus (n=%u)\n",
+                               rate, avg_us, max_us, n_win);
+                }
+                n_win = 0; sum_us = 0; max_us = 0; t_last = now;
+            }
+        }
+    }
 }
 
 static void hfp_connect_timer_cb(void *parameter)
@@ -1532,7 +1630,21 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
             const char *cls_name = bt_classic_name ? bt_classic_name : local_name;
             bt_interface_set_local_name(strlen(cls_name), (void *)cls_name);
             bt_dump_bonds("BT stack ready");
-            ble_app_gc_dead_bonds();
+            /* ★★ 11-28 紧急对照实验：每次开机必崩（bts 线程 / SDP / UNALIGNED），
+             * 暂时停用这两段——它们都**直接写协议栈内部结构**
+             * （gc 写 g_bond_info[]，sync 调 convert_ltk_to_ilk(i)），
+             * 若我们编译用的结构体布局与 SDK 库不一致，就会踩到相邻全局变量，
+             * 表现正是"稍后在别的模块里访问未对齐地址"。
+             * 判据：关掉后不再崩 ⇒ 确认是布局/索引问题，再改成安全实现；
+             *       仍崩 ⇒ 与本组改动无关，继续排查（下一步回退换址/存储 v5）。
+             * 恢复时把下面两行的 #if 0 改回 1 即可。 */
+            /* ★★ 11-28 排障结论：`ble_app_gc_dead_bonds()` 会让设备**每次开机必崩**
+             * （bts 线程 / SDP 收尾 / UFSR UNALIGNED）。它直接 memset 协议栈内部的
+             * `g_bond_info[]` —— 该结构布局是按头文件推断的，一旦与 SDK 库不一致就会
+             * 踩到相邻全局变量，稍后在别的模块暴露成"未对齐访问"。
+             * 已**永久移除**：死条目交给 SDK 自己的 priority 淘汰即可（表满时顶掉最旧），
+             * 不需要我们手动清。功能影响：换址遗留的旧条目会占位，但会被自然淘汰。
+             * 保留 bt_dump_bonds（只读）用于观察。 */
             ble_app_sync_classic_key("bt stack ready");
             LOG_I("[HID] BT stack ready, classic_name=\"%s\" ble_name=%s",
                   cls_name, local_name);
@@ -1641,6 +1753,20 @@ static int bt_hid_service_notify_event_handle(bt_app_notify_data_t *msg)
                 }
                 rt_kprintf("[HID] ACL connected: dir=%d (0=device-init, 1=phone-init)\n",
                     acl->acl_dir);
+                /* ★★ 11-28 修"唤醒后蓝灯常闪 + 空中鼠标/滚轮不动"：
+                 * 空中鼠标与编码器的启动挂在两处 —— BLE CONNECTED 与
+                 * BT_NOTIFY_HID_PROFILE_CONNECTED。若睡眠前 HID 通道本来就开着，
+                 * 唤醒后主机不会"重新打开"，该事件不再派发 ⇒ 两处都不触发 ⇒
+                 * IMU 不产帧 ⇒ main.c 看门狗判停 ⇒ LED1 蓝闪（这就是用户看到的
+                 * "鼠标有问题"指示灯），同时空中鼠标彻底不动。
+                 * 经典 ACL 建起来即说明主机在，这里补一次启动
+                 * （air_mouse_start / enc_start 内部幂等，BLE 已连时不会重复）。 */
+                if (!g_hid_env.is_connected) {
+                    extern void air_mouse_start(void);
+                    extern void enc_start(void);
+                    air_mouse_start();
+                    enc_start();
+                }
                 /* ⚠️ 只记录"链路建立时刻"，**不能直接当作连上过**：
                  * 日志实证 `[HID] ACL connected` 每次都会出现，但 HFP/HID 紧接着失败
                  * （res:c / confirmation connect failed），几百毫秒就断。

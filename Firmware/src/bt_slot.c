@@ -28,6 +28,27 @@ extern ble_hid_env_t g_hid_env;
 
 static bt_slot_storage_t g_slot;
 
+/* 待删除经典 linkkey 的对端地址（延迟 5s 执行，避开 SDP 初始化） */
+static uint8_t g_cls_key_del_addr[6];
+static volatile uint8_t g_cls_key_del_pending = 0;
+static rt_timer_t g_cls_key_del_timer = RT_NULL;
+
+static void cls_key_del_cb(void *param)
+{
+    (void)param;
+    if (!g_cls_key_del_pending) return;
+    g_cls_key_del_pending = 0;
+    extern void bt_cm_delete_bonded_devs_and_linkkey(uint8_t *addr);
+    bt_cm_delete_bonded_devs_and_linkkey(g_cls_key_del_addr);
+    rt_kprintf("[BTSLOT] 已删除经典 linkkey(%02x:%02x:%02x:%02x:%02x:%02x), 等主机重新配对\n",
+               g_cls_key_del_addr[5], g_cls_key_del_addr[4], g_cls_key_del_addr[3],
+               g_cls_key_del_addr[2], g_cls_key_del_addr[1], g_cls_key_del_addr[0]);
+}
+
+/* 配对模式开机时暂存的"本槽原设备地址"（供栈就绪后精确删 bond 用） */
+static uint8_t g_pair_prev_peer[6];
+static uint8_t g_pair_prev_valid = 0;
+
 /* ---- 当前多设备状态 ---- */
 static uint8_t g_cur_slot  = 1;
 static uint8_t g_cur_mode  = BT_MODE_CONNECT;
@@ -88,11 +109,14 @@ void bt_slot_init(void)
         } else {
             memcpy(tpl, g_slot.rand_base, 6);
         }
-        for (int i = 0; i < BT_SLOT_NUM; i++) {
+        { extern uint8_t btid_rand8(void);
+          for (int i = 0; i < BT_SLOT_NUM; i++) {
             memcpy(&g_slot.self_addr[i][0], tpl, 6);
-            g_slot.self_addr[i][1] = (uint8_t)(0x10 + (i + 1));  /* 0x11/0x12/0x13 */
-            g_slot.self_addr[i][0] = (uint8_t)i;                 /* 计数器起点错开 */
-        }
+            g_slot.self_addr[i][1] = (uint8_t)(0x10 + (i + 1));  /* 0x11/0x12/0x13 独占 */
+            /* 计数器起点用真随机：固定从 0 起会让设备间唯一性只剩 4 字节随机
+             * （30 位有效熵），万级出货撞车约 4.7%；随机起点补到 38 位。 */
+            g_slot.self_addr[i][0] = btid_rand8();
+          } }
         g_slot.self_valid = 1;
         g_slot.version = BT_SLOT_VERSION;
         bt_slot_save();
@@ -400,31 +424,45 @@ uint8_t bt_multi_is_pairing_window(void)
 
 /* 删除当前槽位记录的配对信息: BLE 侧(Connection Manager) + 经典蓝牙侧(linkkey)。
  * 需在 BLE 栈就绪后调用(connection_manager_get_bonded_devices 才有效)。
- * ⚠️ 11-26 起**不再被调用**：配对模式改为非破坏性（见 bt_multi_apply_mode），
- *    这里保留实现仅因其"按槽位删 bond"的逻辑将来可能还要用。 */
-__attribute__((unused)) static void bt_multi_clear_slot_bond(void)
+ * ⚠️ 11-28 重新启用：配对模式再次调用它清本槽 bond（见 bt_multi_apply_mode）。
+ *    只清"本槽记录的那台设备"，不清其它槽的记录。 */
+static void bt_multi_clear_bond_by_addr(uint8_t *addr);
+
+static void bt_multi_clear_slot_bond(void)
 {
     uint8_t addr[6];
+    /* 优先用"配对开机时暂存的原设备地址"——记录已在 boot_select 清掉，
+     * 但 bond 还在，必须拿旧地址去删，否则永远删不到。 */
+    if (g_pair_prev_valid) {
+        memcpy(addr, g_pair_prev_peer, 6);
+        g_pair_prev_valid = 0;
+        rt_kprintf("[BTSLOT] slot%d 用暂存地址删 bond: %02x:%02x:%02x:%02x:%02x:%02x\n",
+                   g_cur_slot, addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
+        bt_multi_clear_bond_by_addr(addr);
+        return;
+    }
     if (!bt_slot_get_addr(g_cur_slot, addr)) {
         rt_kprintf("[BTSLOT] slot%d no bond to clear, wait for pairing\n", g_cur_slot);
         return;
     }
-    /* 防误删保护: 该地址若同时被其他槽位记录(历史跨槽污染), 说明它真正归属别的
-     * 槽位, 只清本槽位记录、绝不删 SDK bond —— 否则 L2 配对会误删蓝牙1的配对。 */
-    {
-        uint8_t dup_other = 0;
-        for (int i = 0; i < BT_SLOT_NUM; i++) {
-            if (i != g_cur_slot - 1 && g_slot.slot_valid[i] &&
-                memcmp(addr, g_slot.slot_addr[i], 6) == 0) {
-                dup_other = 1;
-                break;
-            }
-        }
-        if (dup_other) {
-            rt_kprintf("[BTSLOT] slot%d addr also in other slot (stale record), "
-                       "skip bond delete, clear record only\n", g_cur_slot);
-            bt_slot_clear(g_cur_slot);
-            return;
+    bt_multi_clear_bond_by_addr(addr);
+}
+
+/* 真正的删除动作（原 bt_multi_clear_slot_bond 的主体，改成按地址入参） */
+static void bt_multi_clear_bond_by_addr(uint8_t *addr)
+{
+    /* ★★ 11-28 验证实验：去掉"地址也在别的槽就跳过删除"的保护。
+     * 目标：确认 connection_manager_delete_bond() 到底是
+     *   ① 按 (对端 + 本机身份) 精确删本槽那一条   ← 期望
+     *   ② 把该对端的所有条目一起删掉
+     * 之前这段保护让删除永远不执行，所以这个问题一直没答案。
+     * 现在放行，靠删除前后的 [BOND] 快照判断是 ① 还是 ②。
+     * 若结果是 ②，再改成"仅当表满时才删"或换其它策略。 */
+    for (int i = 0; i < BT_SLOT_NUM; i++) {
+        if (i != g_cur_slot - 1 && g_slot.slot_valid[i] &&
+            memcmp(addr, g_slot.slot_addr[i], 6) == 0) {
+            rt_kprintf("[BTSLOT] 注意: 该地址也在 slot%d 记录中, 仍按实验放行删除\n", i + 1);
+            break;
         }
     }
     /* BLE 侧: 在 bonded 列表中按地址匹配删除(带真实 addr_type) */
@@ -443,10 +481,25 @@ __attribute__((unused)) static void bt_multi_clear_slot_bond(void)
             rt_kprintf("[BTSLOT] slot%d addr not in BLE bonded list (%d devs)\n",
                        g_cur_slot, count);
     }
-    /* 经典蓝牙(BR/EDR HFP)侧: 双模同地址, 一起删 linkkey */
-    extern void bt_cm_delete_bonded_devs_and_linkkey(uint8_t *addr);
-    bt_cm_delete_bonded_devs_and_linkkey(addr);
-    rt_kprintf("[BTSLOT] BR/EDR linkkey cleared (slot%d)\n", g_cur_slot);
+    /* ★★★ 11-28 关键修正：**不再在初始化阶段删经典 linkkey**。
+     * 现象：恢复"删本槽 bond"后，每次开机都固定崩在
+     *   `app addr nvds get 1` 之后 → spp_srv_client_sdp_req 空指针(DACCVIOL 0x68)。
+     * 原因：bt_cm_delete_bonded_devs_and_linkkey() 会动经典的 bond/SDP 记录，
+     *   而本函数在 BLE 初始化后紧接着执行，正好和 SPP 的 SDP 请求撞车，
+     *   把 SDP 客户端句柄清成 NULL。
+     * 处理：这里**只删 BLE 侧 bond**；经典 linkkey 留着 —— 它由
+     *   ble_app_sync_classic_key() 在开机时从 BLE LTK 重新派生并写回，
+     *   效果等价且不碰 SDP 状态。
+     * 代价：经典侧会短暂保留旧 key（用错 key 认证失败→重配），可接受。 */
+    /* ★★★ 11-28 延迟删除经典 linkkey：
+     * 直接在这里删会在 BLE 初始化刚结束时撞上 SPP 的 SDP 请求 → 开机必崩
+     * （spp_srv_client_sdp_req 空指针）。改成**栈完全就绪 5 秒后**删除。
+     * 为什么仍要删：换址后电脑侧没有新地址对应的经典密钥，旧 key 只会让
+     * page 被拒（实测 ACL 建不起来、键盘报文 NOT-READY 全丢）。
+     * 删掉后由主机重新配对经典，双方重新协商 linkkey。 */
+    memcpy(g_cls_key_del_addr, addr, 6);
+    g_cls_key_del_pending = 1;
+    rt_kprintf("[BTSLOT] 经典 linkkey 将在 5s 后删除(避开 SDP 初始化)\n");
 
     bt_slot_clear(g_cur_slot);
 }
@@ -513,6 +566,18 @@ void bt_multi_boot_select(void)
      * 时机必须在这里（BLE 身份回调 ble_request_public_address 之前）。
      * 同时清掉本槽的设备记录 —— 旧记录绑的是旧地址，已作废。 */
     if (mode == BT_MODE_PAIR) {
+        /* ★★ 11-28 顺序修正：清记录之前先把旧设备地址**暂存**下来。
+         * 清 bond 要等 BLE 栈就绪（apply_mode）才能做，那时记录已被清空 ⇒
+         * 原来永远走到 "no bond to clear"（实测两次都是这句）。
+         * 现在存一份到 g_pair_prev_peer，供 apply_mode 精确删除。 */
+        if (g_slot.slot_valid[slot - 1]) {
+            memcpy(g_pair_prev_peer, g_slot.slot_addr[slot - 1], 6);
+            g_pair_prev_valid = 1;
+        }
+        /* ★★★ 11-28 定案：配对模式**必须换址**（用户明确要求）。
+         * 理由：不换址的话，电脑拿着旧记录会直接连上来，配对模式形同虚设。
+         * 换址的代价是"同槽重配会在 bond 表里新增一条"（同对端、新本机身份）；
+         * 由 apply_mode 里的"删本槽旧 bond"来抵消 —— 见 bt_multi_clear_slot_bond()。 */
         bt_slot_rotate_self_addr(slot);
         if (g_slot.slot_valid[slot - 1]) {
             memset(g_slot.slot_addr[slot - 1], 0, 6);
@@ -562,14 +627,52 @@ void bt_multi_apply_mode(void)
     /* 仅显式 L 键配对模式: 清当前槽位 bond(旧设备回连无法认证, 天然防抢配)。
      * C 键连接模式(含空槽)不做任何处理: 空槽也接受已配对设备回连并记录到槽位。 */
     if (g_cur_mode == BT_MODE_PAIR) {
-        /* ★ 11-26 最终定案：配对模式**不再删除任何 bond**。
-         * 理由（用户选择）："老设备连上就直接用，不要打断"。
-         * 之前"进配对模式就清当前槽 bond"会让该设备下次连上必须重配，
-         * 等同于把人踢下线一次。
-         * 现在配对模式的语义收敛为：
-         *   ① BLE 广播关闭白名单（任何设备可连） ② 经典 inquiry+page scan 全开（可被发现）
-         * 要重置某台设备的配对，在主机端删除设备即可；本设备不主动清。 */
-        rt_kprintf("[BTSLOT] PAIR mode: open for new device (bond kept, non-destructive)\n");
+        /* ★★ 11-28 恢复"进配对模式清本槽 bond"（用户要求，且必要）：
+         * 换址后旧条目会变成死条目占表位；表只有 3 条，反复重配同一个槽
+         * 会把其它槽的条目挤掉（SDK 按 priority 淘汰最旧）。
+         * 这里主动清掉**本槽记录的那台设备**的 bond，而不是等淘汰。
+         * 用的是官方 API（connection_manager_delete_bond + bt_cm_delete_bonded_devs_and_linkkey），
+         * 不碰协议栈内部结构 —— 之前用 memset 直接写 g_bond_info 那版会让开机必崩。 */
+        /* ★ 11-28：IRK 改为按槽固定后，同槽重新配对会**原地更新**那条 bond，
+         * 不再新增条目 ⇒ 不需要（也不应该）删 bond：
+         * 删除按对端地址做，同一台电脑配了别的槽时会把别人的条目一起删掉。
+         * 这里只打印表快照，便于观察条目是否稳定。 */
+        { extern void bt_dump_bonds(const char *); bt_dump_bonds("PAIR mode entry"); }
+        bt_multi_clear_slot_bond();                    /* 删本槽那台设备的 bond */
+        /* 经典 linkkey 延迟 5s 删（避开 SDP）；只在本槽确有记录时才需要 */
+        if (g_cls_key_del_pending) {
+            if (!g_cls_key_del_timer) {
+                g_cls_key_del_timer = rt_timer_create("clskdel", cls_key_del_cb, RT_NULL,
+                    rt_tick_from_millisecond(5000),
+                    RT_TIMER_FLAG_ONE_SHOT | RT_TIMER_FLAG_SOFT_TIMER);
+            }
+            if (g_cls_key_del_timer) {
+                rt_timer_control(g_cls_key_del_timer, RT_TIMER_CTRL_SET_TIME,
+                                 &(rt_tick_t){rt_tick_from_millisecond(5000)});
+                rt_timer_start(g_cls_key_del_timer);
+            }
+        }
+        { extern void bt_dump_bonds(const char *); bt_dump_bonds("after slot clear"); }
+        /* ★ 自动救援：若表被"同一台设备的多条历史记录"占满（早期版本换址新增条目
+         * 留下的），新配对会直接 120 失败、设备连不上。这种状态一定是坏的，
+         * 直接整体清空，让本次配对能从干净状态开始。 */
+        {
+            extern conn_manager_pair_dev_t g_bond_info;
+            extern void bt_bond_clear_all(void);
+            int n = 0, same = 1;
+            uint8_t first[6]; memset(first, 0, 6);
+            for (int i = 0; i < MAX_PAIR_DEV; i++) {
+                if (!g_bond_info.priority[i]) continue;
+                const uint8_t *a = g_bond_info.peer_addr[i].addr.addr;
+                if (n == 0) memcpy(first, a, 6);
+                else if (memcmp(first, a, 6) != 0) same = 0;
+                n++;
+            }
+            if (n >= MAX_PAIR_DEV && same) {
+                rt_kprintf("[BOND] 表被同一设备占满(%d 条), 自动清空以恢复\n", n);
+                bt_bond_clear_all();
+            }
+        }
     }
 }
 
