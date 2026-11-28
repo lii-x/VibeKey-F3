@@ -670,11 +670,24 @@ static const float ROT_D = g_rot_tbl[MOUSE_ROT_IDX][3];  /* d: rate_y -> sy */
  * 节拍 = max(MOUSE_FLUSH_MS, 当前连接间隔+2ms): 语音期 sco_quiet 把间隔拉到 40~80ms,
  * 若按 10ms 出包会耗尽 8 包 TX 池(每连接事件才归还) → 丢帧卡顿; 自适应间隔后任何
  * 参数状态都不超发不丢帧 (08-26 根治, 取代此前的事件驱动慢节拍). */
-/* ★ 11-13: 10 → 6ms。鼠标走经典 HID（无 BLE 连接间隔约束），
- * 提高出包率可再压 ~4ms 端到端延迟。经典 ACL 的 TX 队列比 BLE 的 8 包池宽松，
- * 单包只有 6 字节，166Hz 出包压力可控；若实测出现"卡顿/丢帧"再退回 8ms。 */
-#define MOUSE_FLUSH_MS_DEFAULT   6        /* 默认发送刷新间隔(ms)；运行时可 flush <ms> 改 */
-static volatile uint16_t g_mouse_flush_ms = MOUSE_FLUSH_MS_DEFAULT;
+/* ★★★ 11-28 实测纠正：6ms(166Hz) 会**灌满经典链路**。
+ * 现象（用户）：手划完光标才跟过来、但最终位置正确 —— 报文排队后补播。
+ * 证据：`[CLS TX] avg=31us`（提交不阻塞）、`rate=17~68/s`；
+ *       用户实测 `flush 13`(77Hz) / `flush 16`(62Hz) 都顺畅，`flush 6` 则延迟。
+ * 结论：经典 ACL 实际能稳定吃下约 70 帧/秒；166 帧/秒多出来的全部堆在协议栈里，
+ *       停手后才慢慢排空 ⇒ "慢半拍"。
+ * 定案：按通道取默认节拍，BLE 保持 10ms（它有 8 包 TX 池，另有约束），
+ *       经典取 14ms(≈71Hz)，留一点余量给突发。`flush <ms>` 仍可现场覆盖，
+ *       `flush 0` 恢复按通道自动。
+ * 备注：更早的注释称"经典 ACL 队列比 BLE 宽松、166Hz 压力可控"，实测不成立。 */
+#define MOUSE_FLUSH_MS_CLASSIC   14       /* 经典 HID + 手机(仅经典)：≈71Hz，实测不积压 */
+#define MOUSE_FLUSH_MS_BLE       10       /* BLE HID：15ms 连接间隔下的稳妥值 */
+/* ★★ 11-28 补：连 PC 时经典链路的吞吐比手机宽裕得多，71Hz 在 Windows 上
+ * 会看出"一小段一小段"（指针按每个报文做位移+加速，帧少就显跳）。
+ * 判据：BLE 也连着 ⇒ 宿主是 PC（PC 基本都走 BLE 回连）⇒ 经典侧放开到 100Hz；
+ * 只有经典 ⇒ 手机 ⇒ 保持 71Hz，避免灌队列。 */
+#define MOUSE_FLUSH_MS_CLASSIC_PC 10      /* 100Hz：PC 端平滑所需 */
+static volatile uint16_t g_mouse_flush_ms = 0;   /* 0 = 按通道自动；>0 = 用户覆盖 */
 static volatile uint32_t g_hid_send_cnt = 0;      /* 累计发送包数(算实测回报率) */
 
 /* ★★★ 11-13 重要：IMU 回调里的诊断打印会**阻塞数据通路**
@@ -1128,7 +1141,20 @@ static void mouse_send_thread(void *param)
          * 80ms 即耗尽 → 每帧等池(≤30ms)超时丢帧 → "语音结束后一卡一卡"。
          * 改为 max(10ms, 间隔ms+2ms): 任何参数状态(语音/过渡/收紧/空闲)都不
          * 超发不丢帧, 不依赖参数协商事件/标志, 自动正确。 */
-        int flush_ms = g_mouse_flush_ms;
+        int flush_ms;
+        if (g_mouse_flush_ms > 0) {
+            flush_ms = g_mouse_flush_ms;             /* 用户 `flush <ms>` 覆盖 */
+        } else {
+            extern uint8_t key_config_hid_transport(void);
+            extern ble_hid_env_t g_hid_env;
+            if (key_config_hid_transport() != KEY_CONFIG_HID_CLASSIC) {
+                flush_ms = MOUSE_FLUSH_MS_BLE;
+            } else if (g_hid_env.is_connected) {
+                flush_ms = MOUSE_FLUSH_MS_CLASSIC_PC;   /* 经典，但宿主是 PC → 100Hz */
+            } else {
+                flush_ms = MOUSE_FLUSH_MS_CLASSIC;      /* 经典，仅手机 → 71Hz */
+            }
+        }
         /* ★ 10-31: 不再跟 BLE 连接间隔挂钩。鼠标报文现在全部走经典 HID
          * （ble_hid_mouse_send 开头就 return 给 classic_hid_send_mouse），
          * BLE 的连接间隔/发送池对它已无约束；继续跟着 BLE interval 走
@@ -3136,6 +3162,8 @@ static int vk_boot_safe_mode_wanted(void)
 
 int main(void)
 {
+    { extern const char *vk_fw_version(void);
+      rt_kprintf("\n[BOOT] ==== VibeKey-F3 firmware %s ====\n", vk_fw_version()); }
     //rt_kprintf("[VibeKey-F3] Version 1.2v!\r\n");
 
     /* 11-13: BT 栈 DEBUG 日志的屏蔽改为**编译期**方案（详见 project/build_sf32lb52-vibekey_hcpu/rtconfig.h）：
@@ -3993,12 +4021,16 @@ int cmd_flush(int argc, char **argv)
 {
     if (argc > 1) {
         int v = atoi(argv[1]);
-        if (v < 2)  v = 2;
+        if (v < 0)  v = 0;
         if (v > 40) v = 40;
-        g_mouse_flush_ms = (uint16_t)v;
+        g_mouse_flush_ms = (uint16_t)v;              /* 0 = 按通道自动 */
     }
-    rt_kprintf("[HID] flush = %d ms (max ~%d Hz)\n",
-               (int)g_mouse_flush_ms, 1000 / (int)g_mouse_flush_ms);
+    if (g_mouse_flush_ms == 0)
+        rt_kprintf("[HID] flush = AUTO (classic %d/PC %d ms, ble %d ms)\n",
+                   MOUSE_FLUSH_MS_CLASSIC, MOUSE_FLUSH_MS_CLASSIC_PC, MOUSE_FLUSH_MS_BLE);
+    else
+        rt_kprintf("[HID] flush = %d ms (max ~%d Hz)\n",
+                   (int)g_mouse_flush_ms, 1000 / (int)g_mouse_flush_ms);
     return 0;
 }
 MSH_CMD_EXPORT_ALIAS(cmd_flush, flush, set HID report interval ms 2~40);
